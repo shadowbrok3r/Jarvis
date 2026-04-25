@@ -1,0 +1,234 @@
+[ironclaw]
+# We HOST the IronClaw-style channel hub. server.mjs, ironclaw-proxy, etc. connect to
+# ws://<this-host>:6121/ws. HTTP POST to http://<this-host>:6121/broadcast to fan-out
+# envelopes from out-of-band publishers (e.g. the ironclaw-proxy pushing chat completions).
+bind_address = "0.0.0.0:6121"
+# Optional shared-secret. Empty = no auth. Peers must send matching
+# module:authenticate { token }. Override with IRONCLAW_TOKEN env.
+auth_token = ""
+module_name = "jarvis-avatar"
+
+[gateway]
+# IronClaw gateway (SSE chat stream + thread CRUD + images).
+# `auth_token` is populated from IRONCLAW_GATEWAY_TOKEN env at startup; leave empty here.
+base_url = "http://192.168.4.8:3000"
+auth_token = ""
+# Deterministic thread to auto-select; created on first run and persisted back here.
+default_thread_id = ""
+request_timeout_ms = 15000
+history_limit = 50
+
+[tts]
+kokoro_url = "http://192.168.4.8:8880"
+voice = "af_heart"
+enabled = true
+
+[avatar]
+model_path = "models/airi.vrm"
+idle_vrma_path = "models/idle_loop.vrma"
+# Nudge the whole rig if your file’s root isn’t near the origin.
+world_position = [0.0, 0.0, 0.0]
+# Uniform scale (1.0 = natural VRM meters). Bump up if the model is tiny relative to the floor.
+uniform_scale = 1.0
+# Snap hips translation back to bind pose on each axis (rest pose, not literal 0 — see avatar plugin).
+lock_root_xz = true
+lock_root_y = true
+# Hard-clamp the VRM root entity's local Y to world_position.y every frame (after AnimationSystems).
+# Catches sliding that comes from something translating the VRM scene root (not the hips bone).
+lock_vrm_root_y = true
+background_color = [0.05, 0.05, 0.08, 1.0]
+window_width = 800
+window_height = 900
+
+[camera]
+# Used until the VRM root is found (see focus_follow_vrm).
+focus = [0.0, 1.0, 0.0]
+initial_radius = 3.0
+# Allow very close zoom (was 0.35 — felt “stuck” far from small / offset models).
+min_radius = 0.05
+max_radius = 150.0
+orbit_sensitivity = 1.0
+pan_sensitivity = 1.0
+zoom_sensitivity = 1.0
+# Orbit around a point slightly above the rig root (adjust per model).
+focus_y_lift = 1.0
+focus_follow_vrm = true
+snap_wait_frames = 10
+# 0 = no smoothing lag (plugin defaults ~0.8 orbit smoothness).
+orbit_smoothness = 0.0
+zoom_smoothness = 0.0
+pan_smoothness = 0.0
+# Near/far clip + FOV for the main Camera3d's perspective projection.
+# near_clip was 0.1 which clipped the VRM's face at close zoom; 0.01 keeps her
+# eyes intact down to a couple cm.
+near_clip = 0.01
+far_clip = 1000.0
+fov_y_radians = 0.7853982
+# After a pan, snap orbit focus back to the VRM the moment the user grabs the
+# orbit button or spins the zoom wheel again. Pan-offset framing is preserved
+# until that next orbit/zoom input.
+recenter_on_orbit_zoom = true
+
+[graphics]
+# 0 = MSAA off (required if you enable SSAO in [graphics.advanced]). 2 / 4 / 8 = multisampling.
+msaa_samples = 4
+# Swapchain vsync / latency: Fifo (default) = traditional VSync, no tearing on most GPUs.
+# Other options: AutoVsync, AutoNoVsync, FifoRelaxed, Mailbox, Immediate — see Bevy PresentMode.
+present_mode = "Fifo"
+hdr = true
+exposure_ev100 = 9.7
+ambient_brightness = 0.04
+ambient_color = [0.55, 0.58, 0.72, 1.0]
+directional_illuminance = 120000.0
+directional_shadows = true
+directional_position = [4.0, 10.0, 6.0]
+directional_look_at = [0.0, 1.0, 0.0]
+show_ground_plane = true
+ground_size = 40.0
+# Near-black floor (linear RGB).
+ground_base_color = [0.02, 0.02, 0.025]
+
+[look_at]
+idle_return_speed = 2.0
+
+[mcp]
+# Exposes the 20 pose / A2F / Kimodo MCP tools over streamable HTTP so IronClaw
+# (or any MCP client) can drive the avatar without touching Bevy directly.
+enabled = true
+bind_address = "0.0.0.0:6123"
+path = "/mcp"
+# Optional bearer token — empty means no auth (LAN-only).
+auth_token = ""
+
+[a2f]
+# NVIDIA Audio2Face-3D Docker endpoint.
+enabled = true
+endpoint = "localhost:52000"
+health_url = "http://localhost:8000/v1/health/ready"
+
+[kimodo]
+# Kimodo runs as an external Python service that connects to our channel hub;
+# we don't need a URL, just timeouts / defaults for generate requests.
+generate_timeout_sec = 180
+default_duration_sec = 3.0
+default_steps = 100
+
+[pose_library]
+# Shared with the Node pose-controller so both can read / write the same files.
+poses_dir = "~/.config/@proj-airi/stage-tamagotchi/plugins/v1/CustomPlugins/poses"
+animations_dir = "~/.config/@proj-airi/stage-tamagotchi/plugins/v1/CustomPlugins/animations"
+
+[graphics.advanced]
+tonemapping = "TonyMcMapface"
+smaa_preset = "Medium"
+fxaa_enabled = false
+auto_exposure = false
+ssao_enabled = false
+ssao_quality = "High"
+# Bevy ScreenSpaceAmbientOcclusion::constant_object_thickness (default 0.25).
+ssao_constant_object_thickness = 0.25
+# Optional: cube stem relative to assets/, e.g. "envmaps/studio". Blank = none.
+environment_map = ""
+# IBL strength in nits (cd/m²); ~8–20 typical. Values >120 are scaled /100 for legacy configs.
+environment_intensity = 12.0
+
+[graphics.advanced.bloom]
+enabled = false
+intensity = 0.15
+low_frequency_boost = 0.7
+high_pass_frequency = 1.0
+threshold = 0.0
+threshold_softness = 0.0
+# "energy_conserving" (default) or "additive"
+composite_mode = "energy_conserving"
+
+[pose_controller]
+idle_enabled = false
+idle_interval_min_sec = 8.0
+idle_interval_max_sec = 18.0
+idle_category = ""
+default_transition_seconds = 0.35
+default_blend_weight = 1.0
+# Off by default so existing scripts that rely on instant-set behaviour don't change.
+blend_transitions_enabled = false
+# Stop every VRMA animation player whenever a manual pose / expression command
+# lands, so the idle animation doesn't overwrite our writes.
+auto_stop_idle_vrma = true
+
+[light_rig]
+enabled = true
+
+[light_rig.key]
+enabled = true
+direction = [-0.6, -1.0, -0.8]
+color = [1.0, 0.96, 0.90]
+illuminance = 9000.0
+# Shadow maps for this light; keep at least one shadowed key for contact shadows.
+shadows = true
+
+[light_rig.fill]
+enabled = true
+direction = [0.8, -0.4, -0.6]
+color = [0.75, 0.85, 1.0]
+illuminance = 3500.0
+shadows = false
+
+[light_rig.rim]
+enabled = true
+direction = [0.2, -0.2, 1.0]
+color = [1.0, 0.9, 0.8]
+illuminance = 5000.0
+shadows = false
+
+[mtoon_overrides]
+path = "config/mtoon_overrides.json"
+
+[ui]
+show_chat = true
+show_avatar = false
+show_camera = false
+show_graphics = false
+show_live_test = false
+show_channel_hub = false
+show_gateway = false
+show_tts = false
+show_look_at = false
+show_mcp = false
+show_pose_controller = true
+show_rig_editor = false
+show_graphics_advanced = false
+show_services = true
+show_anim_layers = false
+show_emotion_mappings = false
+show_home_assistant = false
+show_network_trace = false
+
+[home_assistant]
+ha_url = ""
+ha_token = ""
+# Optional: `http://host:8767` — same /ha-proxy contract as ha-voice-bridge (Airi). Empty = direct HA.
+bridge_url = ""
+default_area = ""
+presence_timeout_ms = 60000
+enabled_camera_ids = []
+enabled_mic_ids = []
+enabled_speaker_ids = []
+detection_sensor_ids = []
+# Poll the first enabled detection sensor and map person/face bbox → VRM look-at (see ha-voice-bridge DETECTION_ENTITY).
+vision_gaze_enabled = false
+vision_gaze_poll_ms = 150
+vision_gaze_depth = 2.0
+vision_gaze_image_width = 640.0
+vision_gaze_image_height = 480.0
+# Bbox corners 0–1 are treated as normalized (not divided by width/height). Pixel bboxes use the sizes above.
+vision_gaze_flip_horizontal = false
+vision_gaze_smooth_tau_sec = 0.18
+# <1.0 if eyes only go full L/R: VRM eye range maps cap yaw; scale horizontal target (see HA UI).
+vision_gaze_horizontal_sensitivity = 0.22
+# Optional: nx at left, center, right in frame (set via Vision UI). Uncomment to commit:
+# vision_gaze_cal_nx_left = 0.17
+# vision_gaze_cal_nx_center = 0.5
+# vision_gaze_cal_nx_right = 0.84
+vision_gaze_offset_x = 0.0
+vision_gaze_offset_y = 0.0
+vision_gaze_offset_z = 0.0

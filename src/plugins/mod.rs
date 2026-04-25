@@ -1,0 +1,33 @@
+//! Bevy plugins (binary crate).
+
+pub mod avatar;
+pub mod debug_ui;
+pub mod environment;
+pub mod expressions;
+pub mod orbit_camera;
+pub mod look_at;
+mod vrm_eye_debug;
+pub use vrm_eye_debug::VrmEyeLookatDebug;
+pub mod spring_bone;
+pub mod channel_server;
+pub mod ironclaw_chat;
+pub mod pose_driver;
+pub mod rig_editor;
+pub mod pose_library_assets;
+pub mod hub_pose_apply;
+pub mod native_anim_player;
+pub mod anim_layer_sets;
+pub mod anim_layers;
+pub mod emotion_map;
+pub mod home_assistant;
+pub mod home_assistant_events;
+pub mod home_assistant_routing;
+pub mod ha_vision_gaze;
+pub mod light_rig;
+pub mod graphics_advanced;
+pub mod mtoon_overrides;
+pub mod idle_tick;
+pub mod service_status;
+pub mod shared_runtime;
+pub mod traffic_log;
+pub mod tts;

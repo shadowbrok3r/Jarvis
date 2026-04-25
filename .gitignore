@@ -1,0 +1,9 @@
+/target
+.env
+**/*.rs.bk
+*.vrm
+*.json
+/assets/poses/
+/assets/animations/
+/config/user.toml
+/vendor/

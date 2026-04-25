@@ -1,0 +1,171 @@
+%% jarvis-avatar — runtime architecture
+%% Groups the project by "where the code actually runs":
+%%   1. External systems            (blue)
+%%   2. Tokio-side worker threads   (orange)  — own network sockets, never touch ECS
+%%   3. Cross-runtime bridges       (yellow)  — channels + Arc<RwLock<_>> shared both sides
+%%   4. Bevy plugins                (purple)  — systems scheduled on the main thread
+%%   5. ECS world state             (green)   — resources, messages, entities
+flowchart LR
+
+  %% ───────────────────────── EXTERNAL ─────────────────────────
+  subgraph EXT["External world (network)"]
+    direction TB
+    WS_PEERS["WS peers<br/>server.mjs · ironclaw-proxy<br/><i>module:authenticate / announce</i>"]
+    GW["IronClaw Gateway<br/><i>HTTP + SSE /api/chat/events</i>"]
+    KOKORO["Kokoro TTS<br/><i>HTTP → WAV bytes</i>"]
+    A2F_SVC["NVIDIA A2F<br/><i>gRPC (tonic)</i>"]
+    KIMODO_SVC["Kimodo motion-gen<br/><i>via WS envelopes</i>"]
+    MCP_CLIENTS["MCP clients<br/><i>streamable-HTTP</i>"]
+  end
+
+  %% ───────────────────────── TOKIO THREADS ─────────────────────────
+  subgraph TOKIO["Tokio runtimes (dedicated OS threads)"]
+    direction TB
+    HUB_THREAD["<b>jarvis-hub</b><br/>axum Router<br/>/ws · /broadcast · /health<br/><i>channel_server.rs</i>"]
+    MCP_THREAD["<b>jarvis-mcp</b><br/>axum + rmcp StreamableHttpService<br/><i>mcp/plugin.rs</i>"]
+    GW_THREAD["<b>gateway thread</b><br/>reqwest + EventSource<br/><i>ironclaw_chat.rs</i>"]
+    TTS_THREAD["<b>jarvis-tts</b><br/>reqwest → WAV<br/><i>tts.rs</i>"]
+  end
+
+  %% ───────────────────────── BRIDGES ─────────────────────────
+  subgraph BRIDGE["Cross-runtime bridges (resources held on both sides)"]
+    direction TB
+    HUB_BC["<b>HubBroadcast</b><br/>crossbeam Sender&lt;OutboundFrame&gt;<br/>+ tokio broadcast::Sender"]
+    HUB_IN["<b>HubInbound</b><br/>crossbeam Receiver&lt;Inbound&gt;"]
+    POSE_TX["<b>PoseCommandSender</b><br/>crossbeam Sender&lt;PoseCommand&gt;"]
+    POSE_RX["<b>PoseCommandQueue</b><br/>crossbeam Receiver&lt;PoseCommand&gt;"]
+    BONE_SNAP["<b>BoneSnapshotHandle</b><br/>Arc&lt;RwLock&lt;BoneSnapshot&gt;&gt;"]
+    TTS_BRIDGE["<b>TtsBridge</b><br/>req Sender + ready Receiver"]
+    GW_BRIDGE["<b>Gateway bridge</b><br/>ChatCommand tx + AppEvent rx"]
+  end
+
+  %% ───────────────────────── BEVY PLUGINS ─────────────────────────
+  subgraph BEVY["Bevy App (main thread, frame loop)"]
+    direction TB
+
+    subgraph CORE["Core / framework plugins"]
+      DEFAULTS["DefaultPlugins<br/><i>windowing, render, input, assets, audio</i>"]
+      VRM["VrmPlugin + VrmaPlugin<br/><i>bevy_vrm1: loads .vrm / .vrma</i>"]
+    end
+
+    subgraph SCENE["Scene / rendering"]
+      ENV["<b>EnvironmentPlugin</b><br/>ambient + sun + ground<br/><i>environment.rs</i>"]
+      AVATAR["<b>AvatarPlugin</b><br/>spawn VRM · clamp hips/root Y<br/><i>avatar.rs</i>"]
+      ORBIT["<b>OrbitCameraPlugin</b><br/>PanOrbitCamera · follows VRM<br/><i>orbit_camera.rs</i>"]
+      DEBUG["<b>DebugUiPlugin</b><br/>bevy_egui windows<br/><i>debug_ui/*</i>"]
+    end
+
+    subgraph HUB_P["Network plugins"]
+      CHANNEL["<b>ChannelHubPlugin</b><br/>owns jarvis-hub thread<br/>pump_hub_into_bevy (Update)"]
+      CHAT["<b>IronclawChatPlugin</b><br/>owns gateway thread<br/>pump_gateway_into_bevy"]
+      MCP_P["<b>McpPlugin</b> (PostStartup)<br/>owns jarvis-mcp thread<br/><i>mcp/plugin.rs</i>"]
+    end
+
+    subgraph RIG["Avatar behaviour"]
+      EXPR["<b>ExpressionsPlugin</b><br/>ACT tokens → SetExpressions<br/><i>expressions.rs</i>"]
+      LOOK["<b>LookAtPlugin</b><br/>gaze target entity<br/><i>look_at.rs</i>"]
+      SPRING["<b>SpringBonePlugin</b><br/><i>stub — tuning hooks only</i>"]
+      POSE["<b>PoseDriverPlugin</b><br/>apply_pose_commands (PostUpdate)<br/>publish_bone_snapshot"]
+      TTS_P["<b>TtsPlugin</b><br/>dispatch → WAV → AudioPlayer<br/><i>tts.rs</i>"]
+    end
+  end
+
+  %% ───────────────────────── ECS STATE ─────────────────────────
+  subgraph ECS["ECS world (entities · resources · messages)"]
+    direction TB
+    SETTINGS[["Settings<br/><i>config/default.toml</i>"]]
+    VRM_ENTITY["VRM entity<br/>Transform + VrmHandle +<br/>Hips marker + LookAt"]
+    TARGET_ENTITY["LookAtTarget entity<br/>(child of VRM root)"]
+    CAMERA_ENTITY["Camera3d + PanOrbitCamera"]
+    MSG_CHAT(["ChatCompleteMessage"])
+    MSG_LOOK(["LookAtRequestMessage"])
+    MSG_TTS(["TtsSpeakMessage"])
+    MSG_INPUT(["HubInputTextMessage"])
+    MSG_RAW(["WsIncomingMessage"])
+    MSG_ASSISTANT(["AssistantDeltaMessage · ThinkingStateMessage · ToolEventMessage · HistoryMessage · ChatStatusMessage"])
+    HUB_STATE[["HubState · ChatState · AvatarDebugStats"]]
+  end
+
+  %% ───────────────────────── NETWORK EDGES ─────────────────────────
+  WS_PEERS <-->|"raw {type,data,metadata}<br/>JSON envelopes"| HUB_THREAD
+  HUB_THREAD <-->|"HTTP POST /broadcast"| WS_PEERS
+  GW <-->|"SSE AppEvent stream<br/>+ REST send/threads"| GW_THREAD
+  KOKORO <-->|"POST text → WAV"| TTS_THREAD
+  A2F_SVC <-->|"gRPC"| MCP_THREAD
+  MCP_CLIENTS <-->|"streamable-HTTP /mcp<br/>Bearer token"| MCP_THREAD
+  MCP_THREAD -.->|"kimodo envelopes<br/>out through HubBroadcast"| HUB_THREAD
+  HUB_THREAD -.->|"kimodo replies<br/>via tokio broadcast"| MCP_THREAD
+
+  %% ───────────────────────── TOKIO ↔ BRIDGE ─────────────────────────
+  HUB_THREAD --> HUB_IN
+  HUB_BC --> HUB_THREAD
+  MCP_THREAD --> POSE_TX
+  MCP_THREAD --> HUB_BC
+  BONE_SNAP <--> MCP_THREAD
+  GW_THREAD --> GW_BRIDGE
+  GW_BRIDGE --> GW_THREAD
+  TTS_THREAD --> TTS_BRIDGE
+  TTS_BRIDGE --> TTS_THREAD
+
+  %% ───────────────────────── BRIDGE ↔ BEVY PLUGINS ─────────────────────────
+  HUB_IN --> CHANNEL
+  CHANNEL --> HUB_BC
+  POSE_RX --> POSE
+  POSE --> BONE_SNAP
+  POSE_TX -.owned by.-> POSE
+  GW_BRIDGE --> CHAT
+  CHAT --> GW_BRIDGE
+  TTS_BRIDGE --> TTS_P
+  TTS_P --> TTS_BRIDGE
+  CHANNEL -.PostStartup contract.-> MCP_P
+  POSE -.PostStartup contract.-> MCP_P
+
+  %% ───────────────────────── BEVY INTERNAL (messages) ─────────────────────────
+  CHANNEL -- writes --> MSG_CHAT
+  CHANNEL -- writes --> MSG_LOOK
+  CHANNEL -- writes --> MSG_TTS
+  CHANNEL -- writes --> MSG_INPUT
+  CHANNEL -- writes --> MSG_RAW
+  CHAT -- writes --> MSG_ASSISTANT
+  CHAT -- writes --> MSG_CHAT
+  CHAT -- writes --> MSG_TTS
+  MSG_INPUT --> CHAT
+  MSG_CHAT --> EXPR
+  MSG_LOOK --> LOOK
+  MSG_TTS --> TTS_P
+  MSG_RAW --> DEBUG
+  MSG_ASSISTANT --> DEBUG
+
+  %% ───────────────────────── BEVY ↔ ECS (entities / resources) ─────────────────────────
+  SETTINGS --> AVATAR
+  SETTINGS --> ORBIT
+  SETTINGS --> ENV
+  SETTINGS --> CHANNEL
+  SETTINGS --> CHAT
+  SETTINGS --> MCP_P
+  SETTINGS --> POSE
+  AVATAR -- spawn --> VRM_ENTITY
+  VRM -- loads --> VRM_ENTITY
+  ORBIT -- spawn --> CAMERA_ENTITY
+  ORBIT -- follow --> VRM_ENTITY
+  LOOK -- spawn / parent --> TARGET_ENTITY
+  TARGET_ENTITY -. ChildOf .-> VRM_ENTITY
+  EXPR -- trigger SetExpressions --> VRM_ENTITY
+  POSE -- write Transform + trigger --> VRM_ENTITY
+  CHANNEL --> HUB_STATE
+  CHAT --> HUB_STATE
+  AVATAR --> HUB_STATE
+  DEBUG --> HUB_STATE
+
+  %% ───────────────────────── STYLING ─────────────────────────
+  classDef ext fill:#1e3a5f,stroke:#6ea8ff,color:#e6f0ff;
+  classDef tokio fill:#5a3d1a,stroke:#ffb366,color:#fff1e0;
+  classDef bridge fill:#5a4a1a,stroke:#ffd966,color:#fff8dc;
+  classDef bevy fill:#3d2a5c,stroke:#c29cff,color:#f3e9ff;
+  classDef ecs fill:#1f4a32,stroke:#7bd8a0,color:#e6fff0;
+
+  class WS_PEERS,GW,KOKORO,A2F_SVC,KIMODO_SVC,MCP_CLIENTS ext;
+  class HUB_THREAD,MCP_THREAD,GW_THREAD,TTS_THREAD tokio;
+  class HUB_BC,HUB_IN,POSE_TX,POSE_RX,BONE_SNAP,TTS_BRIDGE,GW_BRIDGE bridge;
+  class DEFAULTS,VRM,ENV,AVATAR,ORBIT,DEBUG,CHANNEL,CHAT,MCP_P,EXPR,LOOK,SPRING,POSE,TTS_P bevy;
+  class SETTINGS,VRM_ENTITY,TARGET_ENTITY,CAMERA_ENTITY,MSG_CHAT,MSG_LOOK,MSG_TTS,MSG_INPUT,MSG_RAW,MSG_ASSISTANT,HUB_STATE ecs;
