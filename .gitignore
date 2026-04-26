@@ -6,4 +6,7 @@
 /assets/poses/
 /assets/animations/
 /config/user.toml
+/assets/pose_captures/
 /vendor/
+.pose_captures
+artifacts/

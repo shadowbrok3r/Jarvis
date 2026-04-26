@@ -162,6 +162,78 @@ Weights are 0..1; natural range is often about 0.2–0.6.
 1. `reset_pose` or `apply_pose` for a baseline.
 2. `make_fist` with a small `amount` if you only need believable hands.
 3. `pose_bones` for body — a few degrees per bone, then read **warnings**.
-4. `get_current_bone_state` if you must switch to quaternion tools.
-5. `adjust_bone` for tiny corrections (degrees).
-6. `create_pose` to persist.
+4. `capture_pose_views` with a deterministic `capture_id` and either `framing_preset: "full_body"` or `framing_preset: "face_closeup"`.
+5. `adjust_bone` / `set_expression` for tiny corrections.
+6. Re-capture and compare against the previous pass.
+7. `get_current_bone_state` if you must switch to quaternion tools.
+8. `create_pose` to persist.
+
+## Visual verification loop (recommended)
+
+1. Apply a coarse body pose with `pose_bones` (and `make_fist` if needed).
+2. Capture validation images with `capture_pose_views`:
+   - `output_dir` required.
+   - Use explicit `views`: `["front","left","right","front_left","front_right"]`.
+   - Use higher resolution while tuning (for example `width=1536`, `height=1536`).
+   - Use a deterministic `capture_id` so files are easy to diff across passes.
+   - `framing_preset: "full_body"` pulls camera framing back so lower legs + heels stay visible.
+   - `framing_preset: "face_closeup"` focuses on head/face for expression QA.
+   - Optional `camera_overrides` (`focus_y_offset`, `radius`, `height_lift`) let you fine-tune framing without changing view lists.
+3. Inspect all requested views, then run only minimal `adjust_bone` changes (about ±2° to ±8° per call) or small `set_expression` changes (about ±0.05 to ±0.15).
+4. Re-capture and stop when the change is clearly better; if a pass regresses silhouette, facial readability, or comfort, revert direction and reduce deltas.
+
+`capture_pose_views` output is a deterministic list of generated PNG paths per requested view (filename pattern: `<capture_id>_<view>_<WxH>.png`) plus an `errors` array.
+
+### Full-body pose verification loop
+
+Use this while tuning body balance, heel contact, head tilt, and wave silhouettes:
+
+```json
+{
+  "output_dir": "~/Desktop/JarvisAvatar/pose_captures",
+  "capture_id": "idle_wave_pass03",
+  "views": ["front", "left", "right", "front_left", "front_right"],
+  "framing_preset": "full_body",
+  "width": 1536,
+  "height": 1536
+}
+```
+
+### Facial expression verification loop
+
+Use this while dialing eyes, brows, mouth, and expression blend:
+
+```json
+{
+  "output_dir": "~/Desktop/JarvisAvatar/pose_captures",
+  "capture_id": "smile_mix_pass07",
+  "views": ["front", "front_left", "front_right"],
+  "framing_preset": "face_closeup",
+  "camera_overrides": {
+    "focus_y_offset": 1.62,
+    "radius": 0.68,
+    "height_lift": 0.05
+  },
+  "width": 1280,
+  "height": 1280
+}
+```
+
+### Apply -> capture -> adjust (repeat)
+
+1. **Apply**: `pose_bones` / `set_expression` / `make_fist`.
+2. **Capture**: `capture_pose_views` with deterministic `capture_id` (`..._pass01`, `..._pass02`, ...).
+3. **Adjust**: small deltas only; one intent per pass (for example, heel contact or smile intensity).
+4. Repeat until front + side + 3/4 views all read correctly.
+
+## Seated pose tuning notes (this rig)
+
+- **Backward knees:** if lower legs appear to fold the wrong way, flip `*LowerLeg.pitch_deg` sign first, then retune `*UpperLeg.pitch_deg`. On this rig, knee flex often reads best with negative lower-leg pitch during seated refinement.
+- **Elbows to knees (priority order):**
+  1. Place torso lean (`spine` → `chest` → `upperChest`).
+  2. Move `*UpperArm` to set elbow position near the thigh line.
+  3. Flex `*LowerArm` last to rest forearm/hand onto the knee zone.
+  Keep per-pass elbow changes small; large forearm deltas clamp quickly.
+- **Feet / heel contact:** tune `*LowerLeg` before `*Foot`. Use `*Foot.pitch_deg` to seat heel contact and `*Foot.yaw_deg` for slight outward toe angle. Use small opposite left/right yaw signs for symmetry.
+- **Safe step sizes:** start around ±3° to ±5° for torso/upper limbs and ±2° to ±4° for wrists/feet; only push toward ±8° when a view confirms the previous delta was too small.
+- **Bone-name casing:** always use canonical names from `get_bone_reference` (for example `leftLowerLeg`, not lowercase aliases) before bulk edits.

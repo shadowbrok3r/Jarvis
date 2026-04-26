@@ -75,6 +75,20 @@ impl CaptureView {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureFramingPreset {
+    FullBody,
+    FaceCloseup,
+}
+
+#[derive(Debug, Clone)]
+pub struct CaptureCameraOverrides {
+    pub focus_y_offset: Option<f32>,
+    pub radius: Option<f32>,
+    pub height_lift: Option<f32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptureRequest {
     pub output_dir: PathBuf,
@@ -82,6 +96,8 @@ pub struct CaptureRequest {
     pub width: u32,
     pub height: u32,
     pub views: Vec<CaptureView>,
+    pub framing_preset: Option<CaptureFramingPreset>,
+    pub camera_overrides: Option<CaptureCameraOverrides>,
     pub response_tx: Sender<CaptureResult>,
 }
 
@@ -97,6 +113,7 @@ pub struct CaptureResult {
     pub output_dir: String,
     pub width: u32,
     pub height: u32,
+    pub framing_preset: Option<CaptureFramingPreset>,
     pub images: Vec<CaptureImage>,
     pub errors: Vec<String>,
 }
@@ -138,6 +155,54 @@ struct CaptureViewResult {
     view: CaptureView,
     path: PathBuf,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CaptureCameraProfile {
+    focus_y_offset: f32,
+    radius: f32,
+    height_lift: f32,
+}
+
+impl CaptureCameraProfile {
+    fn default_profile() -> Self {
+        Self {
+            focus_y_offset: 1.35,
+            radius: 1.75,
+            height_lift: 0.15,
+        }
+    }
+
+    fn from_preset(preset: CaptureFramingPreset) -> Self {
+        match preset {
+            // Pull camera back and lower focus so heels/lower legs stay in frame.
+            CaptureFramingPreset::FullBody => Self {
+                focus_y_offset: 0.95,
+                radius: 2.35,
+                height_lift: 0.12,
+            },
+            // Tight framing around face/head for expression QA.
+            CaptureFramingPreset::FaceCloseup => Self {
+                focus_y_offset: 1.58,
+                radius: 0.72,
+                height_lift: 0.03,
+            },
+        }
+    }
+
+    fn with_overrides(self, overrides: &CaptureCameraOverrides) -> Self {
+        Self {
+            focus_y_offset: overrides
+                .focus_y_offset
+                .unwrap_or(self.focus_y_offset)
+                .clamp(0.2, 3.0),
+            radius: overrides.radius.unwrap_or(self.radius).clamp(0.3, 8.0),
+            height_lift: overrides
+                .height_lift
+                .unwrap_or(self.height_lift)
+                .clamp(-1.0, 2.0),
+        }
+    }
 }
 
 fn sync_avatar_capture_layers(
@@ -196,6 +261,7 @@ fn drain_capture_requests(
                 output_dir: req.output_dir.display().to_string(),
                 width: req.width,
                 height: req.height,
+                framing_preset: req.framing_preset,
                 images: Vec::new(),
                 errors: vec!["at least one view is required".to_string()],
             });
@@ -207,6 +273,7 @@ fn drain_capture_requests(
                 output_dir: req.output_dir.display().to_string(),
                 width: req.width,
                 height: req.height,
+                framing_preset: req.framing_preset,
                 images: Vec::new(),
                 errors: vec![format!("create_dir_all failed: {err}")],
             });
@@ -218,14 +285,23 @@ fn drain_capture_requests(
                 output_dir: req.output_dir.display().to_string(),
                 width: req.width,
                 height: req.height,
+                framing_preset: req.framing_preset,
                 images: Vec::new(),
                 errors: vec!["avatar root not ready".to_string()],
             });
             continue;
         };
-        let focus = vrm_tf.translation() + Vec3::Y * 1.35;
-        let radius = 1.75;
-        let height_lift = 0.15;
+        let mut camera_profile = req
+            .framing_preset
+            .map(CaptureCameraProfile::from_preset)
+            .unwrap_or_else(CaptureCameraProfile::default_profile);
+        if let Some(overrides) = &req.camera_overrides {
+            camera_profile = camera_profile.with_overrides(overrides);
+        }
+
+        let focus = vrm_tf.translation() + Vec3::Y * camera_profile.focus_y_offset;
+        let radius = camera_profile.radius;
+        let height_lift = camera_profile.height_lift;
         let session_id = sessions.next_id;
         sessions.next_id = sessions.next_id.saturating_add(1);
         let mut camera_entities = Vec::with_capacity(req.views.len());
@@ -318,6 +394,7 @@ fn process_capture_view_results(
                 output_dir: session.request.output_dir.display().to_string(),
                 width: session.request.width,
                 height: session.request.height,
+                framing_preset: session.request.framing_preset,
                 images: session.images.clone(),
                 errors: session.errors.clone(),
             };

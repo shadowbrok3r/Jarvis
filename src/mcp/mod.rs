@@ -41,7 +41,8 @@ use pose_authoring::{
 };
 use crate::plugins::channel_server::HubBroadcast;
 use crate::plugins::pose_capture::{
-    CaptureCommandSender, CaptureRequest, CaptureResult, CaptureView,
+    CaptureCameraOverrides, CaptureCommandSender, CaptureFramingPreset, CaptureRequest,
+    CaptureResult, CaptureView,
 };
 use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
 use crate::plugins::pose_driver::{
@@ -139,6 +140,19 @@ fn default_capture_views() -> Vec<String> {
 
 fn default_capture_timeout_ms() -> u64 {
     10_000
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CaptureCameraOverridesArgs {
+    /// Vertical focus offset from avatar root in meters. Typical 0.9..1.7.
+    #[serde(default)]
+    pub focus_y_offset: Option<f32>,
+    /// Camera distance from focus point in meters.
+    #[serde(default)]
+    pub radius: Option<f32>,
+    /// Extra camera Y lift in meters after directional offset.
+    #[serde(default)]
+    pub height_lift: Option<f32>,
 }
 
 // ---------- tool parameter types ---------------------------------------------
@@ -293,6 +307,12 @@ pub struct CapturePoseViewsArgs {
     /// Views to capture. Allowed: front, left, right, front_left, front_right.
     #[serde(default = "default_capture_views")]
     pub views: Vec<String>,
+    /// Optional framing preset. Allowed: full_body, face_closeup.
+    #[serde(default)]
+    pub framing_preset: Option<String>,
+    /// Optional camera overrides (meters). Values are clamped to safe ranges.
+    #[serde(default)]
+    pub camera_overrides: Option<CaptureCameraOverridesArgs>,
     /// PNG width in pixels.
     #[serde(default = "default_capture_width")]
     pub width: u32,
@@ -357,6 +377,41 @@ fn parse_capture_view(raw: &str) -> Option<CaptureView> {
         "front_right" | "front-right" | "three_quarter_right" => Some(CaptureView::FrontRight),
         _ => None,
     }
+}
+
+fn parse_capture_framing_preset(raw: &str) -> Option<CaptureFramingPreset> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "full_body" | "full-body" => Some(CaptureFramingPreset::FullBody),
+        "face_closeup" | "face-closeup" | "face" => Some(CaptureFramingPreset::FaceCloseup),
+        _ => None,
+    }
+}
+
+fn camera_overrides_from_args(
+    args: Option<CaptureCameraOverridesArgs>,
+) -> Result<Option<CaptureCameraOverrides>, String> {
+    let Some(raw) = args else {
+        return Ok(None);
+    };
+
+    let values = [
+        ("focus_y_offset", raw.focus_y_offset),
+        ("radius", raw.radius),
+        ("height_lift", raw.height_lift),
+    ];
+    for (name, v) in values {
+        if let Some(x) = v {
+            if !x.is_finite() {
+                return Err(format!("camera_overrides.{name} must be a finite number"));
+            }
+        }
+    }
+
+    Ok(Some(CaptureCameraOverrides {
+        focus_y_offset: raw.focus_y_offset,
+        radius: raw.radius,
+        height_lift: raw.height_lift,
+    }))
 }
 
 // ---------- tool handlers ----------------------------------------------------
@@ -596,7 +651,7 @@ impl JarvisMcpServer {
         ok_json(&snap.bones)
     }
 
-    #[tool(description = "Capture transparent PNGs of only the avatar from multiple fixed views. Useful for post-pose visual verification by agents.")]
+    #[tool(description = "Capture transparent PNGs of only the avatar from multiple fixed views. Supports full-body and face close-up framing presets plus optional camera overrides for iterative QA loops.")]
     async fn capture_pose_views(
         &self,
         Parameters(args): Parameters<CapturePoseViewsArgs>,
@@ -604,6 +659,21 @@ impl JarvisMcpServer {
         let width = args.width.clamp(64, 4096);
         let height = args.height.clamp(64, 4096);
         let timeout = Duration::from_millis(args.timeout_ms.clamp(500, 60_000));
+        let framing_preset = match args.framing_preset {
+            Some(raw) => match parse_capture_framing_preset(&raw) {
+                Some(v) => Some(v),
+                None => {
+                    return err_text(
+                        "unknown framing_preset. allowed: full_body,face_closeup".to_string(),
+                    )
+                }
+            },
+            None => None,
+        };
+        let camera_overrides = match camera_overrides_from_args(args.camera_overrides) {
+            Ok(v) => v,
+            Err(e) => return err_text(e),
+        };
 
         let mut views = Vec::with_capacity(args.views.len());
         let mut unknown = Vec::new();
@@ -632,6 +702,8 @@ impl JarvisMcpServer {
             width,
             height,
             views,
+            framing_preset,
+            camera_overrides,
             response_tx: tx,
         };
         if let Err(e) = self.capture_tx.0.send(req) {
@@ -893,4 +965,42 @@ pub fn build_a2f_client(
         endpoint: endpoint.into(),
         health_url: health_url.into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        camera_overrides_from_args, parse_capture_framing_preset, CaptureCameraOverridesArgs,
+    };
+
+    #[test]
+    fn parse_capture_framing_preset_accepts_known_aliases() {
+        assert!(parse_capture_framing_preset("full_body").is_some());
+        assert!(parse_capture_framing_preset("full-body").is_some());
+        assert!(parse_capture_framing_preset("face_closeup").is_some());
+        assert!(parse_capture_framing_preset("face").is_some());
+        assert!(parse_capture_framing_preset("unknown").is_none());
+    }
+
+    #[test]
+    fn camera_overrides_reject_non_finite_values() {
+        let bad = CaptureCameraOverridesArgs {
+            focus_y_offset: Some(f32::NAN),
+            radius: None,
+            height_lift: None,
+        };
+        let err = camera_overrides_from_args(Some(bad)).unwrap_err();
+        assert!(err.contains("camera_overrides.focus_y_offset"));
+    }
+
+    #[test]
+    fn camera_overrides_allow_valid_values() {
+        let good = CaptureCameraOverridesArgs {
+            focus_y_offset: Some(1.2),
+            radius: Some(1.8),
+            height_lift: Some(0.1),
+        };
+        let parsed = camera_overrides_from_args(Some(good)).expect("valid overrides");
+        assert!(parsed.is_some());
+    }
 }
