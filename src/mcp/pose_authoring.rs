@@ -21,8 +21,17 @@ pub fn max_xyz_component_for_bone(bone: &str) -> f32 {
         0.75
     } else if is_finger_bone(bone) {
         0.72
-    } else if bone.ends_with("Hand") || bone.ends_with("Foot") || bone.ends_with("Toes") {
-        0.22
+    } else if bone == "hips" {
+        // Deep sit / fold needs larger xyz before sanitize scales toward identity.
+        0.72
+    } else if bone.ends_with("UpperLeg") || bone.ends_with("LowerLeg") {
+        0.68
+    } else if bone.ends_with("UpperArm") || bone.ends_with("LowerArm") {
+        0.68
+    } else if bone.ends_with("Foot") {
+        0.65
+    } else if bone.ends_with("Hand") || bone.ends_with("Toes") {
+        0.28
     } else if bone.contains("Shoulder") {
         0.12
     } else {
@@ -54,16 +63,18 @@ pub fn euler_limit_deg(bone: &str) -> (f32, f32, f32) {
         return (18.0, 18.0, 86.0);
     }
     match bone {
-        "neck" | "head" => (38.0, 48.0, 38.0),
-        n if n.contains("Spine") || n == "chest" || n == "upperChest" || n == "hips" => {
-            (32.0, 40.0, 32.0)
+        "hips" => (88.0, 62.0, 60.0),
+        "neck" | "head" => (48.0, 58.0, 44.0),
+        n if n == "spine" || n.contains("Spine") || n == "chest" || n == "upperChest" => {
+            (58.0, 48.0, 44.0)
         }
-        n if n.ends_with("UpperArm") => (72.0, 72.0, 55.0),
-        n if n.ends_with("LowerArm") => (95.0, 48.0, 48.0),
-        n if n.ends_with("Hand") => (38.0, 38.0, 38.0),
-        n if n.ends_with("UpperLeg") => (55.0, 45.0, 45.0),
-        n if n.ends_with("LowerLeg") => (105.0, 30.0, 30.0),
-        n if n.ends_with("Foot") || n.ends_with("Toes") => (32.0, 32.0, 32.0),
+        n if n.ends_with("UpperArm") => (90.0, 80.0, 62.0),
+        n if n.ends_with("LowerArm") => (110.0, 58.0, 55.0),
+        n if n.ends_with("Hand") => (48.0, 48.0, 48.0),
+        n if n.ends_with("UpperLeg") => (78.0, 58.0, 55.0),
+        n if n.ends_with("LowerLeg") => (125.0, 48.0, 48.0),
+        n if n.ends_with("Foot") => (58.0, 48.0, 48.0),
+        n if n.ends_with("Toes") => (42.0, 28.0, 28.0),
         _ => (48.0, 48.0, 48.0),
     }
 }

@@ -418,7 +418,10 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AvatarSettings {
     pub model_path: String,
-    /// Default idle loop relative to `assets/` (e.g. `models/idle_loop.vrma`).
+    /// Default idle loop relative to `assets/` (e.g. `models/idle_loop.vrma`). Empty string
+    /// disables autoplay. Arm/elbow twist while a clip runs but not at bind pose is governed by
+    /// `bevy_vrm1` VRMA humanoid retarget (see VRMC_vrm_animation pose transform), not by
+    /// `lock_root_*` / `lock_vrm_root_y`.
     pub idle_vrma_path: String,
     /// World translation for the VRM root entity (pulls the rig toward the orbit focus).
     pub world_position: [f32; 3],

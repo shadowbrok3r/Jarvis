@@ -33,6 +33,7 @@ use jarvis_avatar::pose_library::PoseLibrary;
 
 use super::{build_a2f_client, JarvisMcpServer, KimodoDefaults};
 use crate::plugins::channel_server::HubBroadcast;
+use crate::plugins::pose_capture::CaptureCommandSender;
 use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommandSender, PoseDriverPlugin};
 use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
 
@@ -53,6 +54,7 @@ fn start_mcp_server(
     settings: Res<Settings>,
     hub: Option<Res<HubBroadcast>>,
     pose_tx: Option<Res<PoseCommandSender>>,
+    capture_tx: Option<Res<CaptureCommandSender>>,
     snapshot: Option<Res<BoneSnapshotHandle>>,
     traffic: Option<Res<TrafficLogSink>>,
 ) {
@@ -71,6 +73,10 @@ fn start_mcp_server(
     };
     let Some(snapshot) = snapshot else {
         error!("mcp: BoneSnapshotHandle missing — PoseDriverPlugin must be loaded first");
+        return;
+    };
+    let Some(capture_tx) = capture_tx else {
+        error!("mcp: CaptureCommandSender missing — PoseCapturePlugin must be loaded first");
         return;
     };
 
@@ -96,6 +102,7 @@ fn start_mcp_server(
 
     let hub_val = hub.clone();
     let pose_tx_val = pose_tx.clone();
+    let capture_tx_val = capture_tx.clone();
     let snapshot_val = snapshot.clone();
     let traffic = traffic.map(|t| (*t).clone());
 
@@ -119,6 +126,7 @@ fn start_mcp_server(
                 auth_token,
                 JarvisMcpServer::new(
                     pose_tx_val,
+                    capture_tx_val,
                     snapshot_val,
                     hub_val,
                     a2f,

@@ -12,6 +12,7 @@ pub mod spring_bone;
 pub mod channel_server;
 pub mod ironclaw_chat;
 pub mod pose_driver;
+pub mod pose_capture;
 pub mod rig_editor;
 pub mod pose_library_assets;
 pub mod hub_pose_apply;

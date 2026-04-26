@@ -1,4 +1,10 @@
 //! VRM 1.0 + default idle VRMA (`bevy_vrm1`).
+//!
+//! After [`AnimationSystems`], [`lock_hips_root_motion`] and [`clamp_vrm_root_y`] only correct
+//! **translation** (hips bind pose / scene root Y). They do not alter arm or forearm rotation.
+//! Persistent elbow “candy wrapper” twist during an idle VRMA is therefore almost always the
+//! library’s VRMC humanoid retarget (source vs target rest frames) and/or VRM node constraints,
+//! not something these settings can tune away.
 
 use std::time::Duration;
 

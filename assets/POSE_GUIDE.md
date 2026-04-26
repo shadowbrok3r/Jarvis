@@ -1,24 +1,52 @@
 # VRM Pose Authoring Guide
 
-Reference for hand-authored poses and for MCP callers. Stored rotations are **normalized pose quaternions** (deltas from each bone’s rest pose in the rig). The runtime maps them to actual joint locals; see `pose_driver` in the repo for the full formula. Quaternions use `[x, y, z, w]`; `**[0, 0, 0, 1]` means “no pose delta”** on that bone (the bone stays at rest for pose purposes).
+Reference for MCP callers and humans. Poses live in **normalized pose space**: each bone’s value is a **unit quaternion** `pose_q = [x, y, z, w]` applied by `pose_driver` (see repo) so that `pose_q = [0,0,0,1]` leaves that bone at its VRM rest. This is **not** world space and **not** Euler angles unless you use the MCP tools below.
 
-## Coordinate system
+## MCP tools (use this order)
 
-VRM bones are described here in the same normalized space the app expects. All rotations use quaternions `[x, y, z, w]` as above.
+1. **`make_fist`** — `amount` from 0 (relaxed curl template) to 1 (full fist). Defaults to both hands. Use this instead of typing thirteen finger quaternions.
+2. **`pose_bones`** — Preferred for everything else. You send **degrees** per bone: `pitch_deg`, `yaw_deg`, `roll_deg` (each optional; missing = 0). The server converts with **intrinsic local Euler order XYZ** (pitch around local X, then Y, then Z), **clamps** each angle to safe per-bone limits, **normalizes** the quaternion, then optionally clamps xyz again. The tool response lists **warnings** whenever something was clamped or normalized.
+3. **`adjust_bone`** — Same Euler axes as `pose_bones`, but values are **small delta degrees** composed as `current_pose_q * delta_q`. Use about ±2° to ±8° per step.
+4. **`get_current_bone_state` → `set_bones`** — Round-trip path: `set_bones` accepts the same quaternions the snapshot returns. The server still **normalizes** and **clamps** xyz so broken pasted values do not explode the rig.
+5. **`create_pose`** — Saves quaternions to disk; unknown bone keys are dropped; each quaternion is sanitized like `set_bones`.
 
-For limb bones (arms, legs):
+Do **not** “design” combined rotations by independently picking x, y, z components. Quaternion composition is **multiplication**, not addition. For any multi-axis pose on one bone, use **`pose_bones`** (or small steps with **`adjust_bone`**).
 
-- **X axis** = flexion/extension (bend forward/back)
-- **Y axis** = twist (internal/external rotation)
-- **Z axis** = abduction/adduction (spread away from/toward body)
+## Euler convention (pose_bones / adjust_bone)
 
-For spine/torso bones:
+- **pitch** — local **X** (flex / extend for many limb segments).
+- **yaw** — local **Y** (twist around the bone’s length).
+- **roll** — local **Z** (abduction / adduction–like motion in this order).
 
-- **X axis** = forward/backward lean
-- **Y axis** = left/right twist
-- **Z axis** = left/right tilt
+Per-bone degree limits are defined in `src/mcp/pose_authoring.rs` (`euler_limit_deg`). Finger segments allow large **roll** (curl) but tight pitch/yaw so fingers do not corkscrew.
 
-## Bone Hierarchy
+### Named bends (signs are a guide; stay within small angles first)
+
+- **Elbow (`*LowerArm`)** — flexion is usually **negative pitch** in this rig (check the viewport). Large positive pitch on the forearm often looks “bent backward.”
+- **Knee (`*LowerLeg`)** — flexion is usually **negative pitch** relative to the thigh.
+- **Finger curl** — mostly **roll**; keep pitch/yaw near 0 unless you need a tiny spread. Right-hand curl tends toward **positive roll**; left-hand toward **negative roll** for the same visual curl direction.
+
+### Mirroring left and right
+
+Do **not** mirror by negating quaternion Y and Z — that is unreliable once rest poses are non-trivial. Instead: build the right side with `pose_bones`, then repeat with **opposite signs on yaw and roll** (and sometimes pitch) on the left, **or** call `make_fist` / tune one side and mirror using small `adjust_bone` steps while watching the viewport.
+
+## Quaternion rules (only if you touch `set_bones` or JSON files)
+
+- Must be **unit length**: \(x^2 + y^2 + z^2 + w^2 = 1\). If you invent x,y,z, set \(w = \sqrt{\max(0, 1 - x^2 - y^2 - z^2)}\) and let the server renormalize.
+- **`q` and `-q` are the same rotation**; the MCP layer may flip the sign for a stable hemisphere.
+- After unit length, **|x|, |y|, |z|** are capped per bone class (see `max_xyz_component_for_bone` in `src/mcp/pose_authoring.rs`: hips / major limbs / feet allow higher caps for deep bends; hands / toes stay tighter; fingers higher). Oversized xyz is **scaled down** and a warning is returned.
+
+## Floor sit (rotation-only)
+
+`pose_bones` only drives **bone rotations**. It does **not** move the VRM scene root. If the character’s **hips look floating** above the ground plane while the legs are folded, lower the avatar root: use the Avatar window controls or set `[avatar].world_position` in `config/default.toml` (see comments there and `src/plugins/avatar.rs`). `lock_root_y` / `lock_vrm_root_y` interact with vertical locking — adjust if the root keeps snapping back.
+
+**Knee direction (MMD-style rigs):** knee flex is usually **negative** `pitch_deg` on `*LowerLeg`. If the knee bends the wrong way, flip the sign (try **positive** `pitch_deg` on `*LowerLeg`) and keep `*UpperLeg` as the parent driver for the thigh fold.
+
+**Torso vs head:** put most of the forward lean on **spine → chest → upperChest** (moderate positive pitch on each, parent-to-child). Keep **neck** and **head** closer to neutral (small angles) so the gaze stays forward instead of staring at the floor.
+
+**Arms on knees:** after the legs read as a sit, add **shoulder / upperArm** outward rotation and **lowerArm** flex so forearms meet the thighs — tune in small steps and read MCP warnings.
+
+## Bone hierarchy
 
 ```
 hips
@@ -55,101 +83,38 @@ hips
             └── rightToes
 ```
 
-## Quaternion Cheat Sheet
+Work **parent to child** (shoulder before elbow before wrist).
 
-### Key rules
+## Quaternion examples (legacy / round-trip only)
 
-- No pose delta on a bone: `[0, 0, 0, 1]`
-- **Body/limb bones**: Never exceed ±0.3 on any x/y/z for natural movement
-- **Finger bones**: Z axis is the curl axis (up to ±0.70 for full fist)
-  - Right hand: positive Z = curl, Left hand: negative Z = curl
-  - Thumb: Y axis is primary (opposition/flexion)
-- Typical subtle adjustments: 0.02–0.08
-- Moderate adjustments: 0.08–0.18
-- Maximum natural range (body): 0.18–0.30
-- The `w` component should always be positive (e.g., 0.70–1.0 for fingers, 0.92–1.0 for body)
+These are **illustrative** single-axis-ish samples. Prefer `pose_bones` with degrees for new work.
 
-### Component-to-Visual Mapping
+| Movement | Quaternion `[x,y,z,w]` |
+|----------|-------------------------|
+| Slight forward lean (spine) | `[0.05, 0, 0, 0.999]` |
+| Elbow bent ~30° (often negative pitch axis in quats) | `[-0.13, 0, 0, 0.992]` |
+| Head turn right slight | `[0, -0.08, 0, 0.997]` |
 
+## Relaxed hand and fist JSON (reference)
 
-| Component | Effect on Arms                 | Effect on Spine | Effect on Legs  |
-| --------- | ------------------------------ | --------------- | --------------- |
-| +X        | Flex forward/down              | Lean forward    | Raise forward   |
-| -X        | Extend back/up                 | Lean backward   | Extend backward |
-| +Y        | Twist outward (L) / inward (R) | Twist right     | Twist outward   |
-| -Y        | Twist inward (L) / outward (R) | Twist left      | Twist inward    |
-| +Z        | Abduct (away)                  | Tilt right      | Abduct          |
-| -Z        | Adduct (toward body)           | Tilt left       | Adduct          |
+The **`make_fist`** MCP tool internally blends between the relaxed template and the fist set below (right hand keys). You normally **do not** paste this JSON by hand.
 
-
-### Quick Reference Rotations
-
-
-| Desired Movement            | Quaternion             |
-| --------------------------- | ---------------------- |
-| Slight forward lean (spine) | `[0.05, 0, 0, 0.999]`  |
-| Arm raised ~30° to side     | `[0, 0, -0.26, 0.966]` |
-| Arm raised ~15° to side     | `[0, 0, -0.13, 0.992]` |
-| Elbow bent ~45°             | `[-0.2, 0, 0, 0.98]`   |
-| Elbow bent ~30°             | `[-0.13, 0, 0, 0.992]` |
-| Head tilt right slight      | `[0, 0, 0.05, 0.999]`  |
-| Head turn right slight      | `[0, -0.08, 0, 0.997]` |
-| Wrist twist slight          | `[0, 0.08, 0, 0.997]`  |
-
-
-## Natural Pose Construction Method
-
-### Step-by-step process:
-
-1. **Start from `[0, 0, 0, 1]` on each bone you touch** — omit bones that should stay at rest
-2. **Work parent-to-child** — set shoulder before upper arm before lower arm before hand
-3. **Adjust one bone at a time** with increments of 0.05–0.15
-4. **Check the viewport** after each bone change
-5. **Symmetry**: to mirror left→right, negate the Y and Z components:
-  - Left: `[x, y, z, w]` → Right: `[x, -y, -z, w]`
-
-### Building a wave pose example:
-
-```
-1. rightShoulder: [0, 0, -0.04, 0.999]      — slight shoulder lift
-2. rightUpperArm: [-0.02, 0.05, -0.25, 0.97] — arm raised to side
-3. rightLowerArm: [-0.15, 0, 0, 0.989]       — elbow bent
-4. rightHand: [0, 0.08, 0, 0.997]            — slight wrist turn
-5. Check the viewport and adjust
-```
-
-## Relaxed Hand Template
-
-Every pose should include natural hand positioning. Fingers slightly curled using **Z axis** (negative Z for left, positive Z for right). Thumbs use **Y axis**:
+<details>
+<summary>Relaxed right-hand template (excerpt)</summary>
 
 ```json
 {
-  "leftThumbMetacarpal": { "rotation": [0, 0.04, -0.02, 0.999] },
-  "leftThumbProximal": { "rotation": [0, 0.06, 0, 0.998] },
-  "leftIndexProximal": { "rotation": [0, 0, -0.1, 0.995] },
-  "leftIndexIntermediate": { "rotation": [0, 0, -0.08, 0.997] },
-  "leftMiddleProximal": { "rotation": [0, 0, -0.12, 0.993] },
-  "leftMiddleIntermediate": { "rotation": [0, 0, -0.1, 0.995] },
-  "leftRingProximal": { "rotation": [0, 0, -0.12, 0.993] },
-  "leftRingIntermediate": { "rotation": [0, 0, -0.1, 0.995] },
-  "leftLittleProximal": { "rotation": [0, 0, -0.1, 0.995] },
-  "leftLittleIntermediate": { "rotation": [0, 0, -0.08, 0.997] },
   "rightThumbMetacarpal": { "rotation": [0, -0.04, 0.02, 0.999] },
   "rightThumbProximal": { "rotation": [0, -0.06, 0, 0.998] },
   "rightIndexProximal": { "rotation": [0, 0, 0.1, 0.995] },
-  "rightIndexIntermediate": { "rotation": [0, 0, 0.08, 0.997] },
-  "rightMiddleProximal": { "rotation": [0, 0, 0.12, 0.993] },
-  "rightMiddleIntermediate": { "rotation": [0, 0, 0.1, 0.995] },
-  "rightRingProximal": { "rotation": [0, 0, 0.12, 0.993] },
-  "rightRingIntermediate": { "rotation": [0, 0, 0.1, 0.995] },
-  "rightLittleProximal": { "rotation": [0, 0, 0.1, 0.995] },
-  "rightLittleIntermediate": { "rotation": [0, 0, 0.08, 0.997] }
+  "rightMiddleProximal": { "rotation": [0, 0, 0.12, 0.993] }
 }
 ```
 
-### Fist Reference (full grip)
+</details>
 
-Right hand fist — Z values from verified VRM pose data:
+<details>
+<summary>Full fist right-hand reference</summary>
 
 ```json
 {
@@ -169,88 +134,34 @@ Right hand fist — Z values from verified VRM pose data:
 }
 ```
 
-Left hand fist — mirror (negate Z):
+</details>
 
-```json
-{
-  "leftThumbProximal": { "rotation": [-0.21, 0.57, -0.40, 0.68] },
-  "leftIndexProximal": { "rotation": [0, 0, -0.42, 0.908] },
-  "leftIndexIntermediate": { "rotation": [0, 0, -0.68, 0.733] },
-  "leftIndexDistal": { "rotation": [0, 0, -0.35, 0.937] }
-}
-```
+## Common mistakes
 
-These are automatically merged into any pose that doesn't explicitly set finger bones.
+1. **Treating quaternion x/y/z as three independent sliders** — wrong for combined rotations; use **`pose_bones`**.
+2. **Non-unit quaternions** — the server fixes them but you should still aim for unit length when authoring JSON.
+3. **Skipping the parent chain** — rotating `rightLowerArm` without placing `rightUpperArm` first usually looks wrong.
+4. **Huge finger values** — use **`make_fist`** instead of guessing quaternions.
+5. **Ignoring MCP warnings** — if the server clamped something, the pose is not what you typed.
 
-## Common Mistakes
+## VRM expressions
 
-1. **Over-rotation**: Using values like 0.5 or 0.7 produces grotesque distortion. Stay under 0.3.
-2. **Forgetting the bone chain**: Setting `rightLowerArm` without `rightUpperArm` causes the forearm to rotate relative to a stationary upper arm — usually looks wrong.
-3. **Setting child without parent**: The elbow can't bend naturally if the shoulder hasn't positioned the arm first.
-4. **Ignoring symmetry**: A natural standing pose has roughly symmetrical arms and legs. Asymmetry should be intentional.
-5. **Missing finger bones**: Without explicit finger data, the idle animation or T-pose default controls fingers, leading to stiff or random hand positions.
-6. **Absolute vs. relative thinking**: Quaternions are relative to the bone's rest orientation, not world space. A bone that's already rotated by its parent inherits that rotation.
+| Expression | Effect |
+|-----------|--------|
+| happy | Smile, raised cheeks |
+| angry | Furrowed brows, tense jaw |
+| sad | Drooping corners, raised inner brows |
+| relaxed | Soft smile, half-closed eyes |
+| surprised | Wide eyes, raised brows, open mouth |
+| neutral | Default resting face |
 
-## Per-Bone Reference Table
+Weights are 0..1; natural range is often about 0.2–0.6.
 
+## Iterative workflow (MCP)
 
-| Bone                 | Parent        | X Effect           | Y Effect         | Z Effect           | Safe Range          |
-| -------------------- | ------------- | ------------------ | ---------------- | ------------------ | ------------------- |
-| hips                 | (root)        | Forward/back tilt  | Left/right twist | Left/right sway    | ±0.08               |
-| spine                | hips          | Forward/back bend  | Torso twist      | Side bend          | ±0.12               |
-| chest                | spine         | Forward/back bend  | Torso twist      | Side bend          | ±0.10               |
-| upperChest           | chest         | Forward/back bend  | Torso twist      | Side bend          | ±0.08               |
-| neck                 | upperChest    | Nod forward/back   | Turn left/right  | Tilt left/right    | ±0.15               |
-| head                 | neck          | Nod forward/back   | Turn left/right  | Tilt left/right    | ±0.15               |
-| leftShoulder         | upperChest    | Shrug forward/back | Roll             | Shrug up/down      | ±0.06               |
-| rightShoulder        | upperChest    | Shrug forward/back | Roll             | Shrug up/down      | ±0.06               |
-| leftUpperArm         | leftShoulder  | Forward/back swing | Twist in/out     | Raise/lower        | ±0.30               |
-| rightUpperArm        | rightShoulder | Forward/back swing | Twist in/out     | Raise/lower        | ±0.30               |
-| leftLowerArm         | leftUpperArm  | Bend elbow         | Forearm twist    | (minimal)          | X: ±0.30, Y: ±0.15  |
-| rightLowerArm        | rightUpperArm | Bend elbow         | Forearm twist    | (minimal)          | X: ±0.30, Y: ±0.15  |
-| leftHand             | leftLowerArm  | Wrist flex/extend  | Wrist twist      | Wrist deviation    | ±0.15               |
-| rightHand            | rightLowerArm | Wrist flex/extend  | Wrist twist      | Wrist deviation    | ±0.15               |
-| leftUpperLeg         | hips          | Forward/back swing | Twist in/out     | Spread apart       | ±0.25               |
-| rightUpperLeg        | hips          | Forward/back swing | Twist in/out     | Spread apart       | ±0.25               |
-| leftLowerLeg         | leftUpperLeg  | Bend knee          | Twist            | (minimal)          | X: -0.30 to 0       |
-| rightLowerLeg        | rightUpperLeg | Bend knee          | Twist            | (minimal)          | X: -0.30 to 0       |
-| leftFoot             | leftLowerLeg  | Point/flex ankle   | Twist            | Inversion/eversion | ±0.15               |
-| rightFoot            | rightLowerLeg | Point/flex ankle   | Twist            | Inversion/eversion | ±0.15               |
-| leftToes             | leftFoot      | Curl toes          | —                | —                  | X: ±0.10            |
-| rightToes            | rightFoot     | Curl toes          | —                | —                  | X: ±0.10            |
-| *Finger Proximal     | Hand          | (minimal)          | Spread           | **Curl finger**    | Z: R +0.50, L -0.50 |
-| *Finger Intermediate | Proximal      | (minimal)          | —                | **Curl further**   | Z: R +0.70, L -0.70 |
-| *Finger Distal       | Intermediate  | (minimal)          | —                | **Curl tip**       | Z: R +0.42, L -0.42 |
-| *Thumb Metacarpal    | Hand          | Flex               | **Opposition**   | Abduction          | Y: ±0.12            |
-| *Thumb Proximal      | Metacarpal    | —                  | **Flex**         | —                  | Y: ±0.60            |
-| *Thumb Distal        | Proximal      | —                  | **Flex tip**     | —                  | Y: ±0.45            |
-
-
-## VRM Expressions
-
-Available expression names and their effects:
-
-
-| Expression | Effect                               |
-| ---------- | ------------------------------------ |
-| happy      | Smile, raised cheeks                 |
-| angry      | Furrowed brows, tense jaw            |
-| sad        | Drooping corners, raised inner brows |
-| relaxed    | Soft smile, half-closed eyes         |
-| surprised  | Wide eyes, raised brows, open mouth  |
-| neutral    | Default resting face                 |
-
-
-Expression values range from 0.0 (off) to 1.0 (full intensity). Typical natural values: 0.2–0.6.
-
-## Iterative refinement (MCP or UI)
-
-When creating a new pose:
-
-1. **Load a baseline** — `apply_pose` with a library pose, or `reset_pose`, then build from there.
-2. **Inspect** — use the running app’s 3D view; there is no screenshot MCP tool in jarvis-avatar.
-3. **Read state** — `get_current_bone_state` for exact quaternions on the rig.
-4. **Adjust** — `adjust_bone` with small deltas (±0.02 to ±0.05), or `set_bones` when you are replacing a full set you control.
-5. **Save** — `create_pose` once it looks right.
-
-Expect a few iterations per pose. Change only one or two bones per step when tuning.
+1. `reset_pose` or `apply_pose` for a baseline.
+2. `make_fist` with a small `amount` if you only need believable hands.
+3. `pose_bones` for body — a few degrees per bone, then read **warnings**.
+4. `get_current_bone_state` if you must switch to quaternion tools.
+5. `adjust_bone` for tiny corrections (degrees).
+6. `create_pose` to persist.

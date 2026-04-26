@@ -49,6 +49,15 @@
 //! **Pose hold** layers replay a single [`PoseFile`] (bones + VRM expression
 //! weights from disk) every frame — useful as a static "start" / "end" pose
 //! under procedural layers or other clips.
+//!
+//! ## Humanoid bone space vs `ApplyBones`
+//!
+//! The layer stack composes **raw local** rotations (same space as
+//! [`RestTransform`] on each bone). [`PoseCommand::ApplyBones`] expects
+//! **normalized humanoid** quaternions for VRM keys (see `pose_driver`). When
+//! emitting `ApplyBones`, we convert each humanoid bone with
+//! [`crate::plugins::pose_driver::normalized_from_local`] using the cached
+//! rest-local and rest-world snapshot so MCP / UI reset and layers agree.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,7 +69,9 @@ use rand::RngExt;
 
 use jarvis_avatar::pose_library::{AnimationFile, PoseFile};
 
-use crate::plugins::pose_driver::{IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES};
+use crate::plugins::pose_driver::{
+    normalized_from_local, IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES,
+};
 
 pub struct AnimLayersPlugin;
 
@@ -460,10 +471,15 @@ pub struct DriverSample {
 /// Per-bone bind-pose local rotation, sampled once the pose driver's
 /// [`BoneEntityIndex`] stabilises. Procedural drivers that need to return
 /// "rest" explicitly (rather than `IDENTITY`) read from here; see the
-/// `ResetPose` fix in `pose_driver.rs` for why this matters.
+/// `ResetPose` in `pose_driver.rs` (full `Vrm` subtree + [`RestTransform`]) for
+/// why this matters.
 #[derive(Resource, Default)]
 pub struct RestPoseSnapshot {
     pub rest: HashMap<String, Quat>,
+    /// Per-bone rest orientation in parent/world rest frame (`RestGlobalTransform`
+    /// rotation). Used with `rest` to map composed raw locals → normalized pose
+    /// space for `ApplyBones` (same basis as `pose_driver::publish_bone_snapshot`).
+    pub rest_world: HashMap<String, Quat>,
     /// Monotonic counter of how many bones we've captured — lets the UI
     /// report "0/55 indexed".
     pub captured: usize,
@@ -476,6 +492,7 @@ pub struct RestPoseSnapshot {
 fn refresh_rest_pose_snapshot(
     indexed: Option<Res<IndexedBones>>,
     rest_q: Query<&RestTransform>,
+    rest_global_q: Query<&RestGlobalTransform>,
     mut snap: ResMut<RestPoseSnapshot>,
 ) {
     let Some(indexed) = indexed else { return };
@@ -497,19 +514,29 @@ fn refresh_rest_pose_snapshot(
             Err(_) => true,
         }
     });
-    if snap.captured == indexed_len && snapshot_covers_all_rt {
+    if snap.captured == indexed_len
+        && snapshot_covers_all_rt
+        && snap.rest_world.len() == snap.rest.len()
+    {
         return;
     }
     let mut missing_rt = 0usize;
     let mut rest = HashMap::with_capacity(indexed_len);
+    let mut rest_world = HashMap::with_capacity(indexed_len);
     for (name, entity) in &indexed.entities {
         if let Ok(rt) = rest_q.get(*entity) {
             rest.insert(name.clone(), rt.0.rotation);
+            let rw = rest_global_q
+                .get(*entity)
+                .map(|rgt| rgt.0.rotation())
+                .unwrap_or(Quat::IDENTITY);
+            rest_world.insert(name.clone(), rw);
         } else {
             missing_rt += 1;
         }
     }
     snap.rest = rest;
+    snap.rest_world = rest_world;
     snap.captured = indexed_len;
     if missing_rt > 0 {
         info!(
@@ -610,14 +637,20 @@ fn advance_and_apply_layers(
         // rest every frame and clobber `ApplyBones` requests from the UI
         // sliders / MCP between frames.
         for name in VRM_BONE_NAMES {
-            let Some(q) = accumulator.get(*name) else {
+            let Some(q_raw) = accumulator.get(*name) else {
                 continue;
             };
-            let rest = snap.rest.get(*name).copied().unwrap_or(Quat::IDENTITY);
-            if quat_close(*q, rest, 1e-4) {
+            let rest_local = snap.rest.get(*name).copied().unwrap_or(Quat::IDENTITY);
+            if quat_close(*q_raw, rest_local, 1e-4) {
                 continue;
             }
-            bones_out.insert((*name).to_string(), [q.x, q.y, q.z, q.w]);
+            let rest_world = snap
+                .rest_world
+                .get(*name)
+                .copied()
+                .unwrap_or(Quat::IDENTITY);
+            let pose_q = normalized_from_local(rest_local, rest_world, *q_raw);
+            bones_out.insert((*name).to_string(), [pose_q.x, pose_q.y, pose_q.z, pose_q.w]);
         }
     });
 

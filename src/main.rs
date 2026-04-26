@@ -60,6 +60,7 @@ fn main() {
             plugins::spring_bone::SpringBonePlugin,
             plugins::tts::TtsPlugin,
             plugins::pose_driver::PoseDriverPlugin,
+            plugins::pose_capture::PoseCapturePlugin,
             mcp::plugin::McpPlugin,
         ))
         .add_plugins((

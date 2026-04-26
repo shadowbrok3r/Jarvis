@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use bevy::animation::AnimationTargetId;
 use bevy::app::AnimationSystems;
+use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use bevy_vrm1::prelude::*;
@@ -79,7 +80,7 @@ fn local_from_normalized(rest_local: Quat, rest_world: Quat, pose_q: Quat) -> Qu
 /// ```text
 /// pose_q = rest_world · rest_local⁻¹ · raw_local · rest_world⁻¹
 /// ```
-fn normalized_from_local(rest_local: Quat, rest_world: Quat, raw_local: Quat) -> Quat {
+pub fn normalized_from_local(rest_local: Quat, rest_world: Quat, raw_local: Quat) -> Quat {
     rest_world * rest_local.inverse() * raw_local * rest_world.inverse()
 }
 
@@ -127,6 +128,9 @@ impl Plugin for PoseDriverPlugin {
                     .before(VrmSystemSets::Constraints)
                     .before(TransformSystems::Propagate),
             )
+            // Runs after `tick_active_transitions` so the snapshot matches the
+            // same PostUpdate pose as constraint systems that run after this
+            // plugin (see `VrmSystemSets::Constraints` ordering on writers).
             .add_systems(
                 PostUpdate,
                 publish_bone_snapshot
@@ -376,6 +380,21 @@ fn descends_from_vrma(
     false
 }
 
+/// `root` first, then every descendant in pre-order (`Children` only).
+fn collect_descendants_preorder(world: &World, root: Entity) -> Vec<Entity> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(e) = stack.pop() {
+        out.push(e);
+        if let Some(children) = world.get::<Children>(e) {
+            for child in children.iter().rev() {
+                stack.push(child);
+            }
+        }
+    }
+    out
+}
+
 macro_rules! sync_bone_index_impl {
     ( $(($name:literal, $marker:ident, $_field:ident)),* $(,)? ) => {
         fn sync_humanoid_bone_entities(world: &mut World) {
@@ -474,8 +493,6 @@ fn refresh_indexed_bones_merged(world: &mut World) {
 /// and never appear in a clip, so they would otherwise be invisible to the pose UI / layers
 /// dropdown despite being real `SkinnedMesh` influences.
 fn sync_extra_skin_bones(world: &mut World) {
-    use bevy::mesh::skinning::SkinnedMesh;
-
     let humanoid_entities: HashSet<Entity> = world
         .get_resource::<BoneEntityIndex>()
         .map(|i| i.by_name.values().copied().collect())
@@ -871,13 +888,15 @@ fn apply_pose_commands(world: &mut World) {
                 let blend_path = blends_enabled && (transition > 0.0 || weight < 1.0);
 
                 if !preserve_omitted_bones {
-                    for &e in bone_map.values() {
-                        let rest = world
-                            .get::<RestTransform>(e)
-                            .map(|rt| rt.0.rotation)
-                            .unwrap_or(Quat::IDENTITY);
+                    for (name, &e) in &bone_map {
+                        let target = bone_target_local_rotation(
+                            world,
+                            name.as_str(),
+                            e,
+                            Quat::IDENTITY,
+                        );
                         if let Some(mut tf) = world.get_mut::<Transform>(e) {
-                            tf.rotation = rest;
+                            tf.rotation = target;
                         }
                     }
                     // Resetting omitted bones also clears any in-flight transitions for them.
@@ -1006,12 +1025,10 @@ fn apply_pose_commands(world: &mut World) {
                     let Some(&e) = bone_map.get(name) else {
                         continue;
                     };
-                    let rest = world
-                        .get::<RestTransform>(e)
-                        .map(|rt| rt.0.rotation)
-                        .unwrap_or(Quat::IDENTITY);
+                    let target =
+                        bone_target_local_rotation(world, name.as_str(), e, Quat::IDENTITY);
                     if let Some(mut tf) = world.get_mut::<Transform>(e) {
-                        tf.rotation = rest;
+                        tf.rotation = target;
                     }
                     if let Some(mut active) = world.get_resource_mut::<ActiveTransitions>() {
                         active.bones.remove(name);
@@ -1020,21 +1037,42 @@ fn apply_pose_commands(world: &mut World) {
             }
             PoseCommand::ResetPose => {
                 if index_ready {
-                    // Restore each bone to its *rest* local rotation, not
-                    // `Quat::IDENTITY`. VRM rigs (especially MMD-exported
-                    // ones like airi.vrm) carry non-zero local rotations on
-                    // the shoulders / twist bones / hip cancel bones at bind
-                    // pose; resetting to identity collapses the arms into a
-                    // crossed-T shrug, twists the hands, and bends the legs
-                    // forward. `RestTransform` is inserted on every bone by
-                    // `bevy_vrm1::vrm::humanoid_bone::apply_initialize_humanoid_bones`.
+                    let vrma_roots: HashSet<Entity> = world
+                        .query_filtered::<Entity, With<Vrma>>()
+                        .iter(world)
+                        .collect();
+                    // Restore **full** bind locals from `RestTransform` (translation,
+                    // rotation, scale) — not rotation-only on a subset of bones.
+                    // `bevy_vrm1` roll / rotation node constraints spread twist
+                    // across extra joints; if those intermediates still carry VRMA
+                    // deltas while humanoid nodes snap to bind, skin can collapse to
+                    // a pinched ribbon at shoulder / elbow / wrist. Walking the whole
+                    // `Vrm` subtree keeps twist chains coherent. Skip entities under
+                    // loaded VRMA files (`Vrma`) and joints with no bind snapshot.
+                    if let Some(vrm_e) = vrm_entity {
+                        for e in collect_descendants_preorder(world, vrm_e) {
+                            if descends_from_vrma(world, e, &vrma_roots) {
+                                continue;
+                            }
+                            let Some(bind) = world.get::<RestTransform>(e).map(|rt| rt.0) else {
+                                continue;
+                            };
+                            if let Some(mut tf) = world.get_mut::<Transform>(e) {
+                                *tf = bind;
+                            }
+                        }
+                    }
+                    // Rare: indexed skin extras not under the `Vrm` entity — still
+                    // snap full bind when `RestTransform` exists.
                     for &e in bone_map.values() {
-                        let rest = world
-                            .get::<RestTransform>(e)
-                            .map(|rt| rt.0.rotation)
-                            .unwrap_or(Quat::IDENTITY);
+                        if descends_from_vrma(world, e, &vrma_roots) {
+                            continue;
+                        }
+                        let Some(bind) = world.get::<RestTransform>(e).map(|rt| rt.0) else {
+                            continue;
+                        };
                         if let Some(mut tf) = world.get_mut::<Transform>(e) {
-                            tf.rotation = rest;
+                            *tf = bind;
                         }
                     }
                 }

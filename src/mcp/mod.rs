@@ -18,6 +18,7 @@ mod pose_authoring;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -30,6 +31,7 @@ use serde_json::{json, Value};
 use bevy::prelude::{EulerRot, Quat};
 
 use jarvis_avatar::a2f::{A2fClient, A2fConfig};
+use jarvis_avatar::paths::expand_home;
 use jarvis_avatar::pose_library::{BoneRotation, PoseFile, PoseLibrary};
 
 use crate::kimodo::{GenerateRequest, KimodoClient};
@@ -38,6 +40,9 @@ use pose_authoring::{
     PoseBonesArgs,
 };
 use crate::plugins::channel_server::HubBroadcast;
+use crate::plugins::pose_capture::{
+    CaptureCommandSender, CaptureRequest, CaptureResult, CaptureView,
+};
 use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
 use crate::plugins::pose_driver::{
     BoneSnapshotHandle, PoseCommand, PoseCommandSender, VRM_BONE_NAMES, VRM_EXPRESSION_NAMES,
@@ -49,6 +54,7 @@ use crate::plugins::pose_driver::{
 #[derive(Clone)]
 pub struct JarvisMcpServer {
     pub pose_tx: PoseCommandSender,
+    pub capture_tx: CaptureCommandSender,
     pub snapshot: BoneSnapshotHandle,
     pub hub: HubBroadcast,
     pub kimodo: KimodoClient,
@@ -72,6 +78,7 @@ pub struct KimodoDefaults {
 impl JarvisMcpServer {
     pub fn new(
         pose_tx: PoseCommandSender,
+        capture_tx: CaptureCommandSender,
         snapshot: BoneSnapshotHandle,
         hub: HubBroadcast,
         a2f: A2fClient,
@@ -82,6 +89,7 @@ impl JarvisMcpServer {
     ) -> Self {
         Self::with_kimodo(
             pose_tx,
+            capture_tx,
             snapshot,
             hub.clone(),
             KimodoClient::new(hub),
@@ -99,6 +107,7 @@ impl JarvisMcpServer {
     #[allow(clippy::too_many_arguments)]
     pub fn with_kimodo(
         pose_tx: PoseCommandSender,
+        capture_tx: CaptureCommandSender,
         snapshot: BoneSnapshotHandle,
         hub: HubBroadcast,
         kimodo: KimodoClient,
@@ -110,6 +119,7 @@ impl JarvisMcpServer {
     ) -> Self {
         Self {
             pose_tx,
+            capture_tx,
             snapshot,
             hub,
             kimodo,
@@ -121,6 +131,14 @@ impl JarvisMcpServer {
             tool_router: Self::tool_router(),
         }
     }
+}
+
+fn default_capture_views() -> Vec<String> {
+    vec!["front".into(), "left".into(), "right".into()]
+}
+
+fn default_capture_timeout_ms() -> u64 {
+    10_000
 }
 
 // ---------- tool parameter types ---------------------------------------------
@@ -265,6 +283,39 @@ pub struct A2fConfigureArgs {
     pub health_url: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CapturePoseViewsArgs {
+    /// Output directory for generated PNGs. Supports `~` expansion.
+    pub output_dir: String,
+    /// Deterministic filename prefix (`<capture_id>_<view>_<WxH>.png`).
+    #[serde(default = "default_capture_id")]
+    pub capture_id: String,
+    /// Views to capture. Allowed: front, left, right, front_left, front_right.
+    #[serde(default = "default_capture_views")]
+    pub views: Vec<String>,
+    /// PNG width in pixels.
+    #[serde(default = "default_capture_width")]
+    pub width: u32,
+    /// PNG height in pixels.
+    #[serde(default = "default_capture_height")]
+    pub height: u32,
+    /// Maximum wait for all captures to complete.
+    #[serde(default = "default_capture_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_capture_id() -> String {
+    "latest".to_string()
+}
+
+fn default_capture_width() -> u32 {
+    768
+}
+
+fn default_capture_height() -> u32 {
+    1024
+}
+
 // ---------- helpers -----------------------------------------------------------
 
 fn ok_text(body: impl Into<String>) -> CallToolResult {
@@ -294,6 +345,17 @@ fn append_warnings(body: String, warnings: &[String]) -> String {
                 .collect::<Vec<_>>()
                 .join("\n")
         )
+    }
+}
+
+fn parse_capture_view(raw: &str) -> Option<CaptureView> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "front" => Some(CaptureView::Front),
+        "left" => Some(CaptureView::Left),
+        "right" => Some(CaptureView::Right),
+        "front_left" | "front-left" | "three_quarter_left" => Some(CaptureView::FrontLeft),
+        "front_right" | "front-right" | "three_quarter_right" => Some(CaptureView::FrontRight),
+        _ => None,
     }
 }
 
@@ -532,6 +594,57 @@ impl JarvisMcpServer {
     async fn get_current_bone_state(&self) -> CallToolResult {
         let snap = self.snapshot.0.read().clone();
         ok_json(&snap.bones)
+    }
+
+    #[tool(description = "Capture transparent PNGs of only the avatar from multiple fixed views. Useful for post-pose visual verification by agents.")]
+    async fn capture_pose_views(
+        &self,
+        Parameters(args): Parameters<CapturePoseViewsArgs>,
+    ) -> CallToolResult {
+        let width = args.width.clamp(64, 4096);
+        let height = args.height.clamp(64, 4096);
+        let timeout = Duration::from_millis(args.timeout_ms.clamp(500, 60_000));
+
+        let mut views = Vec::with_capacity(args.views.len());
+        let mut unknown = Vec::new();
+        for raw in args.views {
+            if let Some(v) = parse_capture_view(&raw) {
+                views.push(v);
+            } else {
+                unknown.push(raw);
+            }
+        }
+        if !unknown.is_empty() {
+            return err_text(format!(
+                "unknown view(s): {}. allowed: front,left,right,front_left,front_right",
+                unknown.join(", ")
+            ));
+        }
+        if views.is_empty() {
+            return err_text("at least one view is required");
+        }
+
+        let output_dir = expand_home(&args.output_dir);
+        let (tx, rx) = crossbeam_channel::bounded::<CaptureResult>(1);
+        let req = CaptureRequest {
+            output_dir,
+            capture_id: args.capture_id,
+            width,
+            height,
+            views,
+            response_tx: tx,
+        };
+        if let Err(e) = self.capture_tx.0.send(req) {
+            return err_text(format!("capture queue send failed: {e}"));
+        }
+
+        let recv = tokio::task::spawn_blocking(move || rx.recv_timeout(timeout)).await;
+        let result = match recv {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return err_text(format!("capture timed out/failed: {e}")),
+            Err(e) => return err_text(format!("capture wait join failed: {e}")),
+        };
+        ok_json(&result)
     }
 
     #[tool(description = "Nudge one bone: delta_x / delta_y / delta_z are **degrees** of intrinsic-local Euler (same XYZ order as pose_bones), composed on the right of the current pose quaternion (current * delta). Small steps (±2..±8°) are safest. Result is clamped like set_bones.")]
