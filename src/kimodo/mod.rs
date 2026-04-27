@@ -53,6 +53,9 @@ pub struct KimodoGenerateOutcome {
     /// Populated when Kimodo reports it has produced frames.
     pub frame_count: Option<u32>,
     pub fps: Option<f32>,
+    /// If Kimodo included `savedPath` on the final status (on-disk VRM JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_path: Option<String>,
 }
 
 /// Tunables for a single generate request.
@@ -146,6 +149,7 @@ impl KimodoClient {
         let mut last_message = String::new();
         let mut frame_count: Option<u32> = None;
         let mut fps: Option<f32> = None;
+        let mut saved_path: Option<String> = None;
 
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -226,6 +230,16 @@ impl KimodoClient {
                             }
                         }
                     }
+                    if let Some(p) = env
+                        .data
+                        .get("savedPath")
+                        .or_else(|| env.data.get("saved_path"))
+                        .and_then(Value::as_str)
+                    {
+                        if !p.is_empty() {
+                            saved_path = Some(p.to_string());
+                        }
+                    }
 
                     match status.as_str() {
                         "done" | "error" => {
@@ -243,6 +257,7 @@ impl KimodoClient {
                                 final_message: last_message,
                                 frame_count,
                                 fps,
+                                saved_path: saved_path.clone(),
                             });
                         }
                         "ready" if !request.stream => {
@@ -263,6 +278,7 @@ impl KimodoClient {
                                 final_message: last_message,
                                 frame_count,
                                 fps,
+                                saved_path: saved_path.clone(),
                             });
                         }
                         _ => {
@@ -295,6 +311,7 @@ impl KimodoClient {
                         final_message: last_message,
                         frame_count,
                         fps,
+                        saved_path: saved_path.clone(),
                     });
                 }
                 _ => {}

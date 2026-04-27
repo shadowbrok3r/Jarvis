@@ -9,6 +9,7 @@ pub mod look_at;
 mod vrm_eye_debug;
 pub use vrm_eye_debug::VrmEyeLookatDebug;
 pub mod spring_bone;
+mod spring_preset;
 pub mod channel_server;
 pub mod ironclaw_chat;
 pub mod pose_driver;

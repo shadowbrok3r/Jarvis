@@ -16,7 +16,7 @@ pub mod plugin;
 mod pose_authoring;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,26 +28,24 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use bevy::prelude::{EulerRot, Quat};
+use crossbeam_channel::RecvTimeoutError;
 
 use jarvis_avatar::a2f::{A2fClient, A2fConfig};
 use jarvis_avatar::paths::expand_home;
-use jarvis_avatar::pose_library::{BoneRotation, PoseFile, PoseLibrary};
+use jarvis_avatar::pose_library::{slugify, BoneRotation, PoseFile, PoseLibrary};
 
 use crate::kimodo::{GenerateRequest, KimodoClient};
-use pose_authoring::{
-    bone_map_from_euler_deg, make_fist_bones, sanitize_bone_map, sanitize_quat, MakeFistArgs,
-    PoseBonesArgs,
-};
 use crate::plugins::channel_server::HubBroadcast;
 use crate::plugins::pose_capture::{
-    CaptureCameraOverrides, CaptureCommandSender, CaptureFramingPreset, CaptureRequest,
-    CaptureResult, CaptureView,
+    CaptureCommandSender, CaptureRequest, CaptureView, CaptureFramingPreset,
 };
 use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
 use crate::plugins::pose_driver::{
-    BoneSnapshotHandle, PoseCommand, PoseCommandSender, VRM_BONE_NAMES, VRM_EXPRESSION_NAMES,
+    BoneSnapshot, BoneSnapshotHandle, PoseCommand, PoseCommandSender, VRM_BONE_NAMES,
+    VRM_EXPRESSION_NAMES,
 };
+
+use pose_authoring::{bone_map_from_euler_deg, make_fist_bones, sanitize_bone_map, MakeFistArgs, PoseBonesArgs};
 
 // ---------- server state ------------------------------------------------------
 
@@ -132,27 +130,6 @@ impl JarvisMcpServer {
             tool_router: Self::tool_router(),
         }
     }
-}
-
-fn default_capture_views() -> Vec<String> {
-    vec!["front".into(), "left".into(), "right".into()]
-}
-
-fn default_capture_timeout_ms() -> u64 {
-    10_000
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CaptureCameraOverridesArgs {
-    /// Vertical focus offset from avatar root in meters. Typical 0.9..1.7.
-    #[serde(default)]
-    pub focus_y_offset: Option<f32>,
-    /// Camera distance from focus point in meters.
-    #[serde(default)]
-    pub radius: Option<f32>,
-    /// Extra camera Y lift in meters after directional offset.
-    #[serde(default)]
-    pub height_lift: Option<f32>,
 }
 
 // ---------- tool parameter types ---------------------------------------------
@@ -258,6 +235,10 @@ pub struct GenerateMotionArgs {
     /// If set, Kimodo will save the generated animation under this name.
     #[serde(default)]
     pub save_name: Option<String>,
+    /// Optional timeout override for this request (seconds). If omitted,
+    /// `[mcp].kimodo_timeout_sec` is used.
+    #[serde(default)]
+    pub timeout_sec: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -297,43 +278,46 @@ pub struct A2fConfigureArgs {
     pub health_url: Option<String>,
 }
 
+fn default_capture_dim() -> u32 {
+    1024
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CapturePoseViewsArgs {
-    /// Output directory for generated PNGs. Supports `~` expansion.
+    /// Output directory for PNGs (leading `~/` is expanded like jarvis-avatar config).
     pub output_dir: String,
-    /// Deterministic filename prefix (`<capture_id>_<view>_<WxH>.png`).
-    #[serde(default = "default_capture_id")]
+    /// Prefix in filenames: `<capture_id>_<view>_<WxH>.png`.
     pub capture_id: String,
-    /// Views to capture. Allowed: front, left, right, front_left, front_right.
-    #[serde(default = "default_capture_views")]
+    #[serde(default = "default_capture_dim")]
+    pub width: u32,
+    #[serde(default = "default_capture_dim")]
+    pub height: u32,
+    /// View slugs: `front`, `left`, `right`, `front_left`, `front_right`.
     pub views: Vec<String>,
-    /// Optional framing preset. Allowed: full_body, face_closeup.
+    /// Optional: `full_body` or `face_closeup` (camera distance / head focus).
     #[serde(default)]
     pub framing_preset: Option<String>,
-    /// Optional camera overrides (meters). Values are clamped to safe ranges.
+    /// Bevy capture pipeline timeout in seconds (default 180, min 5, max 600).
     #[serde(default)]
-    pub camera_overrides: Option<CaptureCameraOverridesArgs>,
-    /// PNG width in pixels.
-    #[serde(default = "default_capture_width")]
-    pub width: u32,
-    /// PNG height in pixels.
-    #[serde(default = "default_capture_height")]
-    pub height: u32,
-    /// Maximum wait for all captures to complete.
-    #[serde(default = "default_capture_timeout_ms")]
-    pub timeout_ms: u64,
+    pub timeout_sec: Option<u64>,
 }
 
-fn default_capture_id() -> String {
-    "latest".to_string()
-}
-
-fn default_capture_width() -> u32 {
-    768
-}
-
-fn default_capture_height() -> u32 {
-    1024
+fn parse_capture_view_slug(raw: &str) -> Result<CaptureView, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("empty view name".to_string());
+    }
+    let low = s.to_ascii_lowercase();
+    match low.as_str() {
+        "front" => Ok(CaptureView::Front),
+        "left" => Ok(CaptureView::Left),
+        "right" => Ok(CaptureView::Right),
+        "front_left" | "frontleft" | "front-left" => Ok(CaptureView::FrontLeft),
+        "front_right" | "frontright" | "front-right" => Ok(CaptureView::FrontRight),
+        _ => Err(format!(
+            "unknown view {s:?} — use front, left, right, front_left, front_right"
+        )),
+    }
 }
 
 // ---------- helpers -----------------------------------------------------------
@@ -346,6 +330,20 @@ fn err_text(body: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![Content::text(body.into())])
 }
 
+/// MCP pose tools accept VRM humanoid keys plus any bone currently in the live snapshot
+/// (extra skin joints indexed by glTF [`Name`]) and, before the first snapshot, `DEF-toe*`
+/// / `DEF-ero*` prefixes (ASCII case-insensitive).
+fn mcp_allows_pose_bone_key(name: &str, snap: &BoneSnapshot) -> bool {
+    if VRM_BONE_NAMES.contains(&name) {
+        return true;
+    }
+    if snap.bones.contains_key(name) {
+        return true;
+    }
+    let n = name.to_ascii_lowercase();
+    n.starts_with("def-toe") || n.starts_with("def-ero")
+}
+
 fn ok_json(v: &impl Serialize) -> CallToolResult {
     match serde_json::to_string_pretty(v) {
         Ok(s) => ok_text(s),
@@ -353,72 +351,11 @@ fn ok_json(v: &impl Serialize) -> CallToolResult {
     }
 }
 
-fn append_warnings(body: String, warnings: &[String]) -> String {
-    if warnings.is_empty() {
-        body
-    } else {
-        format!(
-            "{body}\nwarnings:\n{}",
-            warnings
-                .iter()
-                .map(|w| format!("- {w}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    }
-}
-
-fn parse_capture_view(raw: &str) -> Option<CaptureView> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "front" => Some(CaptureView::Front),
-        "left" => Some(CaptureView::Left),
-        "right" => Some(CaptureView::Right),
-        "front_left" | "front-left" | "three_quarter_left" => Some(CaptureView::FrontLeft),
-        "front_right" | "front-right" | "three_quarter_right" => Some(CaptureView::FrontRight),
-        _ => None,
-    }
-}
-
-fn parse_capture_framing_preset(raw: &str) -> Option<CaptureFramingPreset> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "full_body" | "full-body" => Some(CaptureFramingPreset::FullBody),
-        "face_closeup" | "face-closeup" | "face" => Some(CaptureFramingPreset::FaceCloseup),
-        _ => None,
-    }
-}
-
-fn camera_overrides_from_args(
-    args: Option<CaptureCameraOverridesArgs>,
-) -> Result<Option<CaptureCameraOverrides>, String> {
-    let Some(raw) = args else {
-        return Ok(None);
-    };
-
-    let values = [
-        ("focus_y_offset", raw.focus_y_offset),
-        ("radius", raw.radius),
-        ("height_lift", raw.height_lift),
-    ];
-    for (name, v) in values {
-        if let Some(x) = v {
-            if !x.is_finite() {
-                return Err(format!("camera_overrides.{name} must be a finite number"));
-            }
-        }
-    }
-
-    Ok(Some(CaptureCameraOverrides {
-        focus_y_offset: raw.focus_y_offset,
-        radius: raw.radius,
-        height_lift: raw.height_lift,
-    }))
-}
-
 // ---------- tool handlers ----------------------------------------------------
 
 #[tool_router(router = tool_router)]
 impl JarvisMcpServer {
-    #[tool(description = "List every saved VRM pose (name, description, category, bone count).")]
+    #[tool(description = "List every saved VRM pose (name, description, category, bone count). Use before apply_pose when you need a known baseline for motion or capture.")]
     async fn list_poses(&self) -> CallToolResult {
         match self.library.load_all_poses() {
             Ok(poses) => {
@@ -479,7 +416,7 @@ impl JarvisMcpServer {
         ))
     }
 
-    #[tool(description = "Set VRM expression weights (0..=1). Partial update: unspecified expressions unchanged.")]
+    #[tool(description = "Set VRM expression blendshape weights (0..=1). Partial map: omitted keys stay as-is. Layer facial polish on top of Kimodo or pose_bones; combine small weights (e.g. happy+relaxed) for natural faces — see get_pose_guide table.")]
     async fn set_expression(
         &self,
         Parameters(args): Parameters<SetExpressionArgs>,
@@ -491,80 +428,79 @@ impl JarvisMcpServer {
         ok_text(format!("set expressions: {}", names.join(", ")))
     }
 
-    #[tool(description = "Set bones with raw quaternions [x,y,z,w] (normalized pose space). Unknown bone names are ignored. Values are normalized, xyz magnitude is clamped per bone, and warnings list fixes. Prefer pose_bones for new authoring.")]
+    #[tool(description = "Directly set bone rotations as quaternions [x, y, z, w]. Keep components in [-0.3, 0.3] for natural motion.")]
     async fn set_bones(&self, Parameters(args): Parameters<SetBonesArgs>) -> CallToolResult {
-        let mut warnings = Vec::new();
-        let mut raw: HashMap<String, [f32; 4]> = HashMap::new();
-        for (k, v) in args.bones {
-            if VRM_BONE_NAMES.contains(&k.as_str()) {
-                raw.insert(k, v.rotation);
-            } else {
-                warnings.push(format!("ignored unknown bone \"{k}\""));
+        let snap = self.snapshot.0.read();
+        for bone in args.bones.keys() {
+            if !mcp_allows_pose_bone_key(bone, &snap) {
+                return err_text(format!(
+                    "invalid bone \"{bone}\" — use get_bone_reference (humanoid + extraBones)"
+                ));
             }
         }
-        let count = raw.len();
-        let (bones, mut w2) = sanitize_bone_map(raw);
-        warnings.append(&mut w2);
+        drop(snap);
+        let count = args.bones.len();
+        let bones: HashMap<String, [f32; 4]> = args
+            .bones
+            .into_iter()
+            .map(|(k, v)| (k, v.rotation))
+            .collect();
         self.pose_tx.send(PoseCommand::ApplyBones {
             bones,
             preserve_omitted_bones: args.preserve_omitted_bones,
             blend_weight: None,
             transition_seconds: None,
         });
-        ok_text(append_warnings(
-            format!("set {count} bone(s)"),
-            &warnings,
-        ))
+        ok_text(format!("set {count} bone(s)"))
     }
 
-    #[tool(description = "Author poses in Euler degrees (preferred for agents). Intrinsic local order XYZ: pitch around X, yaw around Y, roll around Z. Omitted axis = 0. Server clamps per bone and returns warnings. Same preserve_omitted_bones semantics as set_bones.")]
+    #[tool(description = "Set many bones at once using intrinsic local Euler degrees per bone (pitch/yaw/roll). Safer than raw quaternions: angles are clamped per bone; response lists warnings. Helen/Rigify named toes DEF-toe_{big,index,middle,ring,little}.{L,R} share the same ±180° display-yaw rebasing as the Bones tab (see get_pose_guide). Prefer this for body posing; see get_pose_guide for knee/elbow sign conventions.")]
     async fn pose_bones(&self, Parameters(args): Parameters<PoseBonesArgs>) -> CallToolResult {
-        let mut unknown = Vec::new();
-        for k in args.bones.keys() {
-            if !VRM_BONE_NAMES.contains(&k.as_str()) {
-                unknown.push(k.clone());
+        let snap = self.snapshot.0.read();
+        for bone in args.bones.keys() {
+            if !mcp_allows_pose_bone_key(bone, &snap) {
+                return err_text(format!(
+                    "invalid bone \"{bone}\" — use get_bone_reference (humanoid + extraBones)"
+                ));
             }
         }
-        if !unknown.is_empty() {
-            return err_text(format!(
-                "unknown bone name(s): {} — use get_bone_reference",
-                unknown.join(", ")
-            ));
-        }
-        let (bones, warnings) = bone_map_from_euler_deg(&args.bones);
-        let count = bones.len();
+        drop(snap);
+        let (quats, mut warnings) = bone_map_from_euler_deg(&args.bones);
+        let (sanitized, mut w2) = sanitize_bone_map(quats);
+        warnings.append(&mut w2);
+        let count = sanitized.len();
         self.pose_tx.send(PoseCommand::ApplyBones {
-            bones,
+            bones: sanitized,
             preserve_omitted_bones: args.preserve_omitted_bones,
             blend_weight: None,
             transition_seconds: None,
         });
-        ok_text(append_warnings(
-            format!("pose_bones: applied {count} bone(s)"),
-            &warnings,
-        ))
+        ok_json(&json!({
+            "appliedBones": count,
+            "warnings": warnings,
+        }))
     }
 
-    #[tool(description = "Curl hands toward a fist using canned finger quaternions (slerp amount 0..1). amount=0 is a relaxed curl template; amount=1 matches POSE_GUIDE fist reference. Defaults both hands unless left/right flags are set.")]
+    #[tool(description = "Blend both hands toward a canned fist (amount 0..1). Fingers stay within safe curl templates — use for believable grips instead of hand-tuning many quaternions.")]
     async fn make_fist(&self, Parameters(args): Parameters<MakeFistArgs>) -> CallToolResult {
         let do_left = args.left.unwrap_or(true);
         let do_right = args.right.unwrap_or(true);
         if !do_left && !do_right {
-            return err_text("set left and/or right to true");
+            return err_text("specify at least one of left=true or right=true".to_string());
         }
-        let raw = make_fist_bones(args.amount, do_left, do_right);
-        let count = raw.len();
-        let (bones, warnings) = sanitize_bone_map(raw);
+        let bones = make_fist_bones(args.amount, do_left, do_right);
+        let (sanitized, warnings) = sanitize_bone_map(bones);
+        let count = sanitized.len();
         self.pose_tx.send(PoseCommand::ApplyBones {
-            bones,
+            bones: sanitized,
             preserve_omitted_bones: true,
             blend_weight: None,
             transition_seconds: None,
         });
-        ok_text(append_warnings(
-            format!("make_fist: applied {count} finger bone(s), amount={:.2}", args.amount.clamp(0.0, 1.0)),
-            &warnings,
-        ))
+        ok_json(&json!({
+            "appliedBones": count,
+            "warnings": warnings,
+        }))
     }
 
     #[tool(description = "Reset the avatar to the default pose and clear every expression.")]
@@ -573,24 +509,22 @@ impl JarvisMcpServer {
         ok_text("reset pose and expressions")
     }
 
-    #[tool(description = "Save a new pose to the library. Read get_pose_guide first. Quaternions are normalized and xyz-clamped like set_bones; unknown bone keys are dropped with warnings in the response.")]
+    #[tool(description = "Save a new pose to the library. CRITICAL: read get_pose_guide first, keep quaternion x/y/z in [-0.3, 0.3].")]
     async fn create_pose(&self, Parameters(args): Parameters<CreatePoseArgs>) -> CallToolResult {
-        let mut warnings = Vec::new();
-        let mut bones_out = HashMap::new();
-        for (k, v) in args.bones {
-            if VRM_BONE_NAMES.contains(&k.as_str()) {
-                let (rot, w) = sanitize_quat(&k, v.rotation);
-                warnings.extend(w);
-                bones_out.insert(k, BoneRotation { rotation: rot });
-            } else {
-                warnings.push(format!("ignored unknown bone \"{k}\""));
+        let snap = self.snapshot.0.read();
+        for bone in args.bones.keys() {
+            if !mcp_allows_pose_bone_key(bone, &snap) {
+                return err_text(format!(
+                    "invalid bone \"{bone}\" in create_pose — use get_bone_reference (humanoid + extraBones)"
+                ));
             }
         }
+        drop(snap);
         let pose = PoseFile {
             name: args.name.clone(),
             description: args.description.unwrap_or_default(),
             category: args.category.unwrap_or_else(|| "general".into()),
-            bones: bones_out,
+            bones: args.bones,
             expressions: args.expressions.unwrap_or_default(),
             transition_duration: args.transition_seconds.unwrap_or(0.4),
         };
@@ -615,26 +549,32 @@ impl JarvisMcpServer {
                 });
             }
         }
-        ok_text(append_warnings(
-            format!(
-                "saved pose \"{}\" ({} bones)",
-                pose.name,
-                pose.bones.len()
-            ),
-            &warnings,
+        ok_text(format!(
+            "saved pose \"{}\" ({} bones)",
+            pose.name,
+            pose.bones.len()
         ))
     }
 
-    #[tool(description = "Get the full list of VRM bone names and expression presets.")]
+    #[tool(description = "Get the full list of VRM humanoid bone names, expression presets, and (when a VRM is loaded) extra skin joint names from the live rig.")]
     async fn get_bone_reference(&self) -> CallToolResult {
+        let snap = self.snapshot.0.read();
+        let mut extra: Vec<String> = snap
+            .bones
+            .keys()
+            .filter(|k| !VRM_BONE_NAMES.contains(&k.as_str()))
+            .cloned()
+            .collect();
+        extra.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
         ok_json(&json!({
             "bones": VRM_BONE_NAMES,
+            "extraBones": extra,
             "expressions": VRM_EXPRESSION_NAMES,
-            "note": "Authoring: prefer pose_bones (Euler degrees) or make_fist. Raw quaternions [x,y,z,w] must be unit length; MCP normalizes and clamps xyz per bone. Identity = [0,0,0,1] means no pose delta. Expression weights are 0..=1.",
+            "note": "Rotations are quaternions [x, y, z, w] in normalized pose space (identity = bind). Expression values are 0..=1. Keep x/y/z in [-0.3, 0.3]. `extraBones` lists Rigify-style joints (e.g. DEF-toe*) present on the loaded avatar; `pose_bones` also accepts DEF-toe* / DEF-ero* by prefix before the first snapshot.",
         }))
     }
 
-    #[tool(description = "Return assets/POSE_GUIDE.md: bone hierarchy, quaternion notes, and per-bone ranges. Read before create_pose.")]
+    #[tool(description = "Get the comprehensive VRM pose authoring guide — bone hierarchy, quaternion cheatsheet, per-bone natural ranges. READ BEFORE creating poses.")]
     async fn get_pose_guide(&self) -> CallToolResult {
         match std::fs::read_to_string(&self.pose_guide_path) {
             Ok(s) => ok_text(s),
@@ -645,85 +585,18 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(description = "Read the current quaternion rotation of every humanoid bone on the VRM avatar.")]
+    #[tool(description = "Read the current normalized pose quaternion of every indexed bone (humanoid + extra skin joints) on the loaded VRM.")]
     async fn get_current_bone_state(&self) -> CallToolResult {
         let snap = self.snapshot.0.read().clone();
         ok_json(&snap.bones)
     }
 
-    #[tool(description = "Capture transparent PNGs of only the avatar from multiple fixed views. Supports full-body and face close-up framing presets plus optional camera overrides for iterative QA loops.")]
-    async fn capture_pose_views(
-        &self,
-        Parameters(args): Parameters<CapturePoseViewsArgs>,
-    ) -> CallToolResult {
-        let width = args.width.clamp(64, 4096);
-        let height = args.height.clamp(64, 4096);
-        let timeout = Duration::from_millis(args.timeout_ms.clamp(500, 60_000));
-        let framing_preset = match args.framing_preset {
-            Some(raw) => match parse_capture_framing_preset(&raw) {
-                Some(v) => Some(v),
-                None => {
-                    return err_text(
-                        "unknown framing_preset. allowed: full_body,face_closeup".to_string(),
-                    )
-                }
-            },
-            None => None,
-        };
-        let camera_overrides = match camera_overrides_from_args(args.camera_overrides) {
-            Ok(v) => v,
-            Err(e) => return err_text(e),
-        };
-
-        let mut views = Vec::with_capacity(args.views.len());
-        let mut unknown = Vec::new();
-        for raw in args.views {
-            if let Some(v) = parse_capture_view(&raw) {
-                views.push(v);
-            } else {
-                unknown.push(raw);
-            }
-        }
-        if !unknown.is_empty() {
-            return err_text(format!(
-                "unknown view(s): {}. allowed: front,left,right,front_left,front_right",
-                unknown.join(", ")
-            ));
-        }
-        if views.is_empty() {
-            return err_text("at least one view is required");
-        }
-
-        let output_dir = expand_home(&args.output_dir);
-        let (tx, rx) = crossbeam_channel::bounded::<CaptureResult>(1);
-        let req = CaptureRequest {
-            output_dir,
-            capture_id: args.capture_id,
-            width,
-            height,
-            views,
-            framing_preset,
-            camera_overrides,
-            response_tx: tx,
-        };
-        if let Err(e) = self.capture_tx.0.send(req) {
-            return err_text(format!("capture queue send failed: {e}"));
-        }
-
-        let recv = tokio::task::spawn_blocking(move || rx.recv_timeout(timeout)).await;
-        let result = match recv {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => return err_text(format!("capture timed out/failed: {e}")),
-            Err(e) => return err_text(format!("capture wait join failed: {e}")),
-        };
-        ok_json(&result)
-    }
-
-    #[tool(description = "Nudge one bone: delta_x / delta_y / delta_z are **degrees** of intrinsic-local Euler (same XYZ order as pose_bones), composed on the right of the current pose quaternion (current * delta). Small steps (±2..±8°) are safest. Result is clamped like set_bones.")]
+    #[tool(description = "Tiny per-axis tweak: adds delta_x/delta_y/delta_z to the bone's current pose quaternion components, then renormalizes (NOT Euler degrees). Use very small steps (often ±0.02–0.05 on one axis) for micro-corrections after pose_bones or Kimodo playback.")]
     async fn adjust_bone(&self, Parameters(args): Parameters<AdjustBoneArgs>) -> CallToolResult {
-        if !VRM_BONE_NAMES.contains(&args.bone_name.as_str()) {
+        let snap = self.snapshot.0.read().clone();
+        if !mcp_allows_pose_bone_key(&args.bone_name, &snap) {
             return err_text(format!(
-                "invalid bone \"{}\" — use get_bone_reference",
+                "invalid bone \"{}\" — use get_bone_reference (humanoid + extraBones)",
                 args.bone_name
             ));
         }
@@ -734,23 +607,17 @@ impl JarvisMcpServer {
             return err_text("specify at least one of delta_x / delta_y / delta_z".to_string());
         }
 
-        let snap = self.snapshot.0.read().clone();
         let [cx, cy, cz, cw] = snap
             .bones
             .get(&args.bone_name)
             .map(|e| e.rotation)
             .unwrap_or([0.0, 0.0, 0.0, 1.0]);
 
-        let cur = Quat::from_xyzw(cx, cy, cz, cw).normalize();
-        let dq = Quat::from_euler(
-            EulerRot::XYZ,
-            dx.to_radians(),
-            dy.to_radians(),
-            dz.to_radians(),
-        );
-        let composed = (cur * dq).normalize();
-        let q_raw = [composed.x, composed.y, composed.z, composed.w];
-        let (q, warnings) = sanitize_quat(&args.bone_name, q_raw);
+        let nx = cx + dx;
+        let ny = cy + dy;
+        let nz = cz + dz;
+        let len = (nx * nx + ny * ny + nz * nz + cw * cw).sqrt().max(1e-6);
+        let q = [nx / len, ny / len, nz / len, cw / len];
 
         let bones = HashMap::from([(args.bone_name.clone(), q)]);
         self.pose_tx.send(PoseCommand::ApplyBones {
@@ -759,12 +626,9 @@ impl JarvisMcpServer {
             blend_weight: None,
             transition_seconds: None,
         });
-        ok_text(append_warnings(
-            format!(
-                "adjusted {}: [{cx:.3},{cy:.3},{cz:.3},{cw:.3}] → [{:.3},{:.3},{:.3},{:.3}]",
-                args.bone_name, q[0], q[1], q[2], q[3]
-            ),
-            &warnings,
+        ok_text(format!(
+            "adjusted {}: [{cx:.3},{cy:.3},{cz:.3},{cw:.3}] → [{:.3},{:.3},{:.3},{:.3}]",
+            args.bone_name, q[0], q[1], q[2], q[3]
         ))
     }
 
@@ -795,21 +659,56 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(description = "Generate a motion animation from a text prompt via NVIDIA Kimodo. Requires the kimodo-motion-service peer to be connected to the hub.")]
+    #[tool(description = "Full-body motion clip from a text prompt via Kimodo (hub peer must be online). Use clear phase-separated prompts for floor work (sit, extend legs, return to stand). Optional save_name writes JSON under pose_library.animations_dir — check librarySaveVerified in the response; if librarySaveMissing appears, align Kimodo JARVIS_ANIMATIONS_DIR with config (see docs/MCP_POSE_ANIMATION_GUIDE.md).")]
     async fn generate_motion(
         &self,
         Parameters(args): Parameters<GenerateMotionArgs>,
     ) -> CallToolResult {
+        let timeout_sec = args
+            .timeout_sec
+            .unwrap_or(self.kimodo_defaults.timeout_sec)
+            .clamp(10, 3600);
         let req = GenerateRequest {
             prompt: args.prompt,
             duration: args.duration.unwrap_or(self.kimodo_defaults.duration_sec),
             steps: args.steps.unwrap_or(self.kimodo_defaults.steps),
             stream: args.stream.unwrap_or(true),
             save_name: args.save_name,
-            timeout: std::time::Duration::from_secs(self.kimodo_defaults.timeout_sec),
+            timeout: std::time::Duration::from_secs(timeout_sec),
         };
         match self.kimodo.generate_motion(req).await {
-            Ok(outcome) => ok_json(&outcome),
+            Ok(outcome) => {
+                let mut v = match serde_json::to_value(&outcome) {
+                    Ok(val) => val,
+                    Err(e) => return err_text(format!("serialize failure: {e}")),
+                };
+                if let (Some(name), "done" | "ready") =
+                    (outcome.save_name.as_ref(), outcome.final_status.as_str())
+                {
+                    if let Some(obj) = v.as_object_mut() {
+                        let expected = self
+                            .library
+                            .animations_dir
+                            .join(format!("{}.json", slugify(name)));
+                        obj.insert(
+                            "expectedLibraryPath".to_string(),
+                            json!(expected.display().to_string()),
+                        );
+                        if expected.exists() {
+                            obj.insert("librarySaveVerified".to_string(), json!(true));
+                        } else {
+                            obj.insert(
+                                "librarySaveMissing".to_string(),
+                                json!("expected JSON not in jarvis-avatar [pose_library].animations_dir; set JARVIS_ANIMATIONS_DIR in kimodo-motion-service to the same path"),
+                            );
+                        }
+                    }
+                }
+                match serde_json::to_string_pretty(&v) {
+                    Ok(s) => ok_text(s),
+                    Err(e) => err_text(format!("serialize failure: {e}")),
+                }
+            }
             Err(e) => err_text(format!("kimodo: {e}")),
         }
     }
@@ -863,7 +762,7 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(description = "Update metadata (category, looping, holdDuration) on a saved animation.")]
+    #[tool(description = "Update category / looping / holdDuration on a saved .json animation from list_generated_animations. Use after generate_motion to tag clips for layering or replay rules.")]
     async fn update_animation_metadata(
         &self,
         Parameters(args): Parameters<UpdateAnimationMetaArgs>,
@@ -893,6 +792,61 @@ impl JarvisMcpServer {
             })).collect::<Vec<_>>(),
             "animations": animations,
         }))
+    }
+
+    #[tool(description = "Render transparent PNG snapshots of the avatar from one or more camera views (front / left / right / diagonals). Blocks until Bevy finishes all screenshots or timeout. Use framing_preset full_body or face_closeup to match validation docs.")]
+    async fn capture_pose_views(
+        &self,
+        Parameters(args): Parameters<CapturePoseViewsArgs>,
+    ) -> CallToolResult {
+        let mut views = Vec::with_capacity(args.views.len());
+        for s in &args.views {
+            match parse_capture_view_slug(s) {
+                Ok(v) => views.push(v),
+                Err(e) => return err_text(e),
+            }
+        }
+        if views.is_empty() {
+            return err_text("views must include at least one view".to_string());
+        }
+        let framing = match args.framing_preset.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some("full_body") => Some(CaptureFramingPreset::FullBody),
+            Some("face_closeup") => Some(CaptureFramingPreset::FaceCloseup),
+            Some(x) => {
+                return err_text(format!(
+                    "invalid framing_preset {x:?} — use full_body or face_closeup"
+                ));
+            }
+        };
+        let timeout = Duration::from_secs(args.timeout_sec.unwrap_or(180).clamp(5, 600));
+        let output_dir = expand_home(Path::new(args.output_dir.trim()));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let req = CaptureRequest {
+            output_dir,
+            capture_id: args.capture_id,
+            width: args.width.max(64).min(8192),
+            height: args.height.max(64).min(8192),
+            views,
+            framing_preset: framing,
+            camera_overrides: None,
+            response_tx: tx,
+        };
+        if self.capture_tx.0.send(req).is_err() {
+            return err_text(
+                "capture command channel closed — is PoseCapturePlugin loaded?".to_string(),
+            );
+        }
+        match tokio::task::spawn_blocking(move || rx.recv_timeout(timeout)).await {
+            Ok(Ok(result)) => ok_json(&result),
+            Ok(Err(RecvTimeoutError::Timeout)) => {
+                err_text("capture timed out — try a longer timeout_sec or fewer views".to_string())
+            }
+            Ok(Err(RecvTimeoutError::Disconnected)) => {
+                err_text("capture response channel closed before result".to_string())
+            }
+            Err(e) => err_text(format!("capture task join: {e}")),
+        }
     }
 
     #[tool(description = "Check NVIDIA Audio2Face-3D Docker health and current client configuration.")]
@@ -947,9 +901,10 @@ impl ServerHandler for JarvisMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "jarvis-avatar MCP: pose / expression / bone control, Kimodo motion generation, \
-                 and NVIDIA Audio2Face-3D bridging. For poses use pose_bones (Euler degrees) or \
-                 make_fist; set_bones is for round-trips from get_current_bone_state. Read get_pose_guide.",
+                "jarvis-avatar pose MCP (VRM): Always call get_pose_guide first — it is the full authoring manual (Euler vs quaternion, knee/elbow signs, capture loop). \
+Workflow: baseline apply_pose or reset_pose → pose_bones (degrees, clamped) and/or make_fist for hands → generate_motion for clips (check librarySaveVerified) → set_expression for face → tiny adjust_bone quaternion deltas only → capture_pose_views to verify. \
+Kimodo writes animations to the same folder as [pose_library].animations_dir (see kimodo-motion-service env JARVIS_ANIMATIONS_DIR). \
+Multi-clip animation layering (stacked playback) is configured in the in-app debug UI / anim_layer_sets.json — not separate MCP tools yet.",
             )
     }
 }
@@ -965,42 +920,4 @@ pub fn build_a2f_client(
         endpoint: endpoint.into(),
         health_url: health_url.into(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        camera_overrides_from_args, parse_capture_framing_preset, CaptureCameraOverridesArgs,
-    };
-
-    #[test]
-    fn parse_capture_framing_preset_accepts_known_aliases() {
-        assert!(parse_capture_framing_preset("full_body").is_some());
-        assert!(parse_capture_framing_preset("full-body").is_some());
-        assert!(parse_capture_framing_preset("face_closeup").is_some());
-        assert!(parse_capture_framing_preset("face").is_some());
-        assert!(parse_capture_framing_preset("unknown").is_none());
-    }
-
-    #[test]
-    fn camera_overrides_reject_non_finite_values() {
-        let bad = CaptureCameraOverridesArgs {
-            focus_y_offset: Some(f32::NAN),
-            radius: None,
-            height_lift: None,
-        };
-        let err = camera_overrides_from_args(Some(bad)).unwrap_err();
-        assert!(err.contains("camera_overrides.focus_y_offset"));
-    }
-
-    #[test]
-    fn camera_overrides_allow_valid_values() {
-        let good = CaptureCameraOverridesArgs {
-            focus_y_offset: Some(1.2),
-            radius: Some(1.8),
-            height_lift: Some(0.1),
-        };
-        let parsed = camera_overrides_from_args(Some(good)).expect("valid overrides");
-        assert!(parsed.is_some());
-    }
 }

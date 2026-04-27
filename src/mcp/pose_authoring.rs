@@ -7,7 +7,26 @@ use bevy::prelude::{EulerRot, Quat};
 use rmcp::schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::plugins::pose_driver::def_toe_big_yaw_slider_extra_deg;
+
 const EPS_LEN: f32 = 1e-6;
+
+/// Rigify-style skin joints addressed by glTF node name (`DEF-toe_big.L`, `DEF-ero*`, …).
+#[inline]
+pub fn is_def_skin_extra_bone(bone: &str) -> bool {
+    let n = bone.to_ascii_lowercase();
+    n.starts_with("def-toe") || n.starts_with("def-ero")
+}
+
+/// `DEF-toe*` only (case-insensitive prefix). Used for quaternion xyz caps: these joints
+/// combine wide `euler_limit_deg` with per-digit yaw extras (±180° on named toes), so
+/// legitimate unit quaternions often have |x|/|y|/|z| ≫ 0.32; a tight cap corrupts bind.
+#[inline]
+fn is_def_toe_bone(bone: &str) -> bool {
+    bone.as_bytes()
+        .get(..7)
+        .is_some_and(|h| h.eq_ignore_ascii_case(b"def-toe"))
+}
 
 fn default_true() -> bool {
     true
@@ -19,6 +38,10 @@ fn default_true() -> bool {
 pub fn max_xyz_component_for_bone(bone: &str) -> f32 {
     if is_thumb_bone(bone) {
         0.75
+    } else if is_def_toe_bone(bone) {
+        // Before `is_finger_bone`: names like `DEF-toe_index.*` contain "Index" and must
+        // not inherit the finger xyz cap (same class of bug as pre-1.0 `DEF-toe_big.*`).
+        1.0
     } else if is_finger_bone(bone) {
         0.72
     } else if bone == "hips" {
@@ -32,6 +55,8 @@ pub fn max_xyz_component_for_bone(bone: &str) -> f32 {
         0.65
     } else if bone.ends_with("Hand") || bone.ends_with("Toes") {
         0.28
+    } else if is_def_skin_extra_bone(bone) {
+        0.32
     } else if bone.contains("Shoulder") {
         0.12
     } else {
@@ -46,6 +71,11 @@ fn is_thumb_bone(bone: &str) -> bool {
 
 #[inline]
 fn is_finger_bone(bone: &str) -> bool {
+    // Rigify skin toes use `DEF-toe_index.*`, `DEF-toe_middle.*`, etc. — substring
+    // "Index"/"Middle"/… must not classify them as VRM finger metacarpals.
+    if is_def_toe_bone(bone) {
+        return false;
+    }
     bone.contains("Index")
         || bone.contains("Middle")
         || bone.contains("Ring")
@@ -54,6 +84,9 @@ fn is_finger_bone(bone: &str) -> bool {
 
 /// Return `(max_abs_pitch_deg, max_abs_yaw_deg, max_abs_roll_deg)` for `pose_bones`.
 pub fn euler_limit_deg(bone: &str) -> (f32, f32, f32) {
+    if is_def_skin_extra_bone(bone) {
+        return (44.0, 36.0, 36.0);
+    }
     if is_thumb_bone(bone) {
         // Opposition lives mostly on "yaw" (Y) in intrinsic XYZ for thumbs.
         return (40.0, 72.0, 40.0);
@@ -214,7 +247,12 @@ fn euler_quat_clamped(bone: &str, euler: &BoneEulerDeg) -> (Quat, Vec<String>) {
         ));
         r = r.clamp(-max_r, max_r);
     }
-    let q = Quat::from_euler(EulerRot::XYZ, to_rad(p), to_rad(y), to_rad(r));
+    // Match Bones-tab sliders: display yaw + Helen per-digit offset for
+    // `DEF-toe_{big,index,middle,ring,little}.{L,R}` (±180° L/R), same family as the
+    // historical big-toe-only helper. Keeps intrinsic-Y (length-axis twist) in MCP space
+    // aligned with pad-facing for all child toes from `helen_add_individual_toe_bones.py`.
+    let yaw_for_quat = y + def_toe_big_yaw_slider_extra_deg(bone);
+    let q = Quat::from_euler(EulerRot::XYZ, to_rad(p), to_rad(yaw_for_quat), to_rad(r));
     (q, warn)
 }
 
@@ -377,4 +415,57 @@ pub fn make_fist_bones(amount: f32, do_left: bool, do_right: bool) -> HashMap<St
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::pose_driver::def_toe_big_yaw_slider_extra_deg;
+
+    #[test]
+    fn helen_named_toes_get_lr_yaw_offset() {
+        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_big.L"), 180.0);
+        assert_eq!(def_toe_big_yaw_slider_extra_deg("def-toe_big.r"), -180.0);
+        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_index.L"), 180.0);
+        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_middle.R"), -180.0);
+        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_ring.L"), 180.0);
+        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_little.R"), -180.0);
+    }
+
+    #[test]
+    fn non_digit_def_toe_prefixs_skip_yaw_offset() {
+        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe.L"), 0.0);
+        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe.R"), 0.0);
+        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_ero.L"), 0.0);
+        assert_eq!(def_toe_big_yaw_slider_extra_deg("hips"), 0.0);
+    }
+
+    #[test]
+    fn pose_bones_child_toe_matches_big_toe_yaw_path() {
+        let mut m = HashMap::new();
+        m.insert(
+            "DEF-toe_index.L".into(),
+            BoneEulerDeg {
+                pitch_deg: Some(5.0),
+                yaw_deg: Some(0.0),
+                roll_deg: Some(-3.0),
+            },
+        );
+        let (quats, _) = bone_map_from_euler_deg(&m);
+        let mut m2 = HashMap::new();
+        m2.insert(
+            "DEF-toe_big.L".into(),
+            BoneEulerDeg {
+                pitch_deg: Some(5.0),
+                yaw_deg: Some(0.0),
+                roll_deg: Some(-3.0),
+            },
+        );
+        let (qu2, _) = bone_map_from_euler_deg(&m2);
+        assert_eq!(
+            quats.get("DEF-toe_index.L").copied(),
+            qu2.get("DEF-toe_big.L").copied(),
+            "same display euler should yield same pose_q when L yaw extra matches"
+        );
+    }
 }

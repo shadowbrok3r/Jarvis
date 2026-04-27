@@ -62,6 +62,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bevy::app::AnimationSystems;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 use parking_lot::RwLock;
@@ -70,7 +71,8 @@ use rand::RngExt;
 use jarvis_avatar::pose_library::{AnimationFile, PoseFile};
 
 use crate::plugins::pose_driver::{
-    normalized_from_local, IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES,
+    apply_pose_commands, normalized_from_local, sync_bone_entity_index, IndexedBones, PoseCommand,
+    PoseCommandSender, VRM_BONE_NAMES,
 };
 
 pub struct AnimLayersPlugin;
@@ -79,11 +81,23 @@ impl Plugin for AnimLayersPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(LayerStackHandle::default())
             .insert_resource(RestPoseSnapshot::default())
+            // PostUpdate chain (see `pose_driver`): VRMA / `AnimationSystems` first, then
+            // `sync_bone_entity_index` fills `IndexedBones`, we refresh rest locals, layers
+            // enqueue `PoseCommand`s, `apply_pose_commands` writes transforms. All of this stays
+            // `.before(VrmSystemSets::Constraints)` like the pose driver so aim/roll constraints
+            // do not clobber our bones; `bevy_vrm1` runs `SpringBone` only after
+            // `PropagateAfterExpressions`, so we never run after `SpringBone` and secondary
+            // motion stays valid on top of the humanoid pose we authored.
             .add_systems(
                 PostUpdate,
                 (
-                    refresh_rest_pose_snapshot,
-                    advance_and_apply_layers.after(refresh_rest_pose_snapshot),
+                    refresh_rest_pose_snapshot
+                        .after(AnimationSystems)
+                        .after(sync_bone_entity_index),
+                    advance_and_apply_layers
+                        .after(refresh_rest_pose_snapshot)
+                        .before(apply_pose_commands)
+                        .before(VrmSystemSets::Constraints),
                 ),
             );
     }

@@ -29,7 +29,8 @@ use jarvis_avatar::pose_library::{AnimationMeta, PoseFile};
 use crate::kimodo::{GenerateRequest, KimodoClient};
 use crate::plugins::native_anim_player::{ActiveNativeAnimation, StreamingAnimation};
 use crate::plugins::pose_driver::{
-    is_vrm_humanoid_bone, IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES,
+    def_toe_big_yaw_slider_extra_deg, is_vrm_humanoid_bone, IndexedBones, PoseCommand,
+    PoseCommandSender, VRM_BONE_NAMES,
 };
 use crate::plugins::pose_library_assets::PoseLibraryAssets;
 use crate::plugins::shared_runtime::SharedTokio;
@@ -120,6 +121,74 @@ fn def_bone_category_key(name: &str) -> Option<String> {
         .unwrap_or(rest.len());
     let cat = rest[..end].trim_matches('-');
     (!cat.is_empty()).then(|| cat.to_string())
+}
+
+fn is_def_toe_bone(bone: Option<&str>) -> bool {
+    bone.is_some_and(|b| b.to_ascii_lowercase().contains("def-toe"))
+}
+
+/// Intrinsic XYZ Euler (degrees) for Bones-tab sliders when seeding from a snapshot quaternion.
+/// Normalized pose space is identity at bind; `Quat::to_euler` can return equivalent aliases
+/// such as (180°, ε, -180°) for near-identity rotations — the next `from_euler` then diverges
+/// from the true pose. Snap near-identity to zeros; see pose_driver normalized pose space.
+///
+/// `bone`: when `Some` and the name matches `DEF-toe*`, use a **wider** geodesic snap (see
+/// `DEF_TOE_ALIAS_MAX_ANGLE_DEG`) so tiny skin twists that Euler expands to ±180° on X/Z still
+/// read as ~0° in the UI after a good export.
+const DEF_TOE_ALIAS_MAX_ANGLE_DEG: f32 = 34.0;
+const DEFAULT_ALIAS_MAX_ANGLE_DEG: f32 = 12.0;
+
+fn euler_xyz_deg_intrinsic_stable_for_ui(q: Quat, bone: Option<&str>) -> [f32; 3] {
+    let q = q.normalize();
+    let q = if q.w < 0.0 { -q } else { q };
+    // Tight hemisphere check (legacy).
+    if q.w >= 0.999_984_76 {
+        return [0.0, 0.0, 0.0];
+    }
+    // Geodesic angle from identity in degrees — catches Euler aliases where w is slightly
+    // below the threshold but the rotation is still only a few degrees (common on toes).
+    let v_len = (q.x * q.x + q.y * q.y + q.z * q.z).sqrt();
+    let angle_deg = 2.0 * v_len.atan2(q.w.abs()).to_degrees();
+    let max_angle = if is_def_toe_bone(bone) {
+        DEF_TOE_ALIAS_MAX_ANGLE_DEG
+    } else {
+        DEFAULT_ALIAS_MAX_ANGLE_DEG
+    };
+    if angle_deg < max_angle {
+        return [0.0, 0.0, 0.0];
+    }
+    let (ex, ey, ez) = q.to_euler(EulerRot::XYZ);
+    [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()]
+}
+
+fn wrap_deg_180_signed(d: f32) -> f32 {
+    let mut x = d.rem_euclid(360.0);
+    if x > 180.0 {
+        x -= 360.0;
+    }
+    if x <= -180.0 {
+        x += 360.0;
+    }
+    x
+}
+
+/// Same normalized `pose_q` + `ApplyBones` path the Bones-tab sliders use.
+fn send_apply_bones_euler_deg(sender: &PoseCommandSender, bone: &str, deg: [f32; 3]) {
+    let yaw_extra = def_toe_big_yaw_slider_extra_deg(bone);
+    let q = Quat::from_euler(
+        EulerRot::XYZ,
+        deg[0].to_radians(),
+        (deg[1] + yaw_extra).to_radians(),
+        deg[2].to_radians(),
+    );
+    let mut bones = HashMap::new();
+    bones.insert(bone.to_string(), [q.x, q.y, q.z, q.w]);
+    sender.send(PoseCommand::ApplyBones {
+        bones,
+        preserve_omitted_bones: true,
+        blend_weight: Some(1.0),
+        transition_seconds: Some(0.0),
+    });
 }
 
 fn format_def_category_title(key: &str) -> String {
@@ -922,7 +991,7 @@ fn bones_tab(
             idx.len(),
         ));
         ui.label(
-            "Extra rows use glTF node names (e.g. Rigify DEF-*). Sliders apply a local rotation delta on top of bind pose; humanoid rows still use normalized VRM space.",
+            "Extra rows use glTF node names (e.g. Rigify DEF-*). They share the same normalized pose quaternion space as humanoid bones (identity = bind); use Snapshot → sliders after reset.",
         );
     }
 
@@ -974,10 +1043,14 @@ fn bones_tab(
                         rot.rotation[2],
                         rot.rotation[3],
                     );
-                    let (ex, ey, ez) = q.to_euler(EulerRot::XYZ);
-                    state
-                        .bone_euler
-                        .insert(name.clone(), [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()]);
+                    let mut deg = euler_xyz_deg_intrinsic_stable_for_ui(q, Some(name.as_str()));
+                    let yaw_extra = def_toe_big_yaw_slider_extra_deg(name);
+                    // Only apply the big-toe yaw cosmetic when the row is not already the
+                    // near-bind all-zero readout — otherwise (0,0,0) − 180° wrapped shows as Y=180.
+                    if yaw_extra != 0.0 && deg.iter().any(|v| v.abs() > 0.5) {
+                        deg[1] = wrap_deg_180_signed(deg[1] - yaw_extra);
+                    }
+                    state.bone_euler.insert(name.clone(), deg);
                 }
                 state.status = Some(format!(
                     "seeded {} bone slider(s) from live rig",
@@ -1161,9 +1234,11 @@ fn bone_row(
             if ui
                 .small_button("↺")
                 .on_hover_text(
-                    "Snap this bone back to its VRM bind-pose local rotation and zero the \
-                     sliders. Does NOT set the bone to identity — MMD-style rigs have \
-                     non-zero rest rotations on shoulders / twist bones.",
+                    "Snap this bone back to its full VRM bind `Transform` from `RestTransform` \
+                     (translation + rotation + scale), zero the sliders, then re-apply the \
+                     same normalized pose_q the sliders use at (0°,0°,0°) so rotation matches \
+                     manual apply — avoids DEF-toe_big and other binds where raw rest rotation \
+                     differs from slider-neutral pose.",
                 )
                 .clicked()
             {
@@ -1203,7 +1278,15 @@ fn bone_row(
         euler[1] = 0.0;
         euler[2] = 0.0;
         if let Some(s) = sender {
+            // Full bind (translation + rotation + scale) — needed for Rigify DEF-*.
             s.send(PoseCommand::ResetBones(vec![bone.to_string()]));
+                    // `ResetBones` copies raw `RestTransform`; slider "zero" uses normalized pose_q
+                    // → `local_from_normalized` (see pose_driver). Those can differ on Helen
+                    // `DEF-toe_{big,index,middle,ring,little}` (±180° display-yaw cosmetic) and any
+                    // bind where file rest rotation ≠ slider-neutral pose.
+            // Re-apply the same quaternion the sliders would send for (0°,0°,0°) so ↺ matches
+            // a manual zero apply without flipping.
+            send_apply_bones_euler_deg(s, bone, [0.0, 0.0, 0.0]);
             state.status = Some(format!("{bone} → rest"));
         }
     } else if changed {
@@ -1211,20 +1294,7 @@ fn bone_row(
         euler[1] = y;
         euler[2] = z;
         if let Some(s) = sender {
-            let q = Quat::from_euler(
-                EulerRot::XYZ,
-                x.to_radians(),
-                y.to_radians(),
-                z.to_radians(),
-            );
-            let mut bones = HashMap::new();
-            bones.insert(bone.to_string(), [q.x, q.y, q.z, q.w]);
-            s.send(PoseCommand::ApplyBones {
-                bones,
-                preserve_omitted_bones: true,
-                blend_weight: Some(1.0),
-                transition_seconds: Some(0.0),
-            });
+            send_apply_bones_euler_deg(s, bone, [x, y, z]);
             state.status = Some(format!("{bone} → ({x:.1}, {y:.1}, {z:.1})"));
         }
     }

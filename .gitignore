@@ -5,8 +5,11 @@
 *.json
 /assets/poses/
 /assets/animations/
-/config/user.toml
+/config/user*
 /assets/pose_captures/
 /vendor/
 .pose_captures
 artifacts/
+/__pycache__
+/.dev/
+/docs/
