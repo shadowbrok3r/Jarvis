@@ -15,8 +15,8 @@
 //! The canonical camelCase bone names (`"leftUpperArm"`, `"rightHand"`, …) are
 //! the identifiers used for **humanoid** bones across the MCP boundary.
 //! Additional **skin-only** joints (e.g. Rigify ``DEF-toe_big.L``) are indexed by
-//! their glTF node [`Name`] and driven with **local delta** quaternions (see
-//! [`is_vrm_humanoid_bone`]).
+//! their glTF node [`Name`] and driven in the **same normalized pose quaternion
+//! space** as humanoid bones (see [`is_vrm_humanoid_bone`] for name classification only).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -82,6 +82,34 @@ fn local_from_normalized(rest_local: Quat, rest_world: Quat, pose_q: Quat) -> Qu
 /// ```
 pub fn normalized_from_local(rest_local: Quat, rest_world: Quat, raw_local: Quat) -> Quat {
     rest_world * rest_local.inverse() * raw_local * rest_world.inverse()
+}
+
+/// Helen / Rigify per-digit skin toes `DEF-toe_{big,index,middle,ring,little}.{L,R}`:
+/// intrinsic XYZ Euler from normalized `pose_q` often lands on **±180° yaw** (or equivalent
+/// aliases) at bind while the pad reads neutral in the viewport. The Bones tab stores **display**
+/// yaw near 0 at bind; this offset is added to **display** yaw (degrees) before
+/// `Quat::from_euler(EulerRot::XYZ, …)` so MCP `pose_bones` and the sliders match the same
+/// convention for **every** named toe chain (not only `DEF-toe_big`).
+#[inline]
+pub fn def_toe_big_yaw_slider_extra_deg(bone: &str) -> f32 {
+    let b = bone.to_ascii_lowercase();
+    let Some(rest) = b.strip_prefix("def-toe_") else {
+        return 0.0;
+    };
+    let Some((digit, side)) = rest.split_once('.') else {
+        return 0.0;
+    };
+    if !matches!(
+        digit,
+        "big" | "index" | "middle" | "ring" | "little"
+    ) {
+        return 0.0;
+    }
+    match side {
+        "l" => 180.0,
+        "r" => -180.0,
+        _ => 0.0,
+    }
 }
 
 use jarvis_avatar::config::Settings;
@@ -542,7 +570,7 @@ fn sync_extra_skin_bones(world: &mut World) {
     }
 }
 
-fn sync_bone_entity_index(world: &mut World) {
+pub(crate) fn sync_bone_entity_index(world: &mut World) {
     sync_humanoid_bone_entities(world);
     sync_extra_skin_bones(world);
     refresh_indexed_bones_merged(world);
@@ -778,25 +806,26 @@ pub struct ActiveTransitions {
 // ---------- Systems ------------------------------------------------------------
 
 /// Map a pose-control quaternion to the bone's raw local rotation.
-/// Humanoid keys use normalized-humanoid space ([`local_from_normalized`]); extra
-/// skin joints use ``rest_local * pose_q`` (slider Euler as a local delta).
-fn bone_target_local_rotation(world: &World, bone_name: &str, entity: Entity, pose_q: Quat) -> Quat {
+///
+/// All driven bones (humanoid + extra skin joints) use the same **normalized
+/// pose space** as three-vrm / Airi: [`local_from_normalized`]. At
+/// `pose_q = identity` every bone returns its bind `rest_local`, so MCP
+/// `pose_bones` / UI sliders round-trip with [`normalized_from_local`] in
+/// [`publish_bone_snapshot`] without a separate “delta quaternion” path for
+/// Rigify `DEF-*` joints (which previously broke Euler slider extraction).
+fn bone_target_local_rotation(world: &World, _bone_name: &str, entity: Entity, pose_q: Quat) -> Quat {
     let rest_local = world
         .get::<RestTransform>(entity)
         .map(|rt| rt.0.rotation)
         .unwrap_or(Quat::IDENTITY);
-    if is_vrm_humanoid_bone(bone_name) {
-        let rest_world = world
-            .get::<RestGlobalTransform>(entity)
-            .map(|rgtf| rgtf.0.rotation())
-            .unwrap_or(Quat::IDENTITY);
-        local_from_normalized(rest_local, rest_world, pose_q)
-    } else {
-        rest_local * pose_q
-    }
+    let rest_world = world
+        .get::<RestGlobalTransform>(entity)
+        .map(|rgtf| rgtf.0.rotation())
+        .unwrap_or(Quat::IDENTITY);
+    local_from_normalized(rest_local, rest_world, pose_q)
 }
 
-fn apply_pose_commands(world: &mut World) {
+pub(crate) fn apply_pose_commands(world: &mut World) {
     let cmds: Vec<PoseCommand> = {
         let queue = world.resource::<PoseCommandQueue>();
         let mut v = Vec::new();
@@ -1025,10 +1054,21 @@ fn apply_pose_commands(world: &mut World) {
                     let Some(&e) = bone_map.get(name) else {
                         continue;
                     };
-                    let target =
-                        bone_target_local_rotation(world, name.as_str(), e, Quat::IDENTITY);
-                    if let Some(mut tf) = world.get_mut::<Transform>(e) {
-                        tf.rotation = target;
+                    // Match `ResetPose` semantics for this joint: restore the **full** bind
+                    // `Transform` from `RestTransform` (rotation + translation + scale). Toes
+                    // and other Rigify `DEF-*` extras often carry non-zero bind translation; only
+                    // overwriting rotation while translation stayed edited left the toe mesh
+                    // translated / flipped when sliders were zeroed.
+                    if let Some(bind) = world.get::<RestTransform>(e).map(|rt| rt.0) {
+                        if let Some(mut tf) = world.get_mut::<Transform>(e) {
+                            *tf = bind;
+                        }
+                    } else {
+                        let target =
+                            bone_target_local_rotation(world, name.as_str(), e, Quat::IDENTITY);
+                        if let Some(mut tf) = world.get_mut::<Transform>(e) {
+                            tf.rotation = target;
+                        }
                     }
                     if let Some(mut active) = world.get_resource_mut::<ActiveTransitions>() {
                         active.bones.remove(name);
@@ -1147,20 +1187,28 @@ fn publish_bone_snapshot(world: &mut World) {
             },
         );
     }
-    // Extra skin joints: store **local delta** ``rest_local⁻¹ · raw_local`` so the
-    // Pose Controller Bones tab can seed sliders (Euler of delta). Not the same
-    // space as humanoid keys — MCP `adjust_bone` still only allows humanoid names.
+    // Extra skin joints: same normalized pose space as humanoid keys so MCP
+    // `pose_bones` / `get_current_bone_state` / Pose Controller sliders agree.
     for (name, &e) in &index.extra_by_name {
         let Some(tf) = world.get::<Transform>(e) else { continue; };
         let rest_local = world
             .get::<RestTransform>(e)
             .map(|rt| rt.0.rotation)
             .unwrap_or(Quat::IDENTITY);
-        let delta = rest_local.inverse() * tf.rotation;
+        let rest_world = world
+            .get::<RestGlobalTransform>(e)
+            .map(|rgtf| rgtf.0.rotation())
+            .unwrap_or(Quat::IDENTITY);
+        let normalized = normalized_from_local(rest_local, rest_world, tf.rotation);
         snap.bones.insert(
             name.clone(),
             BoneEntry {
-                rotation: [delta.x, delta.y, delta.z, delta.w],
+                rotation: [
+                    normalized.x,
+                    normalized.y,
+                    normalized.z,
+                    normalized.w,
+                ],
             },
         );
     }

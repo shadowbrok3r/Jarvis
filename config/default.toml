@@ -36,6 +36,9 @@ lock_root_y = true
 # Hard-clamp the VRM root entity's local Y to world_position.y every frame (after AnimationSystems).
 # Catches sliding that comes from something translating the VRM scene root (not the hips bone).
 lock_vrm_root_y = true
+# When true, after the VRM is initialized, auto-apply `config/spring_presets/<vrm_key>.toml` if present.
+# Default off — export tuning from the Rig editor first, then enable for hands-free reloads.
+auto_load_spring_preset = false
 background_color = [0.05, 0.05, 0.08, 1.0]
 window_width = 800
 window_height = 900

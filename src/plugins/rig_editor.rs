@@ -49,6 +49,36 @@ pub struct RigEditorState {
     pub pick_radius_m: f32,
     pub twist_drag_sensitivity: f32,
     pub last_pick_message: Option<String>,
+    /// Rig editor → VRMC spring joints / colliders panel (filter + grouping + preset UX).
+    pub spring_ui: RigEditorSpringUiState,
+}
+
+/// UI-only state for spring joint / collider lists in the Rig editor window.
+#[derive(Clone, Debug)]
+pub struct RigEditorSpringUiState {
+    pub joint_filter: String,
+    /// 0 = all, 1 = name prefix, 2 = VRMC spring chain name
+    pub joint_group_mode: u8,
+    pub joint_group_value: String,
+    pub collider_filter: String,
+    /// 0 = all, 1 = shape kind, 2 = VRMC spring chain (collider host → chain)
+    pub collider_group_mode: u8,
+    pub collider_group_value: String,
+    pub preset_status: Option<String>,
+}
+
+impl Default for RigEditorSpringUiState {
+    fn default() -> Self {
+        Self {
+            joint_filter: String::new(),
+            joint_group_mode: 0,
+            joint_group_value: String::new(),
+            collider_filter: String::new(),
+            collider_group_mode: 0,
+            collider_group_value: String::new(),
+            preset_status: None,
+        }
+    }
 }
 
 impl Default for RigEditorState {
@@ -60,6 +90,7 @@ impl Default for RigEditorState {
             pick_radius_m: 0.14,
             twist_drag_sensitivity: 0.35,
             last_pick_message: None,
+            spring_ui: RigEditorSpringUiState::default(),
         }
     }
 }

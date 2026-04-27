@@ -1,0 +1,22 @@
+## Learned User Preferences
+
+- When checking DAZ or VRM rig problems, evaluate meshes and animations in Blender pose mode during playback, not only rest pose.
+- When a plan file is attached for implementation, follow it but do not edit the plan document itself.
+- For DAZ to VRM work, consult the process guide at `/home/shadowbroker/Desktop/VRMS/DAZ_to_VRM_Process_Guide.docx` when behavior or pipeline context is unclear.
+- For Airi plugin or extension work, use the cloned app at `/home/shadowbroker/Desktop/airi` and read `/home/shadowbroker/Desktop/airi-plugin-dev-guide.md` for conventions and testing ideas.
+- For MCP `pose_bones`, pass `bones` as a JSON object mapping each bone name to `{ "pitch_deg"?, "yaw_deg"?, "roll_deg"? }`, not an array; array-shaped payloads fail deserialization.
+
+## Learned Workspace Facts
+
+- Primary avatar app repo for this workspace: `/home/shadowbroker/Desktop/JarvisProject/jarvis-avatar`.
+- Per-VRM VRMC spring/collider presets: `config/spring_presets/{vrm_key}.toml` where `vrm_key` is 16 lowercase hex chars (64-bit FNV-1a over the UTF-8 logical VRM path: `VrmPath` when present, else `[avatar].model_path`); see `src/plugins/spring_preset.rs`. `[avatar].auto_load_spring_preset` (default `false` in `config/default.toml`, override in `config/user.toml`) controls auto-apply on VRM init.
+- Local VRM specification tree (offline reference): `/home/shadowbroker/Desktop/vrm-specification-master`.
+- Helen VRM export assets live under `/home/shadowbroker/Desktop/JarvisProject/VRMS/Avatars/Helen` (includes `Helen.blend`, `export_helen_vrm.sh`; run with `HELEN_RUN_TOE_SCRIPT=1` when exercising the toe-export path).
+- Blender VRM add-on: source tree `/home/shadowbroker/.config/blender/5.0/extensions/blender_org/vrm` (exporter behavior, `Vrm1Exporter` / glTF settings). VRM1 humanoid and expressions live on **`armature.data.vrm_addon_extension`**, not on the armature Object—scripts that only scan the Object can miss the VRM1 block; read assignments via `human_bones.human_bone_name_to_human_bone()` and each entry’s `node.bone_name`, not only a naive RNA pointer sweep. Use `user-blender` MCP (`execute_blender_code`, scene inspection) for diagnostics.
+- DAZ-to-VRM sessions often use objects named `Eve Armature` and `Eve Body`; working notes: `/home/shadowbroker/Desktop/VRMS/cursor_blender_vrm_export_body_issues.md`. Exported glTF missing `skins` can trace to `export_armature_object_remove` when the rig has non-deform root bones (see `Vrm1Exporter.gltf_export_armature_object_remove` and Khronos glTF-Blender-IO issue 2394).
+- Kimodo `kimodo-motion-service.py` (repo root) resolves `ANIMATIONS_DIR` in this order: `JARVIS_ANIMATIONS_DIR`, then `[pose_library].animations_dir` from `config/user.toml` then `default.toml` (stdlib `tomllib` on Python 3.11+, small no-deps parser below that), then a legacy XDG default; keep Kimodo’s process cwd aligned with jarvis-avatar when using relative paths like `./assets/animations` so `librarySaveVerified` / `list_generated_animations` stay in sync.
+- Local dev stack: `./scripts/restart_dev_stack.sh` stops/starts conda Kimodo and the debug `jarvis-avatar` binary with logs under `/.dev/` (gitignored); set `KIMODO_CONDA_ENV` or a one-line `.dev/kimodo_conda_env` to the conda env name.
+- If `cargo` on PATH is a broken rustup proxy, use a toolchain-local binary such as `/home/shadowbroker/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo` after it passes `cargo -V`.
+- Channel hub peer auth on `ws://…:6121/ws` follows `[ironclaw].auth_token` in `config/user.toml` and the `IRONCLAW_TOKEN` environment variable; Kimodo needs a matching token when those are set, or clear both for tokenless local dev.
+- Cursor caches `user-pose-controller` tool JSON under `~/.cursor/projects/<workspace-id>/mcps/user-pose-controller/tools/`; restart jarvis-avatar and refresh or re-add that MCP server after changing Rust `#[tool(description = …)]` text so descriptors match the live server.
+- Rigify skin extras (`DEF-toe*`, `DEF-ero*`, etc.) are driven like other bones when exposed by the loaded VRM; MCP allowlisting and Bones-tab Euler/reset quirks for those joints are summarized in `assets/POSE_GUIDE.md`.

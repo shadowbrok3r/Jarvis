@@ -449,6 +449,11 @@ pub struct AvatarSettings {
     pub background_color: [f32; 4],
     pub window_width: u32,
     pub window_height: u32,
+    /// If true, when a VRM reaches `Initialized`, load `config/spring_presets/<vrm_key>.toml`
+    /// when that file exists (see `plugins/spring_preset.rs` for how `vrm_key` is derived).
+    /// Off by default — use Rig editor export/import for explicit workflows.
+    #[serde(default)]
+    pub auto_load_spring_preset: bool,
 }
 
 fn default_one() -> f32 {

@@ -8,7 +8,7 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts};
-use bevy_vrm1::prelude::{ColliderShape, SpringJointProps};
+use bevy_vrm1::prelude::{ColliderShape, SpringJointProps, SpringNodeRegistry, Vrm, VrmPath};
 
 use jarvis_avatar::config::Settings;
 
@@ -16,6 +16,7 @@ use crate::plugins::pose_driver::{
     BoneSnapshotHandle, IndexedBones, PoseCommand, PoseCommandSender,
 };
 use crate::plugins::rig_editor::RigEditorState;
+use crate::plugins::spring_preset;
 
 pub fn draw_rig_editor_window(
     mut contexts: EguiContexts,
@@ -24,6 +25,7 @@ pub fn draw_rig_editor_window(
     mut debug: ResMut<super::DebugUiState>,
     indexed: Option<Res<IndexedBones>>,
     sender: Option<Res<PoseCommandSender>>,
+    vrm_q: Query<(&VrmPath, &Name, Option<&SpringNodeRegistry>), With<Vrm>>,
     mut springs: Query<(Entity, Option<&Name>, &mut SpringJointProps)>,
     mut colliders: Query<(Entity, Option<&Name>, &mut ColliderShape)>,
 ) {
@@ -164,6 +166,273 @@ pub fn draw_rig_editor_window(
                     "Per-joint solver weights from the loaded VRM. Names come from the glTF \
                      node `Name` when present.",
                 );
+
+                let vrm_row = vrm_q.iter().next();
+                let (logical_vrm_path, vrm_key, vrm_display_name, joint_chain_map) =
+                    if let Some((vrm_path, vrm_name, maybe_reg)) = vrm_row {
+                        let logical = spring_preset::logical_vrm_path(
+                            Some(vrm_path.0.as_path()),
+                            settings.avatar.model_path.as_str(),
+                        );
+                        let key = spring_preset::vrm_preset_key(&logical);
+                        let jp = maybe_reg
+                            .map(spring_preset::joint_to_spring_chain)
+                            .unwrap_or_default();
+                        (logical, key, vrm_name.as_str().to_string(), jp)
+                    } else {
+                        (String::new(), String::new(), String::new(), Vec::new())
+                    };
+
+                ui.collapsing("Spring / collider preset (per VRM)", |ui| {
+                    ui.label(egui::RichText::new("VRM key (filename stem)").strong());
+                    ui.monospace(if vrm_key.is_empty() {
+                        "(no VRM entity)".into()
+                    } else {
+                        format!("{vrm_key}.toml  ← under {}", spring_preset::SPRING_PRESETS_DIR)
+                    });
+                    ui.small(format!(
+                        "Logical path: {}  ·  Display name: {}",
+                        if logical_vrm_path.is_empty() {
+                            "—"
+                        } else {
+                            logical_vrm_path.as_str()
+                        },
+                        if vrm_display_name.is_empty() {
+                            "—"
+                        } else {
+                            vrm_display_name.as_str()
+                        }
+                    ));
+                    ui.checkbox(
+                        &mut settings.avatar.auto_load_spring_preset,
+                        "Auto-load matching preset on VRM init (if file exists)",
+                    );
+                    ui.small(
+                        "Uses FNV-1a hex over the logical VRM path — see module docs in \
+                         spring_preset.rs.",
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !vrm_key.is_empty(),
+                                egui::Button::new("Export preset for this VRM…"),
+                            )
+                            .clicked()
+                        {
+                            let path = spring_preset::default_preset_path_for_logical_path(
+                                vrm_row.map(|(p, _, _)| p.0.as_path()),
+                                settings.avatar.model_path.as_str(),
+                            );
+                            let joints: Vec<spring_preset::PresetJoint> = springs
+                                .iter()
+                                .filter_map(|(_, name, p)| {
+                                    let n = name?;
+                                    Some(spring_preset::PresetJoint {
+                                        name: n.as_str().to_string(),
+                                        stiffness: p.stiffness,
+                                        drag_force: p.drag_force,
+                                        gravity_power: p.gravity_power,
+                                        hit_radius: p.hit_radius,
+                                        gravity_dir: [p.gravity_dir.x, p.gravity_dir.y, p.gravity_dir.z],
+                                    })
+                                })
+                                .collect();
+                            let cols: Vec<spring_preset::PresetCollider> = colliders
+                                .iter()
+                                .filter_map(|(_, name, shape)| {
+                                    let n = name?;
+                                    Some(spring_preset::PresetCollider {
+                                        name: n.as_str().to_string(),
+                                        shape: spring_preset::PresetColliderShapeV1::from(shape),
+                                    })
+                                })
+                                .collect();
+                            let snap = spring_preset::build_spring_preset_file(
+                                vrm_key.clone(),
+                                logical_vrm_path.clone(),
+                                vrm_display_name.clone(),
+                                joints,
+                                cols,
+                            );
+                            match spring_preset::save_preset_file(&path, &snap) {
+                                Ok(()) => {
+                                    rig.spring_ui.preset_status =
+                                        Some(format!("Exported {}", path.display()));
+                                }
+                                Err(e) => rig.spring_ui.preset_status = Some(e),
+                            }
+                        }
+                        if ui
+                            .add_enabled(!vrm_key.is_empty(), egui::Button::new("Import default file"))
+                            .on_hover_text(format!(
+                                "Load {}",
+                                spring_preset::default_preset_path_for_logical_path(
+                                    vrm_row.map(|(p, _, _)| p.0.as_path()),
+                                    settings.avatar.model_path.as_str(),
+                                )
+                                .display()
+                            ))
+                            .clicked()
+                        {
+                            let path = spring_preset::default_preset_path_for_logical_path(
+                                vrm_row.map(|(p, _, _)| p.0.as_path()),
+                                settings.avatar.model_path.as_str(),
+                            );
+                            match spring_preset::load_preset_file(&path) {
+                                Ok(preset) => {
+                                    let (jh, jm, ch, cm) = spring_preset::apply_spring_preset(
+                                        &preset,
+                                        &mut springs,
+                                        &mut colliders,
+                                    );
+                                    rig.spring_ui.preset_status = Some(format!(
+                                        "Imported {} — joints {}/{} ok, colliders {}/{} ok",
+                                        path.display(),
+                                        jh,
+                                        jh + jm,
+                                        ch,
+                                        ch + cm
+                                    ));
+                                }
+                                Err(e) => rig.spring_ui.preset_status = Some(e),
+                            }
+                        }
+                        if ui.button("Import from file…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("TOML preset", &["toml"])
+                                .pick_file()
+                            {
+                                match spring_preset::load_preset_file(&path) {
+                                    Ok(preset) => {
+                                        let (jh, jm, ch, cm) = spring_preset::apply_spring_preset(
+                                            &preset,
+                                            &mut springs,
+                                            &mut colliders,
+                                        );
+                                        let warn = if !vrm_key.is_empty() && preset.vrm_key != vrm_key
+                                        {
+                                            format!(" (preset key {} ≠ current {})", preset.vrm_key, vrm_key)
+                                        } else {
+                                            String::new()
+                                        };
+                                        rig.spring_ui.preset_status = Some(format!(
+                                            "Imported {}{} — joints {}/{} ok, colliders {}/{} ok",
+                                            path.display(),
+                                            warn,
+                                            jh,
+                                            jh + jm,
+                                            ch,
+                                            ch + cm
+                                        ));
+                                    }
+                                    Err(e) => rig.spring_ui.preset_status = Some(e),
+                                }
+                            }
+                        }
+                    });
+                    if let Some(msg) = &rig.spring_ui.preset_status {
+                        ui.small(egui::RichText::new(msg).italics());
+                    }
+                });
+
+                let joint_filter_lc = rig.spring_ui.joint_filter.to_lowercase();
+                ui.horizontal(|ui| {
+                    ui.label("Filter");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut rig.spring_ui.joint_filter)
+                            .desired_width(160.0)
+                            .hint_text("substring…"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Group by");
+                    egui::ComboBox::from_id_salt("rig_spring_joint_group_mode")
+                        .width(160.0)
+                        .selected_text(match rig.spring_ui.joint_group_mode {
+                            0 => "All",
+                            1 => "Bone name prefix",
+                            2 => "VRMC spring chain",
+                            _ => "All",
+                        })
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(rig.spring_ui.joint_group_mode == 0, "All").clicked()
+                            {
+                                rig.spring_ui.joint_group_mode = 0;
+                            }
+                            if ui
+                                .selectable_label(rig.spring_ui.joint_group_mode == 1, "Bone name prefix")
+                                .clicked()
+                            {
+                                rig.spring_ui.joint_group_mode = 1;
+                            }
+                            if ui
+                                .selectable_label(rig.spring_ui.joint_group_mode == 2, "VRMC spring chain")
+                                .clicked()
+                            {
+                                rig.spring_ui.joint_group_mode = 2;
+                            }
+                        });
+                });
+                if rig.spring_ui.joint_group_mode == 1 {
+                    let mut prefixes: Vec<String> = springs
+                        .iter()
+                        .filter_map(|(_, n, _)| n.map(|x| spring_preset::bone_name_prefix(x.as_str())))
+                        .collect();
+                    prefixes.sort();
+                    prefixes.dedup();
+                    prefixes.insert(0, "(all)".to_string());
+                    if !prefixes.contains(&rig.spring_ui.joint_group_value) {
+                        rig.spring_ui.joint_group_value = "(all)".to_string();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Prefix");
+                        egui::ComboBox::from_id_salt("rig_spring_joint_prefix_pick")
+                            .width(200.0)
+                            .selected_text(rig.spring_ui.joint_group_value.clone())
+                            .show_ui(ui, |ui| {
+                                for p in &prefixes {
+                                    if ui
+                                        .selectable_value(
+                                            &mut rig.spring_ui.joint_group_value,
+                                            p.clone(),
+                                            p,
+                                        )
+                                        .clicked()
+                                    {}
+                                }
+                            });
+                    });
+                } else if rig.spring_ui.joint_group_mode == 2 {
+                    let mut chains: Vec<String> = joint_chain_map
+                        .iter()
+                        .map(|(_, c)| c.clone())
+                        .collect();
+                    chains.sort();
+                    chains.dedup();
+                    chains.insert(0, "(all)".to_string());
+                    if !chains.contains(&rig.spring_ui.joint_group_value) {
+                        rig.spring_ui.joint_group_value = "(all)".to_string();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Spring");
+                        egui::ComboBox::from_id_salt("rig_spring_joint_chain_pick")
+                            .width(200.0)
+                            .selected_text(rig.spring_ui.joint_group_value.clone())
+                            .show_ui(ui, |ui| {
+                                for c in &chains {
+                                    if ui
+                                        .selectable_value(
+                                            &mut rig.spring_ui.joint_group_value,
+                                            c.clone(),
+                                            c,
+                                        )
+                                        .clicked()
+                                    {}
+                                }
+                            });
+                    });
+                }
+
                 let mut rows: Vec<(Entity, Option<String>)> = Vec::new();
                 for (e, name, _props) in springs.iter() {
                     rows.push((e, name.map(|n| n.as_str().to_string())));
@@ -180,7 +449,18 @@ pub fn draw_rig_editor_window(
                             ui.label("No spring joints on this model.");
                             return;
                         }
+                        let mut shown = 0usize;
                         for (entity, label) in &rows {
+                            if !spring_row_visible(
+                                label,
+                                &joint_filter_lc,
+                                rig.spring_ui.joint_group_mode,
+                                &rig.spring_ui.joint_group_value,
+                                &joint_chain_map,
+                            ) {
+                                continue;
+                            }
+                            shown += 1;
                             ui.group(|ui| {
                                 ui.label(
                                     egui::RichText::new(label.as_deref().unwrap_or("(unnamed)"))
@@ -223,6 +503,9 @@ pub fn draw_rig_editor_window(
                                 }
                             });
                         }
+                        if shown == 0 {
+                            ui.label("No joints match filter / category.");
+                        }
                     });
             });
 
@@ -232,9 +515,113 @@ pub fn draw_rig_editor_window(
                     "Collider shapes on spring-bone nodes (sphere / capsule). Radius scales with \
                      parent node scale in the solver.",
                 );
-                let mut rows: Vec<(Entity, Option<String>)> = Vec::new();
-                for (e, name, _shape) in colliders.iter() {
-                    rows.push((e, name.map(|n| n.as_str().to_string())));
+
+                let vrm_row = vrm_q.iter().next();
+                let collider_chain_map = vrm_row
+                    .and_then(|(_, _, reg)| reg)
+                    .map(spring_preset::collider_to_spring_chain)
+                    .unwrap_or_default();
+
+                let collider_filter_lc = rig.spring_ui.collider_filter.to_lowercase();
+                ui.horizontal(|ui| {
+                    ui.label("Filter");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut rig.spring_ui.collider_filter)
+                            .desired_width(160.0)
+                            .hint_text("substring…"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Group by");
+                    egui::ComboBox::from_id_salt("rig_spring_collider_group_mode")
+                        .width(160.0)
+                        .selected_text(match rig.spring_ui.collider_group_mode {
+                            0 => "All",
+                            1 => "Shape kind",
+                            2 => "VRMC spring chain",
+                            _ => "All",
+                        })
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(rig.spring_ui.collider_group_mode == 0, "All")
+                                .clicked()
+                            {
+                                rig.spring_ui.collider_group_mode = 0;
+                            }
+                            if ui
+                                .selectable_label(rig.spring_ui.collider_group_mode == 1, "Shape kind")
+                                .clicked()
+                            {
+                                rig.spring_ui.collider_group_mode = 1;
+                            }
+                            if ui
+                                .selectable_label(
+                                    rig.spring_ui.collider_group_mode == 2,
+                                    "VRMC spring chain",
+                                )
+                                .clicked()
+                            {
+                                rig.spring_ui.collider_group_mode = 2;
+                            }
+                        });
+                });
+                if rig.spring_ui.collider_group_mode == 1 {
+                    let kinds = ["(all)", "Sphere", "Capsule"];
+                    if !kinds.contains(&rig.spring_ui.collider_group_value.as_str()) {
+                        rig.spring_ui.collider_group_value = "(all)".to_string();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Shape");
+                        egui::ComboBox::from_id_salt("rig_spring_collider_shape_pick")
+                            .width(120.0)
+                            .selected_text(rig.spring_ui.collider_group_value.clone())
+                            .show_ui(ui, |ui| {
+                                for k in kinds {
+                                    if ui
+                                        .selectable_value(
+                                            &mut rig.spring_ui.collider_group_value,
+                                            k.to_string(),
+                                            k,
+                                        )
+                                        .clicked()
+                                    {}
+                                }
+                            });
+                    });
+                } else if rig.spring_ui.collider_group_mode == 2 {
+                    let mut chains: Vec<String> = collider_chain_map
+                        .iter()
+                        .map(|(_, c)| c.clone())
+                        .collect();
+                    chains.sort();
+                    chains.dedup();
+                    chains.insert(0, "(all)".to_string());
+                    if !chains.contains(&rig.spring_ui.collider_group_value) {
+                        rig.spring_ui.collider_group_value = "(all)".to_string();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Spring");
+                        egui::ComboBox::from_id_salt("rig_spring_collider_chain_pick")
+                            .width(200.0)
+                            .selected_text(rig.spring_ui.collider_group_value.clone())
+                            .show_ui(ui, |ui| {
+                                for c in &chains {
+                                    if ui
+                                        .selectable_value(
+                                            &mut rig.spring_ui.collider_group_value,
+                                            c.clone(),
+                                            c,
+                                        )
+                                        .clicked()
+                                    {}
+                                }
+                            });
+                    });
+                }
+
+                let mut rows: Vec<(Entity, Option<String>, ColliderShape)> = Vec::new();
+                for (e, name, shape) in colliders.iter() {
+                    rows.push((e, name.map(|n| n.as_str().to_string()), *shape));
                 }
                 rows.sort_by(|a, b| {
                     let la = a.1.as_deref().unwrap_or("");
@@ -248,7 +635,19 @@ pub fn draw_rig_editor_window(
                             ui.label("No collider shapes on entities in the world.");
                             return;
                         }
-                        for (entity, label) in &rows {
+                        let mut shown = 0usize;
+                        for (entity, label, shape_snap) in &rows {
+                            if !collider_row_visible(
+                                label,
+                                &collider_filter_lc,
+                                rig.spring_ui.collider_group_mode,
+                                &rig.spring_ui.collider_group_value,
+                                &collider_chain_map,
+                                shape_snap,
+                            ) {
+                                continue;
+                            }
+                            shown += 1;
                             ui.group(|ui| {
                                 ui.label(
                                     egui::RichText::new(label.as_deref().unwrap_or("(unnamed)"))
@@ -335,10 +734,79 @@ pub fn draw_rig_editor_window(
                                 }
                             });
                         }
+                        if shown == 0 {
+                            ui.label("No colliders match filter / category.");
+                        }
                     });
             });
         });
     settings.ui.show_rig_editor = open;
+}
+
+fn spring_row_visible(
+    label: &Option<String>,
+    filter_lc: &str,
+    group_mode: u8,
+    group_val: &str,
+    joint_chain: &[(String, String)],
+) -> bool {
+    let label_s = label.as_deref().unwrap_or("");
+    if !filter_lc.is_empty() && !label_s.to_lowercase().contains(filter_lc) {
+        return false;
+    }
+    match group_mode {
+        0 => true,
+        1 => {
+            group_val.is_empty()
+                || group_val == "(all)"
+                || spring_preset::bone_name_prefix(label_s) == group_val
+        }
+        2 => {
+            group_val.is_empty()
+                || group_val == "(all)"
+                || joint_chain
+                    .iter()
+                    .find(|(j, _)| j == label_s)
+                    .map(|(_, c)| c.as_str())
+                    == Some(group_val)
+        }
+        _ => true,
+    }
+}
+
+fn collider_row_visible(
+    label: &Option<String>,
+    filter_lc: &str,
+    group_mode: u8,
+    group_val: &str,
+    collider_chain: &[(String, String)],
+    shape: &ColliderShape,
+) -> bool {
+    let label_s = label.as_deref().unwrap_or("");
+    if !filter_lc.is_empty() && !label_s.to_lowercase().contains(filter_lc) {
+        return false;
+    }
+    match group_mode {
+        0 => true,
+        1 => {
+            group_val.is_empty()
+                || group_val == "(all)"
+                || match shape {
+                    ColliderShape::Sphere(_) => group_val == "Sphere",
+                    ColliderShape::Capsule(_) => group_val == "Capsule",
+                }
+        }
+        2 => {
+            group_val.is_empty()
+                || group_val == "(all)"
+                || collider_chain
+                    .iter()
+                    .find(|(j, _)| j == label_s)
+                    .map(|(_, c)| c.as_str())
+                    == Some(group_val)
+        }
+        _ => true,
+    }
 }
 
 fn apply_euler(

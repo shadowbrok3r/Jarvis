@@ -6,9 +6,9 @@ announces itself as a "kimodo" module, then listens for `kimodo:generate` /
 `kimodo:play-animation` envelopes. Generated motion is streamed back as
 `vrm:apply-pose` frames and/or saved to the shared animations directory.
 
-Auth is not required: when jarvis-avatar's [ironclaw].auth_token is empty,
-the hub accepts peers with no handshake. If you later enable auth, bring
-back the module:authenticate step below.
+Auth can be required depending on jarvis-avatar config. This client now always
+attempts `module:authenticate` first (using `IRONCLAW_TOKEN`) and proceeds even
+when auth is disabled.
 """
 
 import asyncio
@@ -17,6 +17,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -26,12 +27,94 @@ import websockets
 # jarvis-avatar hosts the hub on :6121 by default. Override via env if needed.
 import os
 
-WS_URL = os.environ.get("JARVIS_WS_URL", "ws://localhost:6121/ws")
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    tomllib = None  # type: ignore[assignment, misc]
 
-# Shared animations directory — jarvis-avatar's [pose_library].animations_dir
-# points at the same path by default, so saved motion shows up immediately
-# in list_generated_animations / play_saved_animation.
-ANIMATIONS_DIR = Path.home() / ".config/@proj-airi/stage-tamagotchi/plugins/v1/CustomPlugins/animations"
+WS_URL = os.environ.get("JARVIS_WS_URL", "ws://localhost:6121/ws")
+AUTH_TOKEN = os.environ.get("IRONCLAW_TOKEN", "")
+
+# Directory containing this script = jarvis-avatar repo root (used to find config/*.toml).
+_KIMODO_REPO_ROOT = Path(__file__).resolve().parent
+
+# Shared animations directory — must match jarvis-avatar's effective
+# `[pose_library].animations_dir` or saved clips won't show up in
+# `list_generated_animations`. Precedence: JARVIS_ANIMATIONS_DIR, then
+# config/user.toml / config/default.toml (same path rules as the Rust app:
+# `~/` expanded; other relative paths use the *process cwd*), then the
+# legacy XDG default path.
+def _read_animations_dir_from_toml_nolib(p: Path) -> Optional[str]:
+    """No-deps parse of [pose_library].animations_dir from a single TOML file (Python < 3.11)."""
+    try:
+        in_pose = False
+        for line in p.read_text(encoding="utf-8").splitlines():
+            body = line.split("#", 1)[0].strip()
+            if body == "[pose_library]":
+                in_pose = True
+                continue
+            if in_pose and body.startswith("["):
+                in_pose = False
+            if in_pose and body.startswith("animations_dir"):
+                parts = body.split("=", 1)
+                if len(parts) < 2:
+                    continue
+                val = parts[1].strip().strip('"').strip("'")
+                if val:
+                    return val
+    except OSError:
+        pass
+    return None
+
+
+def _read_animations_dir_from_toml() -> Optional[str]:
+    for name in ("user.toml", "default.toml"):
+        p = _KIMODO_REPO_ROOT / "config" / name
+        if not p.is_file():
+            continue
+        if tomllib is not None:
+            try:
+                data = tomllib.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            pl = data.get("pose_library")
+            if not isinstance(pl, dict):
+                continue
+            val = (pl.get("animations_dir") or "").strip()
+            if val:
+                return val
+        else:
+            val = _read_animations_dir_from_toml_nolib(p)
+            if val:
+                return val
+    return None
+
+
+def _absolute_like_jarvis_avatar(raw: str) -> Path:
+    """Match `paths::expand_home` + relative cwd semantics in pose_library."""
+    raw = raw.strip()
+    p = Path(os.path.expanduser(raw))
+    if p.is_absolute():
+        return p.resolve()
+    return (Path.cwd() / p).resolve()
+
+
+def _resolve_animations_dir() -> Path:
+    env = (os.environ.get("JARVIS_ANIMATIONS_DIR") or "").strip()
+    if env:
+        return _absolute_like_jarvis_avatar(env)
+    toml_path = _read_animations_dir_from_toml()
+    if toml_path:
+        return _absolute_like_jarvis_avatar(toml_path)
+    return (
+        Path.home()
+        / ".config/@proj-airi/stage-tamagotchi/plugins/v1/CustomPlugins/animations"
+    ).resolve()
+
+
+ANIMATIONS_DIR = _resolve_animations_dir()
+if not (os.environ.get("KIMODO_QUIET") or "").strip():
+    print(f"[kimodo-motion-service] ANIMATIONS_DIR={ANIMATIONS_DIR}", file=sys.stderr)
 
 # Module name MUST contain the substring "kimodo" so jarvis-avatar's Services
 # panel classifies us as the Kimodo peer (service_status.rs:338).
@@ -265,10 +348,22 @@ def generate_motion(prompt: str, duration: float, steps: int = 100) -> tuple:
     return vrm_frames, float(model.fps)
 
 
+def _slugify_animation_stem(name: str) -> str:
+    """Match Rust / Node: [^a-z0-9_-] → underscore, then lowercase (ASCII alnum)."""
+    out: list[str] = []
+    for c in name.strip():
+        if c.isascii() and (c.isalnum() or c in "-_"):
+            out.append(c.lower())
+        else:
+            out.append("_")
+    s = "".join(out).strip("_")
+    return s or "unnamed"
+
+
 def save_animation(name: str, prompt: str, fps: float, vrm_frames: list):
     """Save generated animation to disk."""
     ANIMATIONS_DIR.mkdir(parents=True, exist_ok=True)
-    filename = name.replace(" ", "_").lower() + ".json"
+    filename = _slugify_animation_stem(name) + ".json"
     frame_duration_ms = 1000.0 / fps
 
     animation_data = {
@@ -333,11 +428,34 @@ async def ws_main():
                 ping_timeout=None,
                 close_timeout=5,
             ) as ws:
-                log("Connected — announcing module...")
+                log("Connected — authenticating/announcing module...")
 
-                # No auth handshake. jarvis-avatar's hub (channel_server.rs:371-372)
-                # marks peers as authenticated on connect whenever its auth_token
-                # is empty, so we can skip straight to module:announce.
+                # Always attempt auth. Hubs without auth enabled still answer
+                # `module:authenticated`, so this works in either mode.
+                await ws.send(make_message("module:authenticate", {
+                    "token": AUTH_TOKEN,
+                }))
+
+                authed = False
+                while True:
+                    raw = await ws.recv()
+                    try:
+                        auth_msg = json.loads(raw)
+                    except Exception:
+                        continue
+                    if "json" in auth_msg and isinstance(auth_msg["json"], dict):
+                        auth_msg = auth_msg["json"]
+                    auth_type = auth_msg.get("type", "")
+                    if auth_type == "module:authenticated":
+                        authed = True
+                        break
+                    if auth_type == "error":
+                        code = auth_msg.get("data", {}).get("code")
+                        detail = auth_msg.get("data", {}).get("message", "unknown error")
+                        raise RuntimeError(f"auth failed: code={code} detail={detail}")
+                if not authed:
+                    raise RuntimeError("auth failed: no module:authenticated response")
+
                 await ws.send(make_message("module:announce", {
                     "name": SERVICE_ID,
                     "identity": {
@@ -416,16 +534,19 @@ async def handle_generate(ws, msg):
                 None, save_animation, save_name, prompt, fps, vrm_frames
             )
 
-        await ws.send(make_message("kimodo:status", {
+        ready_data = {
             "requestId": request_id,
             "status": "ready",
             "message": f"Generated {len(vrm_frames)} frames at {fps} FPS",
             "frameCount": len(vrm_frames),
             "fps": fps,
-        }))
+        }
+        if save_path:
+            ready_data["savedPath"] = save_path
+        await ws.send(make_message("kimodo:status", ready_data))
 
         if stream:
-            await stream_frames(ws, vrm_frames, fps, request_id)
+            await stream_frames(ws, vrm_frames, fps, request_id, save_path)
         else:
             await ws.send(make_message("kimodo:generate:result", {
                 "requestId": request_id,
@@ -445,7 +566,9 @@ async def handle_generate(ws, msg):
         }))
 
 
-async def stream_frames(ws, vrm_frames: list, fps: float, request_id: str):
+async def stream_frames(
+    ws, vrm_frames: list, fps: float, request_id: str, save_path: str | None = None
+):
     """Stream VRM frames as vrm:apply-pose events at the target FPS."""
     frame_interval = 1.0 / fps
     transition_duration = frame_interval * 1.1  # Slightly longer than interval for overlap smoothing
@@ -471,11 +594,14 @@ async def stream_frames(ws, vrm_frames: list, fps: float, request_id: str):
             "requestId": request_id,
         }))
 
-    await ws.send(make_message("kimodo:status", {
+    done_data = {
         "requestId": request_id,
         "status": "done",
         "message": f"Playback complete ({len(vrm_frames)} frames)",
-    }))
+    }
+    if save_path:
+        done_data["savedPath"] = save_path
+    await ws.send(make_message("kimodo:status", done_data))
 
 
 async def handle_list_animations(ws, msg):

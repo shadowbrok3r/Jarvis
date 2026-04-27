@@ -57,7 +57,7 @@ Config keys the app does use:
    - `IRONCLAW_TOKEN=<same secret>` (if auth is on)
 4. Confirm under **View → Services (all)** (or the Channel hub window) that the Kimodo peer is online.
 5. Trigger generation one of two ways:
-   - Via an MCP client: call the `generate_motion` tool at `http://<host>:6123/mcp` with `{ prompt, duration, steps, stream, save_name }`.
+  - Via an MCP client: call the `generate_motion` tool at `http://<host>:6123/mcp` with `{ prompt, duration, steps, stream, save_name, timeout_sec }` (`timeout_sec` optional override for slow runs).
    - Via any hub peer: publish `kimodo:generate` directly to the hub.
 6. If `save_name` is set, the animation is persisted to `[pose_library].animations_dir` and replayable via `play_saved_animation`.
 
@@ -202,6 +202,8 @@ Peer handshake flow: connect WS → `module:authenticate { token }` → `module:
 **Files:**
 - `src/mcp/mod.rs` — MCP tool handlers (see `#[tool]` methods on `JarvisMcpServer`)
 - `src/mcp/plugin.rs` — Bevy plugin that spawns the HTTP server
+- `assets/POSE_GUIDE.md` — full authoring manual returned by `get_pose_guide`
+- `docs/MCP_POSE_ANIMATION_GUIDE.md` — operator index (Kimodo paths, layering, refresh)
 - Config: `[mcp]` in `config/default.toml`
 
 **How the app knows it's "set up":**
@@ -210,7 +212,9 @@ Peer handshake flow: connect WS → `module:authenticate { token }` → `module:
 - `mcp.path = "/mcp"`
 - `mcp.auth_token = ""` — if set, clients must send `Authorization: Bearer <token>`
 
-Tools exposed today (23): `list_poses`, `apply_pose`, `create_pose`, `rename_pose`, `delete_pose`, `update_pose_category`, `list_all_content`, `set_bones`, `pose_bones`, `make_fist`, `adjust_bone`, `get_current_bone_state`, `reset_pose`, `set_expression`, `get_bone_reference`, `get_pose_guide`, `list_generated_animations`, `play_saved_animation`, `delete_animation`, `rename_animation`, `update_animation_metadata`, `generate_motion`, `a2f_status`, `a2f_configure`.
+Tools exposed today (25): `list_poses`, `apply_pose`, `create_pose`, `rename_pose`, `delete_pose`, `update_pose_category`, `list_all_content`, `set_bones`, `pose_bones`, `make_fist`, `adjust_bone`, `get_current_bone_state`, `reset_pose`, `set_expression`, `get_bone_reference`, `get_pose_guide`, `list_generated_animations`, `play_saved_animation`, `delete_animation`, `rename_animation`, `update_animation_metadata`, `generate_motion`, `capture_pose_views`, `a2f_status`, `a2f_configure`.
+
+**Cursor / IDE clients:** tool JSON schemas are often cached under `~/.cursor/projects/<id>/mcps/user-pose-controller/tools/`. After changing Rust `#[tool(description = ...)]` text, restart jarvis-avatar and refresh/re-add the MCP server so descriptors match the live server.
 
 **Setup:** nothing external. Point your MCP client at `http://<host>:6123/mcp` (with a bearer token if you set one).
 
