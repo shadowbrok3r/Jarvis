@@ -1,8 +1,17 @@
 import SwiftUI
-import UIKit
 
-/// Root shell: avatar (Bevy) tab plus a small About screen for the Rust bridge version.
+/// Root shell: avatar (Bevy), About, and Logs.
+///
+/// We avoid `TabView` for the Bevy tab: on device, SwiftUI often leaves `UIViewRepresentable` at 0×0
+/// (even inside `GeometryReader`), so `jarvis_renderer_new` never runs. A plain `VStack` + custom
+/// tab bar gets a full-window `frame(maxWidth:maxHeight:)` for the Metal host.
 struct MainShellView: View {
+    private enum ShellTab: Int, CaseIterable, Identifiable {
+        case avatar, about, logs
+        var id: Int { rawValue }
+    }
+
+    @State private var shellTab: ShellTab = .avatar
     @State private var bevySessionId = 0
     @AppStorage(HubProfileSync.userDefaultsBaseURLKey) private var hubBaseURL: String = ""
     @AppStorage(HubProfileSync.userDefaultsAuthTokenKey) private var hubAuthToken: String = ""
@@ -11,107 +20,123 @@ struct MainShellView: View {
     @State private var hubSyncProgress: Progress?
 
     var body: some View {
-        TabView {
-            // TabView often proposes 0×0 to the first tab; GeometryReader + screen fallback yields a real size.
-            GeometryReader { geo in
-                let screen = UIScreen.main.bounds
-                let gw = geo.size.width
-                let gh = geo.size.height
-                let w = (gw.isFinite && gw > 10) ? gw : screen.width
-                let h = (gh.isFinite && gh > 10) ? gh : screen.height
-                JarvisBevyView()
-                    .id(bevySessionId)
-                    .frame(width: w, height: h)
+        VStack(spacing: 0) {
+            Group {
+                switch shellTab {
+                case .avatar:
+                    JarvisBevyView()
+                        .id(bevySessionId)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .ignoresSafeArea()
+                case .about:
+                    aboutStack
+                case .logs:
+                    DebugLogsView()
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .ignoresSafeArea()
-            .tabItem {
-                    Label("Avatar", systemImage: "person.crop.circle")
-                }
 
-            NavigationStack {
-                List {
-                    Section("Build") {
-                        Text(jarvis_ios_version().toString())
-                            .font(.footnote)
-                            .textSelection(.enabled)
-                    }
-                    Section("Hub profile") {
-                        TextField("Base URL (http://host:6121)", text: $hubBaseURL)
-                            .textInputAutocapitalization(.never)
-                            .keyboardType(.URL)
-                            .autocorrectionDisabled()
-                        SecureField("Bearer token (optional)", text: $hubAuthToken)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        Button {
-                            Task { await runHubSync() }
-                        } label: {
-                            Text("Sync profile")
-                        }
-                        .disabled(syncInFlight || hubBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        if syncInFlight, let prog = hubSyncProgress {
-                            ProgressView(prog)
-                                .padding(.vertical, 4)
-                            TimelineView(.periodic(from: .now, by: 0.12)) { _ in
-                                Text(prog.localizedDescription)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                        if !syncStatus.isEmpty {
-                            Text(syncStatus)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Section("Debug") {
-                        Text(
-                            "The line “reused persisted hub cache” is emitted when prepareForBevyBootstrap runs (Avatar tab once the view has size, or the button below). Sync alone writes files and env but does not run that bootstrap path."
-                        )
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        Button("Log hub cache + disk + env") {
-                            HubProfileSync.logHubCacheDiagnostics()
-                        }
-                        Button("Run prepareForBevyBootstrap (see Hub logs)") {
-                            Task {
-                                await HubProfileSync.prepareForBevyBootstrap()
-                                JarvisIOSLog.recordUI("manual prepareForBevyBootstrap finished (check Hub lines above)")
-                            }
-                        }
-                        Button("Reload Bevy view (bump session)") {
-                            bevySessionId += 1
-                            JarvisIOSLog.recordUI("manual bevySessionId → \(bevySessionId)")
-                        }
-                        Button("Clear persisted hub cache keys", role: .destructive) {
-                            HubProfileSync.clearPersistedHubCachePointers()
-                            JarvisIOSLog.recordUI("cleared UserDefaults hub cache pointers (next bootstrap may re-download)")
-                        }
-                    }
-                }
-                .navigationTitle("About")
-                .onAppear {
-                    HubProfileSync.migrateAuthTokenFromUserDefaultsIfNeeded()
-                    HubProfileSync.persistAuthTokenFromUI(hubAuthToken)
-                }
-                // Do not clear hub cache pointers when the URL field changes. Each keystroke used to fire
-                // onChange and wipe UserDefaults, breaking prepareForBevyBootstrap after a successful sync.
-                // HubProfileSync.applyPersistedHubCacheEnvIfValid already refuses another host’s cache.
-                .onChange(of: hubAuthToken) { _, newValue in
-                    HubProfileSync.persistAuthTokenFromUI(newValue)
-                }
+            Divider()
+            HStack(spacing: 0) {
+                shellTabButton(.avatar, title: "Avatar", systemImage: "person.crop.circle")
+                shellTabButton(.about, title: "About", systemImage: "info.circle")
+                shellTabButton(.logs, title: "Logs", systemImage: "ladybug.fill")
             }
-            .tabItem {
-                Label("About", systemImage: "info.circle")
-            }
-
-            DebugLogsView()
-                .tabItem {
-                    Label("🐛 Logs", systemImage: "ladybug.fill")
-                }
+            .padding(.top, 6)
+            .padding(.bottom, 6)
+            .background(.bar)
         }
+    }
+
+    private var aboutStack: some View {
+        NavigationStack {
+            List {
+                Section("Build") {
+                    Text(jarvis_ios_version().toString())
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                }
+                Section("Hub profile") {
+                    TextField("Base URL (http://host:6121)", text: $hubBaseURL)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                    SecureField("Bearer token (optional)", text: $hubAuthToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button {
+                        Task { await runHubSync() }
+                    } label: {
+                        Text("Sync profile")
+                    }
+                    .disabled(syncInFlight || hubBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if syncInFlight, let prog = hubSyncProgress {
+                        ProgressView(prog)
+                            .padding(.vertical, 4)
+                        TimelineView(.periodic(from: .now, by: 0.12)) { _ in
+                            Text(prog.localizedDescription)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    if !syncStatus.isEmpty {
+                        Text(syncStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Section("Debug") {
+                    Text(
+                        "The line “reused persisted hub cache” is emitted when prepareForBevyBootstrap runs (Avatar screen with non‑zero layout, or the button below). Sync alone writes files and env but does not run that bootstrap path."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    Button("Log hub cache + disk + env") {
+                        HubProfileSync.logHubCacheDiagnostics()
+                    }
+                    Button("Run prepareForBevyBootstrap (see Hub logs)") {
+                        Task {
+                            await HubProfileSync.prepareForBevyBootstrap()
+                            JarvisIOSLog.recordUI("manual prepareForBevyBootstrap finished (check Hub lines above)")
+                        }
+                    }
+                    Button("Reload Bevy view (bump session)") {
+                        bevySessionId += 1
+                        JarvisIOSLog.recordUI("manual bevySessionId → \(bevySessionId)")
+                    }
+                    Button("Clear persisted hub cache keys", role: .destructive) {
+                        HubProfileSync.clearPersistedHubCachePointers()
+                        JarvisIOSLog.recordUI("cleared UserDefaults hub cache pointers (next bootstrap may re-download)")
+                    }
+                }
+            }
+            .navigationTitle("About")
+            .onAppear {
+                HubProfileSync.migrateAuthTokenFromUserDefaultsIfNeeded()
+                HubProfileSync.persistAuthTokenFromUI(hubAuthToken)
+            }
+            .onChange(of: hubAuthToken) { _, newValue in
+                HubProfileSync.persistAuthTokenFromUI(newValue)
+            }
+        }
+    }
+
+    private func shellTabButton(_ tab: ShellTab, title: String, systemImage: String) -> some View {
+        Button {
+            shellTab = tab
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: systemImage)
+                    .imageScale(.medium)
+                Text(title)
+                    .font(.caption2)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 2)
+            .foregroundStyle(shellTab == tab ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.plain)
     }
 
     @MainActor
@@ -127,7 +152,7 @@ struct MainShellView: View {
         syncInFlight = false
         if ok {
             JarvisIOSLog.recordUI(
-                "runHubSync: success → bump bevySessionId. Open Avatar (or tap “Run prepare…” in About → Debug) to see prepareForBevyBootstrap / cache reuse lines."
+                "runHubSync: success → bump bevySessionId. Choose Avatar (bottom) or Debug → Run prepare… to see prepareForBevyBootstrap / cache reuse lines."
             )
         } else {
             JarvisIOSLog.recordUIError("runHubSync: sync failed (see HubProfile logs)")

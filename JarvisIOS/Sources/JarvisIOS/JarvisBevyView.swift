@@ -60,7 +60,7 @@ struct JarvisBevyView: UIViewRepresentable {
                 if undersizedBoundsLogBudget > 0 {
                     undersizedBoundsLogBudget -= 1
                     JarvisIOSLog.recordBevy(
-                        "bootstrap: UIView bounds are zero w=\(b.width) h=\(b.height) super=\(String(describing: host.superview?.bounds)) — give JarvisBevyView a non‑zero SwiftUI frame (GeometryReader in MainShellView)"
+                        "bootstrap: UIView bounds are zero w=\(b.width) h=\(b.height) super=\(String(describing: host.superview?.bounds)) — parent SwiftUI must give a non‑zero frame (MainShellView uses VStack tab bar, not TabView)"
                     )
                 }
                 return
