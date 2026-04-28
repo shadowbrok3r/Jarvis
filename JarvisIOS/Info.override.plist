@@ -6,5 +6,9 @@
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>Jarvis uses the camera as an optional “eyes” feed for the desktop avatar, similar to a Home Assistant camera entity.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Jarvis uses the microphone for voice input to chat and for the desktop pipeline, similar to a Home Assistant assist satellite.</string>
 </dict>
 </plist>

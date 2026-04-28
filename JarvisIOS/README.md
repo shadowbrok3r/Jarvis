@@ -1,6 +1,8 @@
 # JarvisIOS
 
-Swift package that links a Rust `staticlib` (`jarvis_ios`) via **swift-bridge** and a small **BridgeFFI** C header target. **iOS builds are done on Linux with [xtool](https://github.com/xtool-org/xtool)**
+Swift package that links a Rust `staticlib` (`jarvis_ios`) via **swift-bridge** and a small **BridgeFFI** C header target.
+
+**Official iOS workflow:** [xtool](https://github.com/xtool-org/xtool) on Linux (or wherever your xtool setup runs) — not a standalone Xcode project. You build the Rust static library for `aarch64-apple-ios`, place it where `Package.swift` expects (`RustLibs/`), then **`xtool dev`** (or other `xtool` commands) produces and runs the `.app`. Raw Xcode-only builds are not the supported path.
 
 ## Layout
 
@@ -9,7 +11,7 @@ Swift package that links a Rust `staticlib` (`jarvis_ios`) via **swift-bridge** 
 | `xtool.yml` | xtool config: bundle id, main SwiftPM **library** product, optional Info merge. |
 | `Info.override.plist` | Keys merged into the generated app `Info.plist` (e.g. file sharing). |
 | `rust/` | Cargo crate: `crate-type = ["staticlib"]`, `swift-bridge`, `build.rs` → `rust/generated/` (gitignored). |
-| `Sources/JarvisIOS/` | App entry (`@main`), UI, and **checked-in** generated `SwiftBridgeCore.swift` / `jarvis_ios.swift`. |
+| `Sources/JarvisIOS/` | App entry (`@main`), UI, **Bevy** `JarvisBevyView` (UIView + `CADisplayLink`), and **checked-in** bridge files (`SwiftBridgeCore.swift`, `jarvis_ios.swift`). |
 | `Sources/BridgeFFI/` | `dummy.c` + `include/*.h` (C declarations for the bridge). |
 | `RustLibs/` | **Gitignored.** `libjarvis_ios.a` for `aarch64-apple-ios` from `scripts/build-rust.sh`. |
 | `scripts/build-rust.sh` | Release staticlib for device; copies `.a`, generated Swift, and headers. |
@@ -42,10 +44,15 @@ Do not use **`#Preview`** in SwiftUI sources: xtool’s Swift toolchain does not
 
 Uncomment `iconPath` in `xtool.yml` and add a **1024×1024** PNG at that path when you want a custom icon.
 
-## Phase 2 (not implemented here)
+## Bevy on iOS (in `jarvis_ios`)
 
-- Metal / `CAMetalLayer` host in Rust.
-- **Bevy** / `bevy_vrm1` in `JarvisIOS/rust` or a workspace member, with `[patch.crates-io]` for `vendor/bevy_vrm1` when required.
-- Split desktop-only hub/MCP/`rfd` from the mobile crate with `cfg` / features.
+- **`rust/src/ios_bevy.rs`**: Bevy **0.18** with `DefaultPlugins` minus **`WinitPlugin`**; a small plugin runs **before** `RenderPlugin` and injects a UIKit [`RawWindowHandle`](https://docs.rs/raw-window-handle/) from the Swift-hosted `UIView` so wgpu can create a Metal swapchain (same idea as embedding a view, not owning the whole UIKit app from Rust).
+- **Swift**: `JarvisBevyView` passes the view pointer into `jarvis_renderer_*` FFI and ticks `jarvis_renderer_render` from a **`CADisplayLink`** on the main thread (mirrors the TailscaleDrive / Metal host pattern, but with Bevy instead of raw wgpu+egui).
+- **Cross-compiling** `aarch64-apple-ios` on Linux may require your xtool / osxcross environment (e.g. `xcrun`, iOS SDK) for C dependencies inside the Bevy graph; host `cargo check` uses non-iOS stubs for the renderer FFI.
 
-The desktop **`jarvis-avatar` binary** is not linked on iOS as-is; `jarvis_ios` stays a separate crate until that split lands.
+## Still to do
+
+- **`bevy_vrm1`**, bundled `.vrm`, spring preset TOML, and animation paths (likely `[patch.crates-io]` like the desktop crate).
+- **IronClaw / chat** from Swift and **desktop “phone as device”** parity (separate from xtool).
+
+The desktop **`jarvis-avatar` binary** is still not linked on iOS; only the **`jarvis_ios`** staticlib ships in the xtool-built app.
