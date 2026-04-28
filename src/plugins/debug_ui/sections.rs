@@ -9,10 +9,12 @@ use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::act::Emotion;
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::model_catalog::{list_vrm_models, models_dir, resolve_vrm_load_argument};
 
 use super::widgets::{rgb_row, rgba_row, vec3_row};
-use super::DebugUiState;
+use super::{AvatarVrmPickerState, DebugUiState};
 use crate::plugins::avatar::AvatarDebugStats;
+use crate::plugins::pose_driver::{PoseCommand, PoseCommandSender};
 use crate::plugins::channel_server::{
     ChatCompleteMessage, HubBroadcast, HubState, LookAtRequestMessage, TtsSpeakMessage,
 };
@@ -22,7 +24,9 @@ use crate::plugins::channel_server::{
 pub fn draw_avatar_window(
     mut contexts: EguiContexts,
     mut settings: ResMut<Settings>,
+    mut state: ResMut<DebugUiState>,
     stats: Res<AvatarDebugStats>,
+    pose_tx: Option<Res<PoseCommandSender>>,
 ) {
     if !settings.ui.show_avatar {
         return;
@@ -36,8 +40,105 @@ pub fn draw_avatar_window(
         .open(&mut open)
         .show(ctx, |ui| {
             let a = &mut settings.avatar;
-            ui.label("VRM asset (reload required to swap):");
-            ui.add_enabled(false, egui::TextEdit::singleline(&mut a.model_path));
+            ui.label("Current model ([avatar].model_path):");
+            ui.monospace(a.model_path.as_str());
+            ui.small(
+                "Hot-swap updates this path immediately (same queue as MCP load_vrm). \
+                 Process cwd should be the crate root so assets/models resolves on disk.",
+            );
+
+            ui.separator();
+            ui.label("Pick VRM from assets/models/");
+            ui.small(format!("Scan directory: {}", models_dir().display()));
+            let picker = &mut state.avatar_vrm_picker;
+            ui.horizontal(|ui| {
+                ui.label("Filter:");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut picker.filter)
+                            .desired_width(ui.available_width().max(120.0)),
+                    )
+                    .changed()
+                {
+                    picker.op_error = None;
+                }
+            });
+
+            let filter_opt = {
+                let t = picker.filter.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t)
+                }
+            };
+
+            match list_vrm_models(filter_opt) {
+                Ok(entries) => {
+                    picker.list_error = None;
+                    ui.horizontal(|ui| {
+                        let can_load = picker.selected_basename.is_some() && pose_tx.is_some();
+                        if ui
+                            .add_enabled(can_load, egui::Button::new("Load selected"))
+                            .on_disabled_hover_text(
+                                if pose_tx.is_none() {
+                                    "PoseCommandSender not available"
+                                } else {
+                                    "Select a .vrm row first"
+                                },
+                            )
+                            .clicked()
+                        {
+                            if let Some(name) = picker.selected_basename.clone() {
+                                queue_avatar_vrm_load(
+                                    pose_tx.as_deref(),
+                                    name.as_str(),
+                                    picker,
+                                );
+                            }
+                        }
+                    });
+
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .id_salt("avatar_vrm_model_list")
+                        .show(ui, |ui| {
+                            for entry in &entries {
+                                let selected = picker
+                                    .selected_basename
+                                    .as_deref()
+                                    == Some(entry.basename.as_str());
+                                let r = ui.selectable_label(selected, &entry.basename);
+                                if r.double_clicked() {
+                                    picker.selected_basename = Some(entry.basename.clone());
+                                    queue_avatar_vrm_load(
+                                        pose_tx.as_deref(),
+                                        entry.basename.as_str(),
+                                        picker,
+                                    );
+                                } else if r.clicked() {
+                                    picker.selected_basename = Some(entry.basename.clone());
+                                }
+                            }
+                            if entries.is_empty() {
+                                ui.weak("(no matching .vrm files)");
+                            }
+                        });
+                }
+                Err(e) => {
+                    picker.list_error = Some(e);
+                }
+            }
+
+            if let Some(err) = &picker.list_error {
+                ui.colored_label(egui::Color32::from_rgb(255, 120, 140), err);
+            }
+            if let Some(err) = &picker.op_error {
+                ui.colored_label(egui::Color32::from_rgb(255, 160, 120), err);
+            }
+
+            ui.separator();
+            ui.label("Default idle VRMA (spawned with VRM; edit in config to change):");
             ui.add_enabled(false, egui::TextEdit::singleline(&mut a.idle_vrma_path));
 
             ui.separator();
@@ -83,6 +184,28 @@ pub fn draw_avatar_window(
             a.window_height = h.max(0) as u32;
         });
     settings.ui.show_avatar = open;
+}
+
+fn queue_avatar_vrm_load(
+    pose_tx: Option<&PoseCommandSender>,
+    load_arg: &str,
+    picker: &mut AvatarVrmPickerState,
+) {
+    picker.op_error = None;
+    let Some(tx) = pose_tx else {
+        picker.op_error = Some(
+            "PoseCommandSender unavailable — PoseDriverPlugin must be active.".into(),
+        );
+        return;
+    };
+    match resolve_vrm_load_argument(load_arg) {
+        Ok(asset_path) => {
+            tx.send(PoseCommand::LoadVrm { asset_path });
+        }
+        Err(e) => {
+            picker.op_error = Some(e);
+        }
+    }
 }
 
 fn y_diagnostics_readout(ui: &mut egui::Ui, stats: &AvatarDebugStats, target_y: f32) {

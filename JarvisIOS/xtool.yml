@@ -1,0 +1,6 @@
+version: 1
+bundleID: com.example.JarvisIOS
+product: JarvisIOS
+infoPath: Info.override.plist
+# Optional: 1024×1024 PNG for the app icon.
+# iconPath: Resources/AppIcon.png

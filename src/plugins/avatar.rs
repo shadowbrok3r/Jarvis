@@ -17,6 +17,10 @@ use jarvis_avatar::config::Settings;
 
 pub struct AvatarPlugin;
 
+/// Marks the scene root entity we spawn for the active VRM (used to despawn on MCP hot swap).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct AvatarVrmRoot;
+
 impl Plugin for AvatarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AvatarDebugStats>()
@@ -51,7 +55,15 @@ pub struct AvatarDebugStats {
 fn spawn_scene(mut commands: Commands, asset_server: Res<AssetServer>, settings: Res<Settings>) {
     let [r, g, b, a] = settings.avatar.background_color;
     commands.insert_resource(ClearColor(Color::linear_rgba(r, g, b, a)));
+    spawn_avatar_vrm(&mut commands, &asset_server, &settings);
+}
 
+/// Spawn the configured VRM root + optional default idle VRMA child (same as startup).
+pub(crate) fn spawn_avatar_vrm(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    settings: &Settings,
+) {
     let vrm_path = settings.avatar.model_path.clone();
     let vrma_path = settings.avatar.idle_vrma_path.clone();
 
@@ -63,6 +75,7 @@ fn spawn_scene(mut commands: Commands, asset_server: Res<AssetServer>, settings:
     let pos = Vec3::from_array(settings.avatar.world_position);
     let scale = settings.avatar.uniform_scale.max(0.001);
     let mut vrm = commands.spawn((
+        AvatarVrmRoot,
         Transform {
             translation: pos,
             scale: Vec3::splat(scale),
@@ -82,7 +95,7 @@ fn spawn_scene(mut commands: Commands, asset_server: Res<AssetServer>, settings:
 }
 
 /// Fires when the VRMA clip is ready; loops forever (see `bevy_vrm1` `examples/vrma.rs`).
-fn play_idle_when_vrma_loaded(
+pub(crate) fn play_idle_when_vrma_loaded(
     trigger: On<LoadedVrma>,
     mut commands: Commands,
 ) {

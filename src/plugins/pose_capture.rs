@@ -12,6 +12,7 @@ use bevy::camera::{ClearColorConfig, RenderTarget};
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
+use bevy::transform::TransformSystems;
 use bevy_vrm1::prelude::Vrm;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use serde::Serialize;
@@ -31,14 +32,28 @@ impl Plugin for PoseCapturePlugin {
                 rx: view_rx,
             })
             .init_resource::<CaptureSessions>()
+            .init_resource::<CapturePipelineTick>()
+            .init_resource::<CaptureWarmups>()
+            // After `TransformSystems::Propagate`: `GlobalTransform` on the VRM root matches
+            // `Transform` for this frame (Update systems like `apply_avatar_transform` may move
+            // the rig without updating `GlobalTransform` until PostUpdate — reading it in Update
+            // aimed offscreen cameras at stale world positions → empty transparent PNGs).
+            //
+            // Screenshot entities are spawned two pipeline ticks after cameras + render-target
+            // images exist so `GpuImage` is present when Bevy's screenshot extract runs; otherwise
+            // `prepare_screenshots` skips once, the entity stays `Capturing`, and observers never
+            // fire (MCP `capture_pose_views` waits until timeout).
             .add_systems(
-                Update,
+                PostUpdate,
                 (
                     sync_avatar_capture_layers,
+                    promote_warmed_capture_screenshots,
                     drain_capture_requests,
                     process_capture_view_results,
+                    advance_capture_pipeline_tick,
                 )
-                    .chain(),
+                    .chain()
+                    .after(TransformSystems::Propagate),
             );
     }
 }
@@ -140,6 +155,28 @@ struct CaptureCameraTag;
 struct CaptureSessions {
     next_id: u64,
     sessions: HashMap<u64, CaptureSession>,
+}
+
+/// Monotonic counter advanced once per frame at the end of the capture chain.
+#[derive(Resource, Default)]
+struct CapturePipelineTick(u64);
+
+#[derive(Resource, Default)]
+struct CaptureWarmups(Vec<WarmupCapture>);
+
+struct WarmupCapture {
+    spawn_at_tick: u64,
+    session_id: u64,
+    pending_views: usize,
+    request: CaptureRequest,
+    camera_entities: Vec<Entity>,
+    jobs: Vec<CaptureScreenshotJob>,
+}
+
+struct CaptureScreenshotJob {
+    view: CaptureView,
+    path: PathBuf,
+    image_handle: Handle<Image>,
 }
 
 struct CaptureSession {
@@ -246,10 +283,64 @@ fn sync_avatar_capture_layers(
     }
 }
 
+fn advance_capture_pipeline_tick(mut tick: ResMut<CapturePipelineTick>) {
+    tick.0 = tick.0.saturating_add(1);
+}
+
+fn promote_warmed_capture_screenshots(
+    mut commands: Commands,
+    tick: Res<CapturePipelineTick>,
+    mut warmups: ResMut<CaptureWarmups>,
+    mut sessions: ResMut<CaptureSessions>,
+    result_queue: Res<CaptureViewResultQueue>,
+) {
+    let now = tick.0;
+    let mut i = 0;
+    while i < warmups.0.len() {
+        if warmups.0[i].spawn_at_tick > now {
+            i += 1;
+            continue;
+        }
+        let w = warmups.0.remove(i);
+        let session_id = w.session_id;
+        for job in w.jobs {
+            let tx = result_queue.tx.clone();
+            let view_for_cb = job.view.clone();
+            let png_path = job.path.clone();
+            let handle = job.image_handle.clone();
+            commands.spawn(Screenshot::image(handle)).observe(
+                move |ev: On<ScreenshotCaptured>| {
+                    let mut err = None;
+                    if let Err(e) = save_rgba_png(Path::new(&png_path), &ev.image) {
+                        err = Some(e);
+                    }
+                    let _ = tx.send(CaptureViewResult {
+                        session_id,
+                        view: view_for_cb.clone(),
+                        path: png_path.clone(),
+                        error: err,
+                    });
+                },
+            );
+        }
+        sessions.sessions.insert(
+            session_id,
+            CaptureSession {
+                pending_views: w.pending_views,
+                request: w.request,
+                images: Vec::new(),
+                errors: Vec::new(),
+                camera_entities: w.camera_entities,
+            },
+        );
+    }
+}
+
 fn drain_capture_requests(
     mut commands: Commands,
     queue: Res<CaptureCommandQueue>,
-    result_queue: Res<CaptureViewResultQueue>,
+    mut warmups: ResMut<CaptureWarmups>,
+    tick: Res<CapturePipelineTick>,
     mut sessions: ResMut<CaptureSessions>,
     vrm_q: Query<&GlobalTransform, With<Vrm>>,
     mut images: ResMut<Assets<Image>>,
@@ -305,6 +396,7 @@ fn drain_capture_requests(
         let session_id = sessions.next_id;
         sessions.next_id = sessions.next_id.saturating_add(1);
         let mut camera_entities = Vec::with_capacity(req.views.len());
+        let mut jobs = Vec::with_capacity(req.views.len());
 
         for view in &req.views {
             let render_target =
@@ -333,34 +425,21 @@ fn drain_capture_requests(
                 req.width,
                 req.height
             ));
-            let tx = result_queue.tx.clone();
-            let view_for_cb = view.clone();
-            commands
-                .spawn(Screenshot::image(image_handle))
-                .observe(move |ev: On<ScreenshotCaptured>| {
-                    let mut err = None;
-                    if let Err(e) = save_rgba_png(Path::new(&png_path), &ev.image) {
-                        err = Some(e);
-                    }
-                    let _ = tx.send(CaptureViewResult {
-                        session_id,
-                        view: view_for_cb.clone(),
-                        path: png_path.clone(),
-                        error: err,
-                    });
-                });
+            jobs.push(CaptureScreenshotJob {
+                view: view.clone(),
+                path: png_path,
+                image_handle,
+            });
         }
 
-        sessions.sessions.insert(
+        warmups.0.push(WarmupCapture {
+            spawn_at_tick: tick.0.saturating_add(2),
             session_id,
-            CaptureSession {
-                pending_views: req.views.len(),
-                request: req,
-                images: Vec::new(),
-                errors: Vec::new(),
-                camera_entities,
-            },
-        );
+            pending_views: req.views.len(),
+            request: req,
+            camera_entities,
+            jobs,
+        });
     }
 }
 

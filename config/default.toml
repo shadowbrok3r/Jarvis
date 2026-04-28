@@ -102,6 +102,10 @@ bind_address = "0.0.0.0:6123"
 path = "/mcp"
 # Optional bearer token — empty means no auth (LAN-only).
 auth_token = ""
+# RMCP session inactivity limit before the worker terminates (seconds).
+# rmcp 1.5 defaults to 300; long-idle Cursor MCP hits "resume failed" unless
+# raised. Use 0 to disable (client disconnect only).
+session_keep_alive_sec = 86400
 
 [a2f]
 # NVIDIA Audio2Face-3D Docker endpoint.

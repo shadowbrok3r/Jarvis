@@ -683,6 +683,7 @@ fn advance_and_apply_layers(
     if !expressions_out.is_empty() {
         sender.send(PoseCommand::ApplyExpression {
             weights: expressions_out,
+            cancel_expression_animation: false,
         });
     }
 }
@@ -762,9 +763,10 @@ fn sample_clip(animation: &AnimationFile, t: f32) -> DriverSample {
         let [x, y, z, w] = r.rotation;
         bones.insert(name.clone(), Quat::from_xyzw(x, y, z, w));
     }
+    let expressions = frame.expressions.clone();
     DriverSample {
         bones,
-        expressions: HashMap::new(),
+        expressions,
     }
 }
 

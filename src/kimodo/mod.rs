@@ -366,9 +366,20 @@ fn parse_apply_pose_frame(env: &EnvelopeBody) -> Option<AnimationFrame> {
     if bones.is_empty() {
         return None;
     }
+
+    let mut expressions = std::collections::HashMap::new();
+    if let Some(exp_obj) = env.data.get("expressions").and_then(Value::as_object) {
+        for (name, v) in exp_obj {
+            if let Some(n) = v.as_f64() {
+                expressions.insert(name.clone(), n as f32);
+            }
+        }
+    }
+
     Some(AnimationFrame {
         bones,
         duration_ms: None,
+        expressions,
     })
 }
 

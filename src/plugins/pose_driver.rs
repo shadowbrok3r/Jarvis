@@ -7,7 +7,10 @@
 //!
 //! 1. Drains queued commands and turns them into `bevy_vrm1` events
 //!    (`SetExpressions`, `ModifyExpressions`) or direct `Transform` writes on
-//!    bone-marker entities.
+//!    bone-marker entities. MCP `animate_expressions` queues
+//!    [`PoseCommand::AnimateExpressions`], then [`tick_expression_animation`]
+//!    samples keyframes each frame after the queue drains (after layered
+//!    `ApplyExpression` from `anim_layers`).
 //! 2. Publishes the current per-bone world rotation to a `BoneSnapshot` behind
 //!    an `Arc<RwLock<_>>` so `get_current_bone_state` and `adjust_bone` read
 //!    fresh data without stalling the ECS loop.
@@ -114,6 +117,8 @@ pub fn def_toe_big_yaw_slider_extra_deg(bone: &str) -> f32 {
 
 use jarvis_avatar::config::Settings;
 
+use crate::plugins::avatar::{spawn_avatar_vrm, AvatarVrmRoot};
+
 pub struct PoseDriverPlugin;
 
 impl Plugin for PoseDriverPlugin {
@@ -126,6 +131,7 @@ impl Plugin for PoseDriverPlugin {
             .init_resource::<BoneEntityIndex>()
             .init_resource::<IndexedBones>()
             .init_resource::<ActiveTransitions>()
+            .init_resource::<ExpressionAnimationPlayback>()
             // Order: right after `AnimationSystems` (so VRMA sampling doesn't
             // overwrite us), but *before* `VrmSystemSets::Constraints` (aim /
             // roll / rotation constraints run `.after(AnimationSystems)` and
@@ -156,6 +162,14 @@ impl Plugin for PoseDriverPlugin {
                     .before(VrmSystemSets::Constraints)
                     .before(TransformSystems::Propagate),
             )
+            .add_systems(
+                PostUpdate,
+                tick_expression_animation
+                    .after(AnimationSystems)
+                    .after(tick_active_transitions)
+                    .before(VrmSystemSets::Constraints)
+                    .before(TransformSystems::Propagate),
+            )
             // Runs after `tick_active_transitions` so the snapshot matches the
             // same PostUpdate pose as constraint systems that run after this
             // plugin (see `VrmSystemSets::Constraints` ordering on writers).
@@ -163,7 +177,7 @@ impl Plugin for PoseDriverPlugin {
                 PostUpdate,
                 publish_bone_snapshot
                     .after(AnimationSystems)
-                    .after(tick_active_transitions),
+                    .after(tick_expression_animation),
             );
     }
 }
@@ -193,7 +207,15 @@ pub enum PoseCommand {
         transition_seconds: Option<f32>,
     },
     /// Partial expression update (`vrm:apply-expression`).
-    ApplyExpression { weights: HashMap<String, f32> },
+    ///
+    /// When `cancel_expression_animation` is true (MCP / hub / explicit UI apply),
+    /// any in-flight [`ExpressionAnimationPlayback`] from `animate_expressions` is
+    /// cleared so static weights stick. Layered drivers (`anim_layers`, idle tick)
+    /// pass `false` so blinks and viseme layers keep working alongside MCP clips.
+    ApplyExpression {
+        weights: HashMap<String, f32>,
+        cancel_expression_animation: bool,
+    },
     /// Full-face replace via [`SetExpressions`] — used by `a2f:expression-keyframes`.
     SetExpression { weights: HashMap<String, f32> },
     /// Reset every bone to its rest pose and clear expression overrides.
@@ -207,6 +229,17 @@ pub enum PoseCommand {
     /// GPU uses for skinning — the single most useful piece of evidence when
     /// MMD-exported VRMs refuse to animate from direct `Transform` writes.
     DumpDiagnostics,
+    /// Play a short VRM expression curve in real time (MCP `animate_expressions`).
+    /// Keyframes are sorted `(time_s, weights)`; sampling is piecewise-linear in
+    /// time per expression channel. Replaces any previous expression clip.
+    AnimateExpressions {
+        keyframes: Vec<(f32, HashMap<String, f32>)>,
+        duration_seconds: f32,
+        looping: bool,
+    },
+    /// Swap the displayed VRM at runtime (MCP `load_vrm`). `asset_path` is relative to `assets/`
+    /// (e.g. `models/foo.vrm`). Respawns the avatar root; idle VRMA follows `[avatar].idle_vrma_path`.
+    LoadVrm { asset_path: String },
 }
 
 /// Cloneable handle Tokio-side consumers use to enqueue work.
@@ -600,7 +633,8 @@ fn is_manual_pose_cmd(cmd: &PoseCommand) -> bool {
             | PoseCommand::ApplyExpression { .. }
             | PoseCommand::SetExpression { .. }
             | PoseCommand::ResetPose
-            | PoseCommand::ResetBones(..),
+            | PoseCommand::ResetBones(..)
+            | PoseCommand::AnimateExpressions { .. },
     )
 }
 
@@ -803,6 +837,109 @@ pub struct ActiveTransitions {
     bones: HashMap<String, BoneTransition>,
 }
 
+/// In-world playback state for MCP `animate_expressions` (piecewise-linear
+/// keyframes). Sampled in [`tick_expression_animation`] after queued
+/// [`PoseCommand`]s drain so layered expression writes can run first, then
+/// animated channels override for this frame.
+#[derive(Resource, Default)]
+pub struct ExpressionAnimationPlayback {
+    pub(crate) active: Option<RunningExpressionClip>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RunningExpressionClip {
+    pub keyframes: Vec<(f32, HashMap<String, f32>)>,
+    pub duration: f32,
+    pub looping: bool,
+    pub elapsed: f32,
+    pub vrm_entity: Entity,
+}
+
+fn clear_expression_animation_playback(world: &mut World) {
+    if let Some(mut p) = world.get_resource_mut::<ExpressionAnimationPlayback>() {
+        p.active = None;
+    }
+}
+
+fn sample_expression_keyframes(
+    keyframes: &[(f32, HashMap<String, f32>)],
+    t: f32,
+) -> HashMap<String, f32> {
+    if keyframes.is_empty() {
+        return HashMap::new();
+    }
+    if t <= keyframes[0].0 {
+        return keyframes[0].1.clone();
+    }
+    let last = keyframes.last().expect("non-empty");
+    if t >= last.0 {
+        return last.1.clone();
+    }
+    let mut lo = 0usize;
+    let mut hi = keyframes.len() - 1;
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        if keyframes[mid].0 <= t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let (t0, w0) = &keyframes[lo];
+    let (t1, w1) = &keyframes[lo + 1];
+    let span = (*t1 - *t0).max(1e-6);
+    let u = ((t - *t0) / span).clamp(0.0, 1.0);
+    let mut out = HashMap::new();
+    let keys: HashSet<String> = w0.keys().chain(w1.keys()).cloned().collect();
+    for k in keys {
+        let a = w0.get(&k).copied().unwrap_or(0.0);
+        let b = w1.get(&k).copied().unwrap_or(0.0);
+        out.insert(k, (a + (b - a) * u).clamp(0.0, 1.0));
+    }
+    out
+}
+
+pub(crate) fn tick_expression_animation(world: &mut World) {
+    let Some(mut clip) = world
+        .get_resource::<ExpressionAnimationPlayback>()
+        .and_then(|p| p.active.clone())
+    else {
+        return;
+    };
+    if world.get_entity(clip.vrm_entity).is_err() {
+        if let Some(mut p) = world.get_resource_mut::<ExpressionAnimationPlayback>() {
+            p.active = None;
+        }
+        return;
+    }
+    let dt = world.resource::<Time>().delta_secs();
+    let t_sample = if clip.looping {
+        clip.elapsed.rem_euclid(clip.duration.max(1e-4))
+    } else {
+        clip.elapsed.min(clip.duration)
+    };
+    let weights = sample_expression_keyframes(&clip.keyframes, t_sample);
+    let vrm_e = clip.vrm_entity;
+    let pairs: Vec<(VrmExpression, f32)> = weights
+        .into_iter()
+        .map(|(k, v)| (VrmExpression::from(k.as_str()), v.clamp(0.0, 1.0)))
+        .collect();
+    if !pairs.is_empty() {
+        world
+            .commands()
+            .trigger(ModifyExpressions::from_iter(vrm_e, pairs));
+    }
+    clip.elapsed += dt;
+    let done = !clip.looping && clip.elapsed >= clip.duration;
+    if let Some(mut p) = world.get_resource_mut::<ExpressionAnimationPlayback>() {
+        if done {
+            p.active = None;
+        } else {
+            p.active = Some(clip);
+        }
+    }
+}
+
 // ---------- Systems ------------------------------------------------------------
 
 /// Map a pose-control quaternion to the bone's raw local rotation.
@@ -825,6 +962,37 @@ fn bone_target_local_rotation(world: &World, _bone_name: &str, entity: Entity, p
     local_from_normalized(rest_local, rest_world, pose_q)
 }
 
+fn execute_avatar_vrm_hot_swap(world: &mut World, asset_path: &str) {
+    crate::plugins::look_at::detach_look_at_target_for_vrm_hot_swap(world);
+
+    let roots: Vec<Entity> = world
+        .query_filtered::<Entity, With<AvatarVrmRoot>>()
+        .iter(world)
+        .collect();
+    for e in roots {
+        let _ = world.despawn(e);
+    }
+
+    if let Some(mut settings) = world.get_resource_mut::<Settings>() {
+        settings.avatar.model_path = asset_path.to_string();
+    }
+
+    let asset_server = world.resource::<AssetServer>().clone();
+    let settings = world.resource::<Settings>().clone();
+    spawn_avatar_vrm(&mut world.commands(), &asset_server, &settings);
+    world.flush();
+
+    world.insert_resource(BoneEntityIndex::default());
+    world.insert_resource(IndexedBones::default());
+    if let Some(mut at) = world.get_resource_mut::<ActiveTransitions>() {
+        at.bones.clear();
+    }
+    clear_expression_animation_playback(world);
+    *world.resource::<BoneSnapshotHandle>().0.write() = BoneSnapshot::default();
+
+    info!(target: "pose_driver", "hot-swapped VRM to {asset_path}");
+}
+
 pub(crate) fn apply_pose_commands(world: &mut World) {
     let cmds: Vec<PoseCommand> = {
         let queue = world.resource::<PoseCommandQueue>();
@@ -835,6 +1003,23 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
         v
     };
     if cmds.is_empty() {
+        return;
+    }
+
+    let mut last_swap: Option<String> = None;
+    let mut rest: Vec<PoseCommand> = Vec::with_capacity(cmds.len());
+    for c in cmds {
+        match c {
+            PoseCommand::LoadVrm { asset_path } => last_swap = Some(asset_path),
+            other => rest.push(other),
+        }
+    }
+
+    if let Some(ref path) = last_swap {
+        execute_avatar_vrm_hot_swap(world, path);
+    }
+
+    if rest.is_empty() {
         return;
     }
 
@@ -850,7 +1035,7 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
         // Drop any manual commands that arrive before the rig is indexed so
         // they don't sit in the queue forever and replay a stale pose on the
         // very first frame the rig becomes usable.
-        let dropped = cmds.len();
+        let dropped = rest.len();
         if dropped > 0 {
             debug!(
                 target: "pose_driver",
@@ -892,14 +1077,14 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
     // In this app, only VRM/VRMA playback uses `AnimationPlayer`, so stopping
     // every player is safe. If that ever changes, switch to walking from each
     // `Vrm` entity downward and only stopping its own rig's players.
-    if auto_stop_vrma && cmds.iter().any(is_manual_pose_cmd) {
+    if auto_stop_vrma && rest.iter().any(is_manual_pose_cmd) {
         let mut q = world.query::<&mut AnimationPlayer>();
         for mut player in q.iter_mut(world) {
             player.stop_all();
         }
     }
 
-    for cmd in cmds {
+    for cmd in rest {
         match cmd {
             PoseCommand::ApplyBones {
                 bones,
@@ -1023,7 +1208,13 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                     );
                 }
             }
-            PoseCommand::ApplyExpression { weights } => {
+            PoseCommand::ApplyExpression {
+                weights,
+                cancel_expression_animation,
+            } => {
+                if cancel_expression_animation {
+                    clear_expression_animation_playback(world);
+                }
                 let Some(e) = vrm_entity else {
                     continue;
                 };
@@ -1034,6 +1225,7 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                 world.commands().trigger(ModifyExpressions::from_iter(e, pairs));
             }
             PoseCommand::SetExpression { weights } => {
+                clear_expression_animation_playback(world);
                 let Some(e) = vrm_entity else {
                     continue;
                 };
@@ -1075,7 +1267,31 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                     }
                 }
             }
+            PoseCommand::AnimateExpressions {
+                keyframes,
+                duration_seconds,
+                looping,
+            } => {
+                let Some(e) = vrm_entity else {
+                    continue;
+                };
+                if keyframes.is_empty() {
+                    clear_expression_animation_playback(world);
+                    continue;
+                }
+                let duration = duration_seconds.max(1e-3);
+                if let Some(mut p) = world.get_resource_mut::<ExpressionAnimationPlayback>() {
+                    p.active = Some(RunningExpressionClip {
+                        keyframes,
+                        duration,
+                        looping,
+                        elapsed: 0.0,
+                        vrm_entity: e,
+                    });
+                }
+            }
             PoseCommand::ResetPose => {
+                clear_expression_animation_playback(world);
                 if index_ready {
                     let vrma_roots: HashSet<Entity> = world
                         .query_filtered::<Entity, With<Vrma>>()
@@ -1123,6 +1339,9 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                     let empty: Vec<(VrmExpression, f32)> = Vec::new();
                     world.commands().trigger(SetExpressions::from_iter(e, empty));
                 }
+            }
+            PoseCommand::LoadVrm { .. } => {
+                // Handled earlier in this frame when draining the queue (before `rest`).
             }
         }
     }
