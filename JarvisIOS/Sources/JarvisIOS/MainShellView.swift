@@ -1,10 +1,11 @@
 import SwiftUI
+import UIKit
 
 /// Root shell: avatar (Bevy), About, and Logs.
 ///
-/// We avoid `TabView` for the Bevy tab: on device, SwiftUI often leaves `UIViewRepresentable` at 0×0
-/// (even inside `GeometryReader`), so `jarvis_renderer_new` never runs. A plain `VStack` + custom
-/// tab bar gets a full-window `frame(maxWidth:maxHeight:)` for the Metal host.
+/// `JarvisBevyView` stays in a `ZStack` for the app lifetime (opacity + zIndex switch tabs). If we
+/// used `switch` and removed the Bevy branch, SwiftUI would call `dismantleUIView` → `teardown()` →
+/// cancel the async bootstrap `Task` before `startRenderer` (same‑ms “Task cancelled” in logs).
 struct MainShellView: View {
     private enum ShellTab: Int, CaseIterable, Identifiable {
         case avatar, about, logs
@@ -21,18 +22,27 @@ struct MainShellView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Group {
-                switch shellTab {
-                case .avatar:
-                    JarvisBevyView()
-                        .id(bevySessionId)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .ignoresSafeArea()
-                case .about:
-                    aboutStack
-                case .logs:
-                    DebugLogsView()
-                }
+            ZStack {
+                JarvisBevyView()
+                    .id(bevySessionId)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea()
+                    .opacity(shellTab == .avatar ? 1 : 0)
+                    .allowsHitTesting(shellTab == .avatar)
+                    .zIndex(shellTab == .avatar ? 1 : 0)
+
+                aboutStack
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(uiColor: .systemGroupedBackground))
+                    .opacity(shellTab == .about ? 1 : 0)
+                    .allowsHitTesting(shellTab == .about)
+                    .zIndex(shellTab == .about ? 1 : 0)
+
+                DebugLogsView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .opacity(shellTab == .logs ? 1 : 0)
+                    .allowsHitTesting(shellTab == .logs)
+                    .zIndex(shellTab == .logs ? 1 : 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
