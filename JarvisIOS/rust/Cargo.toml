@@ -12,3 +12,7 @@ swift-bridge-build = "0.1"
 
 [dependencies]
 swift-bridge = "0.1"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+bevy = { version = "0.18", default-features = true, features = ["wav"] }
+raw-window-handle = "0.6"
