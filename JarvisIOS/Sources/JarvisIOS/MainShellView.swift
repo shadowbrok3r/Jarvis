@@ -1,111 +1,140 @@
 import SwiftUI
+import UIKit
 
-/// Root navigation: chat-first companion, Bevy avatar tab (`xtool` + `RustLibs/libjarvis_ios.a`), link status.
+/// Root shell: avatar (Bevy) tab plus a small About screen for the Rust bridge version.
 struct MainShellView: View {
-    @State private var selectedTab: JarvisTab = .chat
+    @State private var bevySessionId = 0
+    @AppStorage(HubProfileSync.userDefaultsBaseURLKey) private var hubBaseURL: String = ""
+    @AppStorage(HubProfileSync.userDefaultsAuthTokenKey) private var hubAuthToken: String = ""
+    @State private var syncStatus: String = ""
+    @State private var syncInFlight = false
+    @State private var hubSyncProgress: Progress?
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            ChatTabView()
-                .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
-                .tag(JarvisTab.chat)
-
-            AvatarTabView()
-                .tabItem { Label("Avatar", systemImage: "person.crop.artframe") }
-                .tag(JarvisTab.avatar)
-
-            LinkTabView()
-                .tabItem { Label("Link", systemImage: "link.circle") }
-                .tag(JarvisTab.link)
-        }
-    }
-}
-
-private enum JarvisTab: Hashable {
-    case chat, avatar, link
-}
-
-// MARK: - Chat (gateway / IronClaw wiring comes next)
-
-struct ChatTabView: View {
-    @State private var draft = ""
-    @State private var lines: [String] = [
-        "Chat UI placeholder — connect to the same gateway / IronClaw channel as desktop Jarvis.",
-    ]
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                List(lines, id: \.self) { line in
-                    Text(line)
-                        .font(.body)
-                        .textSelection(.enabled)
-                }
-                .listStyle(.plain)
-
-                HStack {
-                    TextField("Message…", text: $draft, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(1 ... 4)
-                    Button("Send") {
-                        let t = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !t.isEmpty else { return }
-                        lines.append(t)
-                        draft = ""
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .padding()
-            }
-            .navigationTitle("Jarvis")
-        }
-    }
-}
-
-// MARK: - Avatar (Bevy in `jarvis_ios`, built for device via `./scripts/build-rust.sh` + xtool)
-
-struct AvatarTabView: View {
-    var body: some View {
-        NavigationStack {
-            ZStack(alignment: .top) {
+        TabView {
+            // TabView often proposes 0×0 to the first tab; GeometryReader + screen fallback yields a real size.
+            GeometryReader { geo in
+                let screen = UIScreen.main.bounds
+                let gw = geo.size.width
+                let gh = geo.size.height
+                let w = (gw.isFinite && gw > 10) ? gw : screen.width
+                let h = (gh.isFinite && gh > 10) ? gh : screen.height
                 JarvisBevyView()
-                    .ignoresSafeArea(edges: .bottom)
-
-                Text("Bevy demo scene — add VRM via `bevy_vrm1` next. Use `xtool dev` after `./scripts/build-rust.sh`.")
-                    .font(.caption2)
-                    .multilineTextAlignment(.center)
-                    .padding(8)
-                    .frame(maxWidth: .infinity)
-                    .background(.ultraThinMaterial)
-                    .allowsHitTesting(false)
+                    .id(bevySessionId)
+                    .frame(width: w, height: h)
             }
-            .navigationTitle("Avatar")
-        }
-    }
-}
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+            .tabItem {
+                    Label("Avatar", systemImage: "person.crop.circle")
+                }
 
-// MARK: - Link (phone as virtual HA-style device for desktop)
-
-struct LinkTabView: View {
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Rust bridge") {
-                    LabeledContent("Build") {
+            NavigationStack {
+                List {
+                    Section("Build") {
                         Text(jarvis_ios_version().toString())
-                            .font(.caption.monospaced())
+                            .font(.footnote)
                             .textSelection(.enabled)
                     }
+                    Section("Hub profile") {
+                        TextField("Base URL (http://host:6121)", text: $hubBaseURL)
+                            .textInputAutocapitalization(.never)
+                            .keyboardType(.URL)
+                            .autocorrectionDisabled()
+                        SecureField("Bearer token (optional)", text: $hubAuthToken)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Button {
+                            Task { await runHubSync() }
+                        } label: {
+                            Text("Sync profile")
+                        }
+                        .disabled(syncInFlight || hubBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if syncInFlight, let prog = hubSyncProgress {
+                            ProgressView(prog)
+                                .padding(.vertical, 4)
+                            TimelineView(.periodic(from: .now, by: 0.12)) { _ in
+                                Text(prog.localizedDescription)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        if !syncStatus.isEmpty {
+                            Text(syncStatus)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Section("Debug") {
+                        Text(
+                            "The line “reused persisted hub cache” is emitted when prepareForBevyBootstrap runs (Avatar tab once the view has size, or the button below). Sync alone writes files and env but does not run that bootstrap path."
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        Button("Log hub cache + disk + env") {
+                            HubProfileSync.logHubCacheDiagnostics()
+                        }
+                        Button("Run prepareForBevyBootstrap (see Hub logs)") {
+                            Task {
+                                await HubProfileSync.prepareForBevyBootstrap()
+                                JarvisIOSLog.recordUI("manual prepareForBevyBootstrap finished (check Hub lines above)")
+                            }
+                        }
+                        Button("Reload Bevy view (bump session)") {
+                            bevySessionId += 1
+                            JarvisIOSLog.recordUI("manual bevySessionId → \(bevySessionId)")
+                        }
+                        Button("Clear persisted hub cache keys", role: .destructive) {
+                            HubProfileSync.clearPersistedHubCachePointers()
+                            JarvisIOSLog.recordUI("cleared UserDefaults hub cache pointers (next bootstrap may re-download)")
+                        }
+                    }
                 }
-                Section("Desktop parity") {
-                    Text(
-                        "Expose camera frames, mic audio, and speaker playback over the same logical channel desktop uses for Home Assistant entities (eyes / ears / voice). Discovery on desktop should list this phone as a selectable device alongside HA cameras and assist satellites."
-                    )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                .navigationTitle("About")
+                .onAppear {
+                    HubProfileSync.migrateAuthTokenFromUserDefaultsIfNeeded()
+                    HubProfileSync.persistAuthTokenFromUI(hubAuthToken)
+                }
+                // Do not clear hub cache pointers when the URL field changes. Each keystroke used to fire
+                // onChange and wipe UserDefaults, breaking prepareForBevyBootstrap after a successful sync.
+                // HubProfileSync.applyPersistedHubCacheEnvIfValid already refuses another host’s cache.
+                .onChange(of: hubAuthToken) { _, newValue in
+                    HubProfileSync.persistAuthTokenFromUI(newValue)
                 }
             }
-            .navigationTitle("Link")
+            .tabItem {
+                Label("About", systemImage: "info.circle")
+            }
+
+            DebugLogsView()
+                .tabItem {
+                    Label("🐛 Logs", systemImage: "ladybug.fill")
+                }
+        }
+    }
+
+    @MainActor
+    private func runHubSync() async {
+        syncInFlight = true
+        syncStatus = "Syncing…"
+        let progress = Progress(totalUnitCount: 1)
+        progress.completedUnitCount = 0
+        hubSyncProgress = progress
+        HubProfileSync.persistAuthTokenFromUI(hubAuthToken)
+        let ok = await HubProfileSync.syncFromHubToCache(progress: progress)
+        hubSyncProgress = nil
+        syncInFlight = false
+        if ok {
+            JarvisIOSLog.recordUI(
+                "runHubSync: success → bump bevySessionId. Open Avatar (or tap “Run prepare…” in About → Debug) to see prepareForBevyBootstrap / cache reuse lines."
+            )
+        } else {
+            JarvisIOSLog.recordUIError("runHubSync: sync failed (see HubProfile logs)")
+        }
+        syncStatus = ok ? "Saved. Reloading avatar…" : "Sync failed — check URL, token, and network."
+        if ok {
+            bevySessionId += 1
         }
     }
 }

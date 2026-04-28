@@ -1,5 +1,9 @@
 //! `staticlib` + swift-bridge for JarvisIOS. On iOS, [`ios_bevy`] runs Bevy inside a `UIView`.
 
+mod debug_log;
+
+#[cfg(target_os = "ios")]
+mod ios_profile_manifest;
 #[cfg(target_os = "ios")]
 mod ios_bevy;
 
@@ -21,11 +25,23 @@ mod ffi {
         fn jarvis_renderer_render(ptr: *mut u8, time_seconds: f64);
 
         fn jarvis_renderer_resize(ptr: *mut u8, width_px: u32, height_px: u32);
+
+        fn jarvis_ios_debug_log_snapshot() -> String;
+
+        fn jarvis_ios_debug_log_clear();
     }
 }
 
 pub fn jarvis_ios_version() -> String {
     format!("jarvis_ios {}", env!("CARGO_PKG_VERSION"))
+}
+
+pub fn jarvis_ios_debug_log_snapshot() -> String {
+    debug_log::jarvis_ios_debug_log_snapshot()
+}
+
+pub fn jarvis_ios_debug_log_clear() {
+    debug_log::jarvis_ios_debug_log_clear();
 }
 
 // ── Renderer FFI (UIKit `UIView` pointer; stubs on non-iOS for host `cargo check`) ─────────────
@@ -37,9 +53,24 @@ pub fn jarvis_renderer_new(
     height_px: u32,
     pixels_per_point: f32,
 ) -> *mut u8 {
+    crate::jarvis_ios_line!(
+        "[JarvisIOS] jarvis_renderer_new enter ui_view={:p} size={}x{} px_per_pt={}",
+        ui_view,
+        width_px,
+        height_px,
+        pixels_per_point
+    );
     match ios_bevy::IosEmbeddedRenderer::new(ui_view.cast(), width_px, height_px, pixels_per_point) {
-        Some(r) => Box::into_raw(Box::new(r)).cast(),
-        None => core::ptr::null_mut(),
+        Some(r) => {
+            crate::jarvis_ios_line!("[JarvisIOS] jarvis_renderer_new OK (IosEmbeddedRenderer allocated)");
+            Box::into_raw(Box::new(r)).cast()
+        }
+        None => {
+            crate::jarvis_ios_line!(
+                "[JarvisIOS] jarvis_renderer_new FAILED: IosEmbeddedRenderer::new returned None (null UIView? or Bevy init panic)"
+            );
+            core::ptr::null_mut()
+        }
     }
 }
 

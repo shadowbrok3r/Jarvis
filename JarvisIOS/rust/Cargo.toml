@@ -14,5 +14,27 @@ swift-bridge-build = "0.1"
 swift-bridge = "0.1"
 
 [target.'cfg(target_os = "ios")'.dependencies]
-bevy = { version = "0.18", default-features = true, features = ["wav"] }
+# Match Bevy's `3d` profile but replace the `ui` meta-feature with `ui_bevy_render` so `audio`
+# (→ `bevy_audio` → `coreaudio-sys`) is never enabled — Apple audio headers are unavailable when
+# cross-compiling Linux → `aarch64-apple-ios` without a full SDK toolchain.
+# Direct dependency so `#[derive(Component)]` / `#[derive(Resource)]` proc-macros resolve `bevy_ecs`
+# when using `bevy` with `default-features = false` (BevyManifest / rustc extern prelude).
+bevy_ecs = { version = "0.18", default-features = false, features = ["std", "bevy_reflect", "async_executor"] }
+bevy = { version = "0.18", default-features = false, features = [
+  "default_app",
+  "default_platform",
+  "3d_bevy_render",
+  "ui_bevy_render",
+  "scene",
+  "picking",
+] }
 raw-window-handle = "0.6"
+# Avoid blake3's NEON C build (cc-rs → xcrun) when cross-compiling from Linux.
+blake3 = { version = "1.8", default-features = false, features = ["std", "pure"] }
+bevy_vrm1 = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# `tracing-oslog` runs a C build that expects Apple `xcrun`; use a stub when building on Linux.
+[patch.crates-io]
+tracing-oslog = { path = "vendor/tracing-oslog-stub" }

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Minimal `xcrun` shim for Linux hosts: `cc-rs` and some crates invoke
+# `xcrun --show-sdk-path` when targeting Apple platforms. Set `SDKROOT` to your
+# iOS SDK root (from xtool) and prepend this directory to PATH:
+#   export SDKROOT=/path/to/iPhoneOS.sdk
+#   export PATH="/path/to/JarvisIOS/scripts:$PATH"
+set -euo pipefail
+
+sdk=""
+if [[ "${1:-}" == "--sdk" ]]; then
+  sdk="${2:-}"
+  shift 2
+fi
+
+case "${1:-}" in
+  --show-sdk-path|-show-sdk-path)
+    echo "${SDKROOT:?SDKROOT must be set}"
+    exit 0
+    ;;
+  simctl)
+    # On Linux there is no Apple simulator. Make callers happy by pretending success.
+    # If you have a real simctl implementation somewhere, replace this with exec.
+    exit 0
+    ;;
+  *)
+    echo "xcrun shim: unsupported args: sdk='$sdk' argv='$*'" >&2
+    exit 2
+    ;;
+esac
