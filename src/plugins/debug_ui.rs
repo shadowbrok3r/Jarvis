@@ -121,6 +121,30 @@ pub struct DebugUiState {
     pub network_trace_channel: TrafficChannel,
     /// Index into the current channel's entry `Vec` (same order as [`TrafficLogSink::snapshot_channel`]).
     pub network_trace_pick: Option<usize>,
+    /// Avatar window: `assets/models` picker (filter, selection, last load/list error).
+    pub avatar_vrm_picker: AvatarVrmPickerState,
+}
+
+/// Transient state for the Avatar window's runtime VRM list (not persisted to `user.toml`).
+#[derive(Debug, Clone)]
+pub struct AvatarVrmPickerState {
+    pub filter: String,
+    pub selected_basename: Option<String>,
+    /// `list_vrm_models` / missing `assets/models` (refreshed each frame while the window is open).
+    pub list_error: Option<String>,
+    /// Last failed hot-swap (resolve path or missing `PoseCommandSender`).
+    pub op_error: Option<String>,
+}
+
+impl Default for AvatarVrmPickerState {
+    fn default() -> Self {
+        Self {
+            filter: String::new(),
+            selected_basename: None,
+            list_error: None,
+            op_error: None,
+        }
+    }
 }
 
 impl Default for DebugUiState {
@@ -139,6 +163,7 @@ impl Default for DebugUiState {
             emotion_mappings: emotion_mappings::EmotionMappingsUiState::default(),
             network_trace_channel: TrafficChannel::ChannelHubWsInbound,
             network_trace_pick: None,
+            avatar_vrm_picker: AvatarVrmPickerState::default(),
         }
     }
 }

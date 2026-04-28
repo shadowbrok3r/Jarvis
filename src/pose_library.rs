@@ -60,8 +60,15 @@ fn default_transition() -> f32 {
 #[serde(rename_all = "camelCase")]
 pub struct AnimationFrame {
     pub bones: HashMap<String, BoneRotation>,
-    #[serde(default)]
+    /// Kimodo historically wrote `duration_ms` (snake); camelCase JSON uses `durationMs`.
+    #[serde(default, alias = "duration_ms")]
     pub duration_ms: Option<f64>,
+    /// Optional VRM expression weights (0..=1) for this keyframe. Used by
+    /// animation layer clips (`anim_layers`); native JSON playback emits them
+    /// when non-empty. Omitted keys in a sparse frame are not cleared on apply
+    /// (see `POSE_GUIDE.md` — include explicit `0.0` to turn a morph off).
+    #[serde(default)]
+    pub expressions: HashMap<String, f32>,
 }
 
 /// On-disk animation layout (same JSON the Kimodo Python service emits).
@@ -417,6 +424,18 @@ pub fn slugify(name: &str) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn animation_frame_deserializes_expressions_and_duration_aliases() {
+        let j = r#"{"bones":{"hips":{"rotation":[0.0,0.0,0.0,1.0]}},"duration_ms":33.3,"expressions":{"happy":0.5}}"#;
+        let f: AnimationFrame = serde_json::from_str(j).unwrap();
+        assert!((f.expressions["happy"] - 0.5).abs() < 1e-6);
+        assert_eq!(f.duration_ms, Some(33.3));
+
+        let j2 = r#"{"bones":{"hips":{"rotation":[0.0,0.0,0.0,1.0]}},"durationMs":40.0}"#;
+        let f2: AnimationFrame = serde_json::from_str(j2).unwrap();
+        assert_eq!(f2.duration_ms, Some(40.0));
+    }
 
     #[test]
     fn slugify_matches_js_regex() {

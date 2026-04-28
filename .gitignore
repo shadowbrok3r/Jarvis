@@ -6,6 +6,7 @@
 /assets/poses/
 /assets/animations/
 /config/user*
+/config/spring_presets/
 /assets/pose_captures/
 /vendor/
 .pose_captures
@@ -13,3 +14,18 @@ artifacts/
 /__pycache__
 /.dev/
 /docs/
+.directory
+
+# JarvisIOS: device staticlib output and local Rust build (generated Swift/Headers are committed under Sources/)
+JarvisIOS/.DS_Store
+JarvisIOS/.build
+JarvisIOS/Packages
+JarvisIOS/xcuserdata/
+JarvisIOS/DerivedData/
+JarvisIOS/.swiftpm/configuration/registries.json
+JarvisIOS/.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+JarvisIOS/.netrc
+JarvisIOS/xtool
+JarvisIOS/rust/target
+JarvisIOS/RustLibs/**
+.dev

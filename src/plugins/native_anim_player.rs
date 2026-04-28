@@ -168,6 +168,12 @@ fn push_frame(sender: &PoseCommandSender, frame: &AnimationFrame) {
         // native playback and keeps latency deterministic.
         transition_seconds: Some(0.0),
     });
+    if !frame.expressions.is_empty() {
+        sender.send(PoseCommand::ApplyExpression {
+            weights: frame.expressions.clone(),
+            cancel_expression_animation: false,
+        });
+    }
 }
 
 // ---------- streaming (Kimodo live) --------------------------------------------

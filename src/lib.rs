@@ -7,5 +7,6 @@ pub mod config;
 pub mod emotions;
 pub mod home_assistant;
 pub mod ironclaw;
+pub mod model_catalog;
 pub mod paths;
 pub mod pose_library;

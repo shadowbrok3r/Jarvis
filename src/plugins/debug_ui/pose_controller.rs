@@ -620,6 +620,7 @@ fn pose_row(
                         if !pose.expressions.is_empty() {
                             s.send(PoseCommand::ApplyExpression {
                                 weights: pose.expressions.clone(),
+                                cancel_expression_animation: true,
                             });
                         }
                         state.status = Some(format!("applied {}", pose.name));

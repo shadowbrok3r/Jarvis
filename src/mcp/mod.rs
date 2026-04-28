@@ -31,6 +31,7 @@ use serde_json::{json, Value};
 use crossbeam_channel::RecvTimeoutError;
 
 use jarvis_avatar::a2f::{A2fClient, A2fConfig};
+use jarvis_avatar::model_catalog::{list_vrm_models, resolve_vrm_load_argument};
 use jarvis_avatar::paths::expand_home;
 use jarvis_avatar::pose_library::{slugify, BoneRotation, PoseFile, PoseLibrary};
 
@@ -156,6 +157,26 @@ pub struct SetExpressionArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExpressionKeyframeArg {
+    /// Time in seconds from clip start (must be non-decreasing after sort).
+    pub time_s: f32,
+    /// Expression preset → weight 0..=1 at this keyframe.
+    pub weights: HashMap<String, f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AnimateExpressionsArgs {
+    /// At least one keyframe. Sampling is piecewise-linear between keyframes; after the last keyframe time, weights hold until `duration_seconds`.
+    pub keyframes: Vec<ExpressionKeyframeArg>,
+    /// Total clip length in seconds. If omitted, uses the largest `time_s` in keyframes (minimum 0.05s).
+    #[serde(default)]
+    pub duration_seconds: Option<f32>,
+    /// When true, time wraps with `duration_seconds` as the period.
+    #[serde(default)]
+    pub looping: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetBonesArgs {
     /// Map of VRM bone name → `{ rotation: [x, y, z, w] }`.
     pub bones: HashMap<String, BoneRotation>,
@@ -278,6 +299,19 @@ pub struct A2fConfigureArgs {
     pub health_url: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListModelsArgs {
+    /// Optional case-insensitive substring filter on the `.vrm` basename (e.g. `helen`).
+    #[serde(default)]
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LoadVrmArgs {
+    /// `models/name.vrm` (under `assets/`) or basename only (`name.vrm` in `assets/models/`).
+    pub path: String,
+}
+
 fn default_capture_dim() -> u32 {
     1024
 }
@@ -355,6 +389,38 @@ fn ok_json(v: &impl Serialize) -> CallToolResult {
 
 #[tool_router(router = tool_router)]
 impl JarvisMcpServer {
+    #[tool(description = "List `.vrm` files under assets/models (sorted basenames + asset paths like models/foo.vrm for load_vrm). Optional filter: case-insensitive substring on basename. Read-only; cwd must be the crate root so assets/models resolves.")]
+    async fn list_models(
+        &self,
+        Parameters(args): Parameters<ListModelsArgs>,
+    ) -> CallToolResult {
+        match list_vrm_models(args.filter.as_deref()) {
+            Ok(entries) => ok_json(&json!({
+                "modelsDir": jarvis_avatar::model_catalog::models_dir().display().to_string(),
+                "count": entries.len(),
+                "models": entries,
+            })),
+            Err(e) => err_text(e),
+        }
+    }
+
+    #[tool(description = "Hot-swap the displayed VRM at runtime (no app restart). Path: models/name.vrm or basename name.vrm under assets/models. Clears bone snapshot / transitions / expression animation state; updates Settings.model_path; respawns idle VRMA from [avatar].idle_vrma_path when set. Spring/collider presets reload if auto_load_spring_preset is true when the new rig initializes.")]
+    async fn load_vrm(&self, Parameters(args): Parameters<LoadVrmArgs>) -> CallToolResult {
+        match resolve_vrm_load_argument(&args.path) {
+            Ok(asset_path) => {
+                self.pose_tx.send(PoseCommand::LoadVrm {
+                    asset_path: asset_path.clone(),
+                });
+                ok_json(&json!({
+                    "queued": true,
+                    "assetPath": asset_path,
+                    "note": "pose_bones / expressions may no-op until the new rig is indexed; Kimodo playback may still target the prior skeleton until you reset.",
+                }))
+            }
+            Err(e) => err_text(e),
+        }
+    }
+
     #[tool(description = "List every saved VRM pose (name, description, category, bone count). Use before apply_pose when you need a known baseline for motion or capture.")]
     async fn list_poses(&self) -> CallToolResult {
         match self.library.load_all_poses() {
@@ -406,6 +472,7 @@ impl JarvisMcpServer {
         if !pose.expressions.is_empty() {
             self.pose_tx.send(PoseCommand::ApplyExpression {
                 weights: pose.expressions.clone(),
+                cancel_expression_animation: true,
             });
         }
         ok_text(format!(
@@ -424,8 +491,60 @@ impl JarvisMcpServer {
         let names: Vec<String> = args.expressions.keys().cloned().collect();
         self.pose_tx.send(PoseCommand::ApplyExpression {
             weights: args.expressions,
+            cancel_expression_animation: true,
         });
         ok_text(format!("set expressions: {}", names.join(", ")))
+    }
+
+    #[tool(description = "Play a short in-engine VRM expression curve (piecewise-linear keyframes). Stops idle VRMA like other manual pose commands. Omitted expression keys in a keyframe default to 0 when lerping into keys that list them. Cancels on reset_pose / set_expression / apply_pose with expressions. Layered in-app expression drivers (blink, etc.) still run first each frame; animated channels override last. After one-shot playback, last sampled weights remain until changed. Verify with capture_pose_views + framing_preset face_closeup.")]
+    async fn animate_expressions(
+        &self,
+        Parameters(args): Parameters<AnimateExpressionsArgs>,
+    ) -> CallToolResult {
+        const MAX_KEYFRAMES: usize = 256;
+        if args.keyframes.is_empty() {
+            return err_text("keyframes must contain at least one entry".to_string());
+        }
+        if args.keyframes.len() > MAX_KEYFRAMES {
+            return err_text(format!(
+                "too many keyframes (max {MAX_KEYFRAMES})"
+            ));
+        }
+        let mut frames: Vec<(f32, HashMap<String, f32>)> = args
+            .keyframes
+            .into_iter()
+            .map(|k| {
+                let w: HashMap<String, f32> = k
+                    .weights
+                    .into_iter()
+                    .map(|(n, v)| (n, v.clamp(0.0, 1.0)))
+                    .collect();
+                (k.time_s, w)
+            })
+            .collect();
+        frames.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let max_t = frames
+            .iter()
+            .map(|(t, _)| *t)
+            .fold(0.0f32, f32::max);
+        let mut duration = args.duration_seconds.unwrap_or(max_t).max(0.05).min(120.0);
+        if duration + 1e-4 < max_t {
+            duration = max_t.max(0.05);
+        }
+        let looping = args.looping.unwrap_or(false);
+        let kf_count = frames.len();
+        self.pose_tx.send(PoseCommand::AnimateExpressions {
+            keyframes: frames,
+            duration_seconds: duration,
+            looping,
+        });
+        ok_json(&json!({
+            "started": true,
+            "durationSeconds": duration,
+            "looping": looping,
+            "keyframeCount": kf_count,
+            "note": "Sampling runs in Bevy PostUpdate; capture_pose_views after wall-clock sleep >= duration for one-shot verification.",
+        }))
     }
 
     #[tool(description = "Directly set bone rotations as quaternions [x, y, z, w]. Keep components in [-0.3, 0.3] for natural motion.")]
@@ -546,6 +665,7 @@ impl JarvisMcpServer {
             if !pose.expressions.is_empty() {
                 self.pose_tx.send(PoseCommand::ApplyExpression {
                     weights: pose.expressions.clone(),
+                    cancel_expression_animation: true,
                 });
             }
         }
@@ -902,7 +1022,8 @@ impl ServerHandler for JarvisMcpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
                 "jarvis-avatar pose MCP (VRM): Always call get_pose_guide first — it is the full authoring manual (Euler vs quaternion, knee/elbow signs, capture loop). \
-Workflow: baseline apply_pose or reset_pose → pose_bones (degrees, clamped) and/or make_fist for hands → generate_motion for clips (check librarySaveVerified) → set_expression for face → tiny adjust_bone quaternion deltas only → capture_pose_views to verify. \
+Workflow: baseline apply_pose or reset_pose → pose_bones (degrees, clamped) and/or make_fist for hands → generate_motion for clips (check librarySaveVerified) → set_expression or animate_expressions (time-varying face) → tiny adjust_bone quaternion deltas only → capture_pose_views to verify. \
+Use list_models then load_vrm to swap the on-screen `.vrm` at runtime (expressions / bone snapshot reset; idle VRMA follows config). \
 Kimodo writes animations to the same folder as [pose_library].animations_dir (see kimodo-motion-service env JARVIS_ANIMATIONS_DIR). \
 Multi-clip animation layering (stacked playback) is configured in the in-app debug UI / anim_layer_sets.json — not separate MCP tools yet.",
             )

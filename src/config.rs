@@ -310,10 +310,21 @@ pub struct McpSettings {
     /// `Authorization: Bearer <token>`.
     #[serde(default)]
     pub auth_token: String,
+    /// RMCP closes the streamable-HTTP session worker after this many seconds
+    /// with no session activity (default in rmcp 1.5 is 300). Cursor then logs
+    /// "resume failed" until it opens a new session. Use `0` to disable the
+    /// timeout (sessions only end when the client disconnects). Default:
+    /// 86400 (24 hours).
+    #[serde(default = "default_mcp_session_keep_alive_sec")]
+    pub session_keep_alive_sec: u64,
 }
 
 fn default_mcp_path() -> String {
     "/mcp".to_string()
+}
+
+fn default_mcp_session_keep_alive_sec() -> u64 {
+    86400
 }
 
 /// NVIDIA Audio2Face-3D Docker endpoint used by the A2F MCP tools.

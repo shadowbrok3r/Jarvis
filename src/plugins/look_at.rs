@@ -65,6 +65,29 @@ impl Default for LookAtRuntime {
     }
 }
 
+/// Detach the shared [`LookAtTarget`] from the VRM before the avatar root is despawned (MCP model swap).
+/// Preserves world-space gaze position via `remove_parent_in_place`. Clears `target_parented` so
+/// [`attach_lookat_to_vrm`] runs again once the new `Vrm` exists.
+pub fn detach_look_at_target_for_vrm_hot_swap(world: &mut World) {
+    use bevy::transform::commands::BuildChildrenTransformExt;
+
+    let (target, parented) = world
+        .get_resource::<LookAtRuntime>()
+        .map(|r| (r.target, r.target_parented))
+        .unwrap_or((None, false));
+    let Some(target) = target else {
+        return;
+    };
+    if parented {
+        if let Ok(mut em) = world.get_entity_mut(target) {
+            em.remove_parent_in_place();
+        }
+    }
+    if let Some(mut runtime) = world.get_resource_mut::<LookAtRuntime>() {
+        runtime.target_parented = false;
+    }
+}
+
 fn spawn_look_target(mut commands: Commands, mut runtime: ResMut<LookAtRuntime>) {
     // Default gaze target sits ~1 m in front of the rig at eye height. Parent is set to the
     // VRM root as soon as the VRM loads so the offset stays rig-local.

@@ -102,6 +102,7 @@ fn run_idle_tick(
         if !pose.expressions.is_empty() {
             sender.send(PoseCommand::ApplyExpression {
                 weights: pose.expressions.clone(),
+                cancel_expression_animation: false,
             });
         }
     }

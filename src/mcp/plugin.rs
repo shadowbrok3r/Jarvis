@@ -83,6 +83,7 @@ fn start_mcp_server(
     let bind = settings.mcp.bind_address.clone();
     let path = settings.mcp.path.clone();
     let auth_token = settings.mcp.auth_token.clone();
+    let session_keep_alive_sec = settings.mcp.session_keep_alive_sec;
 
     let poses_dir = expand_home(&settings.pose_library.poses_dir);
     let animations_dir = expand_home(&settings.pose_library.animations_dir);
@@ -124,6 +125,7 @@ fn start_mcp_server(
                 bind,
                 path,
                 auth_token,
+                session_keep_alive_sec,
                 JarvisMcpServer::new(
                     pose_tx_val,
                     capture_tx_val,
@@ -164,15 +166,23 @@ async fn run_mcp_server(
     bind: String,
     path: String,
     auth_token: String,
+    session_keep_alive_sec: u64,
     server: JarvisMcpServer,
     traffic: Option<TrafficLogSink>,
 ) {
     let server_factory = move || Ok::<_, std::io::Error>(server.clone());
 
+    let session_keep_alive = (session_keep_alive_sec > 0).then(|| {
+        Duration::from_secs(session_keep_alive_sec)
+    });
+    let mut session_manager = LocalSessionManager::default();
+    session_manager.session_config.keep_alive = session_keep_alive;
+    let session_manager = std::sync::Arc::new(session_manager);
+
     let streamable: StreamableHttpService<JarvisMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
             server_factory,
-            std::sync::Arc::new(LocalSessionManager::default()),
+            session_manager,
             StreamableHttpServerConfig::default()
                 .with_sse_keep_alive(Some(Duration::from_secs(15))),
         );
@@ -211,7 +221,7 @@ async fn run_mcp_server(
         }
     };
     info!(
-        "mcp: streamable-http listening on {bind}{path_prefix} (auth: {})",
+        "mcp: streamable-http listening on {bind}{path_prefix} (auth: {}; session_keep_alive_sec: {session_keep_alive_sec})",
         if auth_token.is_empty() { "none" } else { "bearer" },
     );
     if let Err(e) = axum::serve(listener, app).await {

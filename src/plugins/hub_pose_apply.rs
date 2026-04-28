@@ -61,14 +61,20 @@ fn bridge_hub_envelopes_into_pose_commands(
                 }
                 if let Some(weights) = parse_expression_map(&envelope.data) {
                     if !weights.is_empty() {
-                        sender.send(PoseCommand::ApplyExpression { weights });
+                        sender.send(PoseCommand::ApplyExpression {
+                            weights,
+                            cancel_expression_animation: true,
+                        });
                     }
                 }
             }
             "vrm:apply-expression" => {
                 if let Some(weights) = parse_expression_map(&envelope.data) {
                     if !weights.is_empty() {
-                        sender.send(PoseCommand::ApplyExpression { weights });
+                        sender.send(PoseCommand::ApplyExpression {
+                            weights,
+                            cancel_expression_animation: true,
+                        });
                     }
                 }
             }
