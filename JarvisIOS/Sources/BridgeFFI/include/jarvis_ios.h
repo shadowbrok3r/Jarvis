@@ -5,3 +5,5 @@ uint8_t* __swift_bridge__$jarvis_renderer_new(uint8_t* ui_view, uint32_t width_p
 void __swift_bridge__$jarvis_renderer_free(uint8_t* ptr);
 void __swift_bridge__$jarvis_renderer_render(uint8_t* ptr, double time_seconds);
 void __swift_bridge__$jarvis_renderer_resize(uint8_t* ptr, uint32_t width_px, uint32_t height_px);
+void* __swift_bridge__$jarvis_ios_debug_log_snapshot(void);
+void __swift_bridge__$jarvis_ios_debug_log_clear(void);

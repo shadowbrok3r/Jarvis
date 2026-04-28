@@ -14,6 +14,9 @@
 //!                        Use this from `ironclaw-proxy` to push AI chat completions
 //!                        without opening a WS client.
 //! * `GET  /health`     — JSON peer roster for ops / the debug UI.
+//! * `GET  /jarvis-ios/v1/manifest` — JSON profile snapshot for the iOS companion (Bearer token when set).
+//! * `GET  /jarvis-ios/v1/asset/{*path}` — Raw bytes under `./assets/` (path traversal rejected).
+//! * `GET  /jarvis-ios/v1/config/spring-presets/{name}` — Preset TOML (`xxxxxxxxxxxxxxxx.toml` only).
 //!
 //! Emits the same Bevy `Message`s the old WS client did so downstream plugins
 //! (`expressions`, `look_at`, `tts`, `debug_ui`) stay on the same contract:
@@ -28,9 +31,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use axum::body::Body;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::{Path, State};
+use axum::http::header;
+use axum::http::{HeaderMap, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
@@ -193,6 +198,10 @@ fn spawn_hub_thread(
     let (tx_in, rx_in) = unbounded::<Inbound>();
     let (tx_bcast, _rx_bcast) = tokio::sync::broadcast::channel::<EnvelopeBody>(256);
 
+    let jarvis_ios = std::sync::Arc::new(super::jarvis_ios_hub::JarvisIosHubProfile::from_settings(
+        &*settings,
+    ));
+
     commands.insert_resource(HubBroadcast {
         tx: tx_out,
         inbound: tx_bcast.clone(),
@@ -225,6 +234,7 @@ fn spawn_hub_thread(
                 tx_in,
                 tx_bcast,
                 traffic,
+                jarvis_ios,
             ));
         })
         .expect("failed to spawn jarvis-hub thread");
@@ -240,6 +250,7 @@ struct HubShared {
     module_name: String,
     auth_token: String,
     traffic: Option<TrafficLogSink>,
+    jarvis_ios: std::sync::Arc<super::jarvis_ios_hub::JarvisIosHubProfile>,
 }
 
 struct Peer {
@@ -257,6 +268,7 @@ async fn run_hub(
     tx_in: Sender<Inbound>,
     inbound_bcast: tokio::sync::broadcast::Sender<EnvelopeBody>,
     traffic: Option<TrafficLogSink>,
+    jarvis_ios: std::sync::Arc<super::jarvis_ios_hub::JarvisIosHubProfile>,
 ) {
     let shared = HubShared {
         peers: Arc::new(RwLock::new(HashMap::new())),
@@ -265,6 +277,7 @@ async fn run_hub(
         module_name: module_name.clone(),
         auth_token,
         traffic,
+        jarvis_ios,
     };
 
     // Drain Bevy→peers crossbeam queue and fan out over the WS peer map.
@@ -303,6 +316,12 @@ async fn run_hub(
         .route("/ws", any(ws_handler))
         .route("/broadcast", post(broadcast_handler))
         .route("/health", get(health_handler))
+        .route("/jarvis-ios/v1/manifest", get(jarvis_ios_manifest_handler))
+        .route("/jarvis-ios/v1/asset/{*path}", get(jarvis_ios_asset_handler))
+        .route(
+            "/jarvis-ios/v1/config/spring-presets/{name}",
+            get(jarvis_ios_spring_preset_handler),
+        )
         .with_state(shared);
 
     let addr: SocketAddr = match bind.parse() {
@@ -319,7 +338,7 @@ async fn run_hub(
             return;
         }
     };
-    info!("channel-hub listening on {bind} (ws /ws · http /broadcast · /health)");
+    info!("channel-hub listening on {bind} (ws /ws · http /broadcast · /health · /jarvis-ios/v1/…)");
     if let Err(e) = axum::serve(listener, app).await {
         error!("axum serve exited: {e}");
     }
@@ -339,6 +358,73 @@ async fn health_handler(State(shared): State<HubShared>) -> impl IntoResponse {
             "identity": p.identity,
         })).collect::<Vec<_>>(),
     }))
+}
+
+async fn jarvis_ios_manifest_handler(
+    State(shared): State<HubShared>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let auth = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok());
+    if !super::jarvis_ios_hub::http_authorized(&shared.auth_token, auth) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(shared.jarvis_ios.manifest_json()).into_response()
+}
+
+async fn jarvis_ios_asset_handler(
+    State(shared): State<HubShared>,
+    Path(rel): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let auth = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok());
+    if !super::jarvis_ios_hub::http_authorized(&shared.auth_token, auth) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(path) = super::jarvis_ios_hub::resolve_asset_file(&rel) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let ct = super::jarvis_ios_hub::content_type_for_path(&path);
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, ct)
+                .body(Body::from(bytes))
+            {
+                Ok(r) => r.into_response(),
+                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn jarvis_ios_spring_preset_handler(
+    State(shared): State<HubShared>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let auth = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok());
+    if !super::jarvis_ios_hub::http_authorized(&shared.auth_token, auth) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(path) = super::jarvis_ios_hub::resolve_spring_preset_file(&name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let ct = super::jarvis_ios_hub::content_type_for_path(&path);
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, ct)
+                .body(Body::from(bytes))
+            {
+                Ok(r) => r.into_response(),
+                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn broadcast_handler(

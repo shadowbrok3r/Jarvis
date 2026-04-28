@@ -11,6 +11,7 @@ pub use vrm_eye_debug::VrmEyeLookatDebug;
 pub mod spring_bone;
 mod spring_preset;
 pub mod channel_server;
+mod jarvis_ios_hub;
 pub mod ironclaw_chat;
 pub mod pose_driver;
 pub mod pose_capture;

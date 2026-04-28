@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+# Codesign shim for non-macOS hosts.
+# Haven't needed this yet, but last few times i did
+# IOS builds on linux, i had to add this fake shim to 
+# get it to work.
+
+# Accept any args and pretend signing succeeded.
+exit 0

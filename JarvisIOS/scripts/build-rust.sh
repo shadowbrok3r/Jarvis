@@ -24,7 +24,7 @@ find "$SWIFT_DST" -maxdepth 1 -type f -name '*.swift' \
     base="$(basename "$f")"
     case "$base" in
       SwiftBridgeCore.swift|jarvis_ios.swift) : ;;
-      JarvisIOSApp.swift|ContentView.swift|BridgeFFIImport.swift) : ;;
+      JarvisIOSApp.swift|ContentView.swift|MainShellView.swift|JarvisBevyView.swift|HubProfileSync.swift|JarvisIOSLog.swift|DebugLogsView.swift|BridgeFFIImport.swift) : ;;
       *) rm -f "$f" ;;
     esac
   done
@@ -40,8 +40,8 @@ fi
 
 # 3b) Swift 6 / xtool: swift-bridge emits RustStr conformances without @retroactive.
 if command -v perl >/dev/null 2>&1 && [[ -f "$SWIFT_DST/SwiftBridgeCore.swift" ]]; then
-  perl -pi -e 's/extension RustStr: Identifiable\b/extension RustStr: @retroactive Identifiable/' "$SWIFT_DST/SwiftBridgeCore.swift"
-  perl -pi -e 's/extension RustStr: Equatable\b/extension RustStr: @retroactive Equatable/' "$SWIFT_DST/SwiftBridgeCore.swift"
+  perl -pi -e 's/extension RustStr:\s+Identifiable\b/extension RustStr: @retroactive Identifiable/' "$SWIFT_DST/SwiftBridgeCore.swift"
+  perl -pi -e 's/extension RustStr:\s+Equatable\b/extension RustStr: @retroactive Equatable/' "$SWIFT_DST/SwiftBridgeCore.swift"
 fi
 
 # 4) Ensure generated Swift can see the C declarations from the BridgeFFI module
@@ -64,6 +64,17 @@ if [[ ! -f "$LIB" ]]; then
   exit 1
 fi
 cp -f "$LIB" "$LIB_DST/"
+
+# 5b) Catch stale staticlibs before xtool link fails with undefined __swift_bridge__$… symbols
+COPIED="$LIB_DST/libjarvis_ios.a"
+if command -v llvm-nm >/dev/null 2>&1; then
+  OUT=$(llvm-nm "$COPIED" 2>/dev/null || true)
+  if [[ -n "$OUT" ]] && ! grep -qF '__swift_bridge__$jarvis_renderer_new' <<<"$OUT"; then
+    echo "ERROR: $COPIED is missing __swift_bridge__\$jarvis_renderer_new (FFI out of sync)."
+    echo "Rebuild the iOS staticlib; then re-run xtool dev."
+    exit 1
+  fi
+fi
 
 # 6) Copy generated C headers for BridgeFFI
 mkdir -p "$C_DST"

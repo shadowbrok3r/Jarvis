@@ -1,0 +1,15 @@
+# Drop-in replacement for crates.io `tracing-oslog` when cross-compiling iOS on Linux
+# (no Xcode / xcrun). Bevy only needs `OsLogger` as a `tracing_subscriber::Layer`.
+[package]
+name = "tracing-oslog"
+version = "0.3.0"
+edition = "2021"
+description = "Stub tracing-oslog for Linux→iOS cross builds (no C / os_log)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tracing-core = { version = "0.1", default-features = false }
+tracing-subscriber = { version = "0.3.20", default-features = false, features = ["registry"] }

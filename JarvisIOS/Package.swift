@@ -22,6 +22,10 @@ let package = Package(
       name: "JarvisIOS",
       dependencies: ["BridgeFFI"],
       path: "Sources/JarvisIOS",
+      resources: [
+        // In-package symlink `JarvisIOS/assets` → `../assets` (SwiftPM forbids `..` in resource paths).
+        .copy("assets"),
+      ],
       linkerSettings: [
         .unsafeFlags(["-L", "\(root)/RustLibs"]),
         .linkedLibrary("jarvis_ios"),

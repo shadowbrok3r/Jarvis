@@ -5,9 +5,6 @@ It can stand in for AIRI’s Tamagotchi UI and AIRI’s `server-runtime` hub; Ir
 itself stays the product backend. `server.mjs` (ha-voice-bridge) is unchanged on the
 wire — point it at this process instead of an AIRI hub.
 
-> Design doc: `~/Desktop/NewPlan.md` (the top of that file documents the
-> 2026-04-19 correction: we are the hub, not a client of one).
-
 ## Architecture at a glance
 
 ```
@@ -95,7 +92,12 @@ curl -X POST http://localhost:6121/broadcast \
 
 # Peer roster:
 curl -s http://localhost:6121/health | jq
+
+# JarvisIOS profile manifest (optional Bearer if IRONCLAW_TOKEN / [ironclaw].auth_token is set):
+curl -sS -H "Authorization: Bearer $IRONCLAW_TOKEN" http://localhost:6121/jarvis-ios/v1/manifest | jq .
 ```
+
+See **`JarvisIOS/README.md`** (`Desktop hub: profile sync over HTTP`) for asset and spring-preset paths.
 
 ## `server.mjs` stays unchanged
 
