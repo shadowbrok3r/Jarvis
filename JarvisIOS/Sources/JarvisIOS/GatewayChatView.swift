@@ -127,65 +127,67 @@ private enum IronclawGatewayHTTP {
         return r
     }
 
-    static func listThreads(baseURL: String, bearer: String) async throws -> ThreadListDTO {
-        let base = HubProfileSync.normalizedGatewayBaseURL(baseURL)
-        guard let url = URL(string: base + "/api/chat/threads") else { throw GatewayHTTPError.badURL }
-        let (data, resp) = try await URLSession.shared.data(for: authorizedGET(url: url, bearer: bearer))
-        try throwIfNeeded(resp, data)
-        return try jsonDecoder().decode(ThreadListDTO.self, from: data)
+    static func listThreads(bearer: String) async throws -> ThreadListDTO {
+        try await withGatewayFailover { base in
+            guard let url = URL(string: base + "/api/chat/threads") else { throw GatewayHTTPError.badURL }
+            let (data, resp) = try await URLSession.shared.data(for: authorizedGET(url: url, bearer: bearer))
+            try throwIfNeeded(resp, data)
+            return try jsonDecoder().decode(ThreadListDTO.self, from: data)
+        }
     }
 
     /// Same contract as Rust `GatewayClient::history` (`thread_id`, optional `limit`).
     static func fetchHistory(
-        baseURL: String,
         bearer: String,
         threadId: String,
         limit: UInt32
     ) async throws -> HistoryResponseDTO {
-        let base = HubProfileSync.normalizedGatewayBaseURL(baseURL)
-        var comp = URLComponents(string: base + "/api/chat/history")
-        comp?.queryItems = [
-            URLQueryItem(name: "thread_id", value: threadId),
-            URLQueryItem(name: "limit", value: String(limit)),
-        ]
-        guard let url = comp?.url else { throw GatewayHTTPError.badURL }
-        let (data, resp) = try await URLSession.shared.data(for: authorizedGET(url: url, bearer: bearer))
-        try throwIfNeeded(resp, data)
-        return try jsonDecoder().decode(HistoryResponseDTO.self, from: data)
+        try await withGatewayFailover { base in
+            var comp = URLComponents(string: base + "/api/chat/history")
+            comp?.queryItems = [
+                URLQueryItem(name: "thread_id", value: threadId),
+                URLQueryItem(name: "limit", value: String(limit)),
+            ]
+            guard let url = comp?.url else { throw GatewayHTTPError.badURL }
+            let (data, resp) = try await URLSession.shared.data(for: authorizedGET(url: url, bearer: bearer))
+            try throwIfNeeded(resp, data)
+            return try jsonDecoder().decode(HistoryResponseDTO.self, from: data)
+        }
     }
 
-    static func createThread(baseURL: String, bearer: String) async throws -> ThreadInfoDTO {
-        let base = HubProfileSync.normalizedGatewayBaseURL(baseURL)
-        guard let url = URL(string: base + "/api/chat/thread/new") else { throw GatewayHTTPError.badURL }
-        let (data, resp) = try await URLSession.shared.data(for: authorizedPOSTJSON(url: url, bearer: bearer, body: Data()))
-        try throwIfNeeded(resp, data)
-        return try jsonDecoder().decode(ThreadInfoDTO.self, from: data)
+    static func createThread(bearer: String) async throws -> ThreadInfoDTO {
+        try await withGatewayFailover { base in
+            guard let url = URL(string: base + "/api/chat/thread/new") else { throw GatewayHTTPError.badURL }
+            let (data, resp) = try await URLSession.shared.data(for: authorizedPOSTJSON(url: url, bearer: bearer, body: Data()))
+            try throwIfNeeded(resp, data)
+            return try jsonDecoder().decode(ThreadInfoDTO.self, from: data)
+        }
     }
 
     static func sendMessage(
-        baseURL: String,
         bearer: String,
         content: String,
         threadId: String?,
         images: [ImageDataDTO]
     ) async throws -> SendMessageResponseDTO {
-        let base = HubProfileSync.normalizedGatewayBaseURL(baseURL)
-        guard let url = URL(string: base + "/api/chat/send") else { throw GatewayHTTPError.badURL }
-        let body = SendMessageBody(
-            content: content,
-            threadId: threadId,
-            timezone: TimeZone.current.identifier,
-            images: images
-        )
-        let enc = try jsonEncoder().encode(body)
-        let (data, resp) = try await URLSession.shared.data(for: authorizedPOSTJSON(url: url, bearer: bearer, body: enc))
-        try throwIfNeeded(resp, data)
-        return try jsonDecoder().decode(SendMessageResponseDTO.self, from: data)
+        try await withGatewayFailover { base in
+            guard let url = URL(string: base + "/api/chat/send") else { throw GatewayHTTPError.badURL }
+            let body = SendMessageBody(
+                content: content,
+                threadId: threadId,
+                timezone: TimeZone.current.identifier,
+                images: images
+            )
+            let enc = try jsonEncoder().encode(body)
+            let (data, resp) = try await URLSession.shared.data(for: authorizedPOSTJSON(url: url, bearer: bearer, body: enc))
+            try throwIfNeeded(resp, data)
+            return try jsonDecoder().decode(SendMessageResponseDTO.self, from: data)
+        }
     }
 
-    static func openEventsRequest(baseURL: String, bearer: String) throws -> URLRequest {
-        let base = HubProfileSync.normalizedGatewayBaseURL(baseURL)
-        guard let url = URL(string: base + "/api/chat/events") else { throw GatewayHTTPError.badURL }
+    static func openEventsRequest(base: String, bearer: String) throws -> URLRequest {
+        let baseNorm = HubProfileSync.normalizedGatewayBaseURL(base)
+        guard let url = URL(string: baseNorm + "/api/chat/events") else { throw GatewayHTTPError.badURL }
         return authorizedSSE(url: url, bearer: bearer)
     }
 
@@ -198,6 +200,22 @@ private enum IronclawGatewayHTTP {
             }
             throw GatewayHTTPError.badStatus(http.statusCode, text)
         }
+    }
+
+    /// Tries each configured gateway base URL (primary, then optional fallback).
+    private static func withGatewayFailover<T>(_ body: (String) async throws -> T) async throws -> T {
+        let bases = HubProfileSync.gatewayBaseURLCandidates()
+        guard !bases.isEmpty else { throw GatewayHTTPError.badURL }
+        var last: Error = GatewayHTTPError.badURL
+        for base in bases {
+            do {
+                return try await body(HubProfileSync.normalizedGatewayBaseURL(base))
+            } catch {
+                last = error
+                JarvisIOSLog.recordIronclawError("gateway try \(base): \(error.localizedDescription)")
+            }
+        }
+        throw last
     }
 }
 
@@ -275,13 +293,43 @@ final class GatewayChatViewModel {
         let role: Role
         var text: String
         var images: [InlineImage]
+        /// Last ACT emotion label for this bubble (lowercased), if any.
+        var emotionCaption: String?
+        /// True when any parsed emotion label is missing from `config/emotions.json`.
+        var emotionUnmapped: Bool
 
-        init(role: Role, text: String, images: [InlineImage] = []) {
+        init(
+            role: Role,
+            text: String,
+            images: [InlineImage] = [],
+            emotionCaption: String? = nil,
+            emotionUnmapped: Bool = false
+        ) {
             self.id = UUID()
             self.role = role
             self.text = text
             self.images = images
+            self.emotionCaption = emotionCaption
+            self.emotionUnmapped = emotionUnmapped
         }
+    }
+
+    /// Assistant bubble: strip ACT/DELAY, optional emotion caption, auto placeholders for new labels.
+    private static func chatLineAssistant(fromRaw raw: String) -> ChatLine {
+        let labels = IosChatFormatting.emotionLabels(from: raw)
+        let keys = HubProfileSync.mappedEmotionKeysLowercased()
+        let unmapped = labels.contains { !keys.contains($0) }
+        if !labels.isEmpty {
+            HubProfileSync.ensurePlaceholderEmotions(for: labels)
+        }
+        let display = IosChatFormatting.stripActDelay(raw)
+        return ChatLine(
+            role: .assistant,
+            text: display,
+            images: [],
+            emotionCaption: labels.last,
+            emotionUnmapped: unmapped
+        )
     }
 
     struct PendingImage: Identifiable, Equatable {
@@ -333,36 +381,30 @@ final class GatewayChatViewModel {
         sseTask = nil
         sseRunning = false
 
-        let rawBase = UserDefaults.standard.string(forKey: HubProfileSync.Gateway.userDefaultsBaseURLKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let base = HubProfileSync.normalizedGatewayBaseURL(rawBase)
-        guard !base.isEmpty else {
+        guard !HubProfileSync.gatewayBaseURLCandidates().isEmpty else {
             banner = "Set IronClaw gateway base URL in About (e.g. http://host:3000)."
             return
         }
         banner = ""
 
         let bearer = HubProfileSync.resolvedGatewayBearerToken()
-        sseTask = Task { [base, bearer] in
-            await self.runSseLoop(baseURL: base, bearer: bearer)
+        sseTask = Task { [bearer] in
+            await self.runSseLoop(bearer: bearer)
         }
     }
 
-    func ensureThread(baseURL: String, bearer: String) async throws {
+    func ensureThread(bearer: String) async throws {
         if currentThreadId != nil { return }
         try await applyThreadListAndPickDefault(
-            try await IronclawGatewayHTTP.listThreads(baseURL: baseURL, bearer: bearer),
-            baseURL: baseURL,
+            try await IronclawGatewayHTTP.listThreads(bearer: bearer),
             bearer: bearer
         )
     }
 
     /// Reload threads from the gateway and refresh `threadRows`. If `currentThreadId` is still `nil`, picks server default / first / assistant / creates one.
     func refreshThreads() async {
-        let rawBase = UserDefaults.standard.string(forKey: HubProfileSync.Gateway.userDefaultsBaseURLKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let base = HubProfileSync.normalizedGatewayBaseURL(rawBase)
-        guard !base.isEmpty else {
+        let bases = HubProfileSync.gatewayBaseURLCandidates()
+        guard !bases.isEmpty else {
             threadsBanner = "Set gateway URL in About to list threads."
             threadRows = []
             return
@@ -373,8 +415,8 @@ final class GatewayChatViewModel {
         defer { threadsLoading = false }
 
         do {
-            let list = try await IronclawGatewayHTTP.listThreads(baseURL: base, bearer: bearer)
-            try await applyThreadListAndPickDefault(list, baseURL: base, bearer: bearer)
+            let list = try await IronclawGatewayHTTP.listThreads(bearer: bearer)
+            try await applyThreadListAndPickDefault(list, bearer: bearer)
         } catch let e as GatewayHTTPError {
             threadsBanner = e.localizedDescription
             JarvisIOSLog.recordIronclawError("gateway list threads: \(e.localizedDescription)")
@@ -397,15 +439,12 @@ final class GatewayChatViewModel {
 
     /// Fetches prior turns from `GET /api/chat/history` (same as desktop `load_history_inner`).
     private func loadHistoryForThread(id: String) async {
-        let rawBase = UserDefaults.standard.string(forKey: HubProfileSync.Gateway.userDefaultsBaseURLKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let base = HubProfileSync.normalizedGatewayBaseURL(rawBase)
-        guard !base.isEmpty, !id.isEmpty else { return }
+        let bases = HubProfileSync.gatewayBaseURLCandidates()
+        guard !bases.isEmpty, !id.isEmpty else { return }
         let bearer = HubProfileSync.resolvedGatewayBearerToken()
         let limit: UInt32 = 80
         do {
             let h = try await IronclawGatewayHTTP.fetchHistory(
-                baseURL: base,
                 bearer: bearer,
                 threadId: id,
                 limit: limit
@@ -425,7 +464,7 @@ final class GatewayChatViewModel {
                 if let raw = turn.response {
                     let r = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !r.isEmpty {
-                        newLines.append(ChatLine(role: .assistant, text: r))
+                        newLines.append(Self.chatLineAssistant(fromRaw: r))
                     }
                 }
             }
@@ -443,10 +482,8 @@ final class GatewayChatViewModel {
     /// Create a new thread on the gateway and select it. Returns whether the gateway accepted the request.
     @discardableResult
     func createNewThread() async -> Bool {
-        let rawBase = UserDefaults.standard.string(forKey: HubProfileSync.Gateway.userDefaultsBaseURLKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let base = HubProfileSync.normalizedGatewayBaseURL(rawBase)
-        guard !base.isEmpty else {
+        let bases = HubProfileSync.gatewayBaseURLCandidates()
+        guard !bases.isEmpty else {
             threadsBanner = "Set gateway URL in About first."
             return false
         }
@@ -455,9 +492,9 @@ final class GatewayChatViewModel {
         threadsBanner = ""
         defer { threadsLoading = false }
         do {
-            let created = try await IronclawGatewayHTTP.createThread(baseURL: base, bearer: bearer)
+            let created = try await IronclawGatewayHTTP.createThread(bearer: bearer)
             selectThread(id: created.id)
-            let list = try await IronclawGatewayHTTP.listThreads(baseURL: base, bearer: bearer)
+            let list = try await IronclawGatewayHTTP.listThreads(bearer: bearer)
             updateThreadRows(from: list)
             JarvisIOSLog.recordIronclaw("gateway POST /api/chat/thread/new id=\(created.id)")
             return true
@@ -502,7 +539,7 @@ final class GatewayChatViewModel {
     }
 
     /// If `currentThreadId` is still `nil`, pick server default / first / assistant / create one.
-    private func pickDefaultThreadIfNeeded(_ list: ThreadListDTO, baseURL: String, bearer: String) async throws {
+    private func pickDefaultThreadIfNeeded(_ list: ThreadListDTO, bearer: String) async throws {
         if currentThreadId != nil { return }
 
         if let id = list.activeThread, !id.isEmpty {
@@ -517,7 +554,7 @@ final class GatewayChatViewModel {
             currentThreadId = at.id
             return
         }
-        let created = try await IronclawGatewayHTTP.createThread(baseURL: baseURL, bearer: bearer)
+        let created = try await IronclawGatewayHTTP.createThread(bearer: bearer)
         currentThreadId = created.id
         updateThreadRows(
             from: ThreadListDTO(assistantThread: nil, threads: [created], activeThread: created.id)
@@ -525,20 +562,18 @@ final class GatewayChatViewModel {
     }
 
     /// Updates `threadRows`, assigns `currentThreadId` when it is still `nil`, then loads transcript from `/api/chat/history`.
-    private func applyThreadListAndPickDefault(_ list: ThreadListDTO, baseURL: String, bearer: String) async throws {
+    private func applyThreadListAndPickDefault(_ list: ThreadListDTO, bearer: String) async throws {
         updateThreadRows(from: list)
-        try await pickDefaultThreadIfNeeded(list, baseURL: baseURL, bearer: bearer)
+        try await pickDefaultThreadIfNeeded(list, bearer: bearer)
         if let tid = currentThreadId, !tid.isEmpty {
             await loadHistoryForThread(id: tid)
         }
     }
 
     func send() async {
-        let rawBase = UserDefaults.standard.string(forKey: HubProfileSync.Gateway.userDefaultsBaseURLKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let base = HubProfileSync.normalizedGatewayBaseURL(rawBase)
+        let bases = HubProfileSync.gatewayBaseURLCandidates()
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !base.isEmpty, !text.isEmpty || !pendingImages.isEmpty else { return }
+        guard !bases.isEmpty, !text.isEmpty || !pendingImages.isEmpty else { return }
 
         let bearer = HubProfileSync.resolvedGatewayBearerToken()
         sendInFlight = true
@@ -546,7 +581,7 @@ final class GatewayChatViewModel {
         defer { sendInFlight = false }
 
         do {
-            try await ensureThread(baseURL: base, bearer: bearer)
+            try await ensureThread(bearer: bearer)
             guard let tid = currentThreadId else {
                 banner = "No thread id — check gateway /api/chat/threads"
                 return
@@ -563,7 +598,6 @@ final class GatewayChatViewModel {
             liveAssistant = ""
 
             _ = try await IronclawGatewayHTTP.sendMessage(
-                baseURL: base,
                 bearer: bearer,
                 content: text,
                 threadId: tid,
@@ -581,6 +615,21 @@ final class GatewayChatViewModel {
 
     func removePendingImage(id: UUID) {
         pendingImages.removeAll { $0.id == id }
+    }
+
+    /// Streaming assistant bubble (ACT stripped; emotion hint — no disk writes until final `response`).
+    var liveAssistantBubbleLine: ChatLine {
+        let liveText = IosChatFormatting.stripActDelay(liveAssistant)
+        let lab = IosChatFormatting.emotionLabels(from: liveAssistant)
+        let keys = HubProfileSync.mappedEmotionKeysLowercased()
+        let unmapped = lab.contains { !keys.contains($0) }
+        return ChatLine(
+            role: .assistant,
+            text: liveText,
+            images: [],
+            emotionCaption: lab.last,
+            emotionUnmapped: unmapped
+        )
     }
 
     /// Loads `PhotosPickerItem` payloads, downscales large bitmaps, and appends to `pendingImages`.
@@ -621,92 +670,112 @@ final class GatewayChatViewModel {
         return ("image/jpeg", jpeg)
     }
 
-    private func runSseLoop(baseURL: String, bearer: String) async {
+    private func runSseLoop(bearer: String) async {
         var authBackoff = false
-        while !Task.isCancelled {
+        sseReconnect: while !Task.isCancelled {
             if authBackoff {
                 try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
                 if Task.isCancelled { break }
                 authBackoff = false
             }
 
-            await MainActor.run { self.sseRunning = true; self.statusLine = "SSE connecting…" }
-
-            let req: URLRequest
-            do {
-                req = try IronclawGatewayHTTP.openEventsRequest(baseURL: baseURL, bearer: bearer)
-            } catch {
+            let bases = await MainActor.run { HubProfileSync.gatewayBaseURLCandidates() }
+            guard !bases.isEmpty else {
                 await MainActor.run {
-                    self.statusLine = "SSE URL error"
-                    self.banner = error.localizedDescription
+                    self.statusLine = "No gateway URL"
+                    self.banner = "Set IronClaw gateway base URL in About."
                     self.sseRunning = false
                 }
                 try? await Task.sleep(nanoseconds: 3 * 1_000_000_000)
                 continue
             }
 
-            do {
-                let (bytes, resp) = try await URLSession.shared.bytes(for: req)
-                if let http = resp as? HTTPURLResponse {
-                    if http.statusCode == 401 || http.statusCode == 403 {
-                        await MainActor.run {
-                            self.statusLine = "SSE auth failed"
-                            self.banner = "Gateway rejected token on SSE (HTTP \(http.statusCode))."
-                            self.sseRunning = false
-                        }
-                        authBackoff = true
-                        continue
+            var anyAttempt = false
+            for baseRaw in bases {
+                if Task.isCancelled { break }
+                let base = HubProfileSync.normalizedGatewayBaseURL(baseRaw)
+                await MainActor.run { self.sseRunning = true; self.statusLine = "SSE connecting… (\(base))" }
+
+                let req: URLRequest
+                do {
+                    req = try IronclawGatewayHTTP.openEventsRequest(base: base, bearer: bearer)
+                } catch {
+                    await MainActor.run {
+                        self.statusLine = "SSE URL error"
+                        self.banner = error.localizedDescription
+                        self.sseRunning = false
                     }
-                    guard (200 ... 299).contains(http.statusCode) else {
-                        let hint502 =
-                            http.statusCode == 502
-                            ? " Reverse proxy could not reach IronClaw (confirm upstream is up; for nginx SSE use `proxy_buffering off` and a long `proxy_read_timeout`)."
-                            : ""
-                        await MainActor.run {
-                            self.statusLine = "SSE HTTP \(http.statusCode)"
-                            self.banner = "Gateway returned HTTP \(http.statusCode) for /api/chat/events.\(hint502)"
-                            self.sseRunning = false
-                        }
-                        try? await Task.sleep(nanoseconds: 3 * 1_000_000_000)
-                        continue
-                    }
+                    continue
                 }
 
-                await MainActor.run { self.statusLine = "SSE connected"; self.sseRunning = true }
+                do {
+                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    anyAttempt = true
+                    if let http = resp as? HTTPURLResponse {
+                        if http.statusCode == 401 || http.statusCode == 403 {
+                            await MainActor.run {
+                                self.statusLine = "SSE auth failed"
+                                self.banner = "Gateway rejected token on SSE (HTTP \(http.statusCode))."
+                                self.sseRunning = false
+                            }
+                            authBackoff = true
+                            continue sseReconnect
+                        }
+                        guard (200 ... 299).contains(http.statusCode) else {
+                            let hint502 =
+                                http.statusCode == 502
+                                ? " Reverse proxy could not reach IronClaw (confirm upstream is up; for nginx SSE use `proxy_buffering off` and a long `proxy_read_timeout`)."
+                                : ""
+                            await MainActor.run {
+                                self.statusLine = "SSE HTTP \(http.statusCode)"
+                                self.banner = "Gateway returned HTTP \(http.statusCode) for /api/chat/events.\(hint502)"
+                                self.sseRunning = false
+                            }
+                            continue
+                        }
+                    }
 
-                var sseLines: [String] = []
-                for try await line in bytes.lines {
-                    if Task.isCancelled { break }
+                    await MainActor.run { self.statusLine = "SSE connected (\(base))"; self.sseRunning = true }
 
-                    if line.isEmpty {
-                        if !sseLines.isEmpty {
-                            let payload = sseLines.joined(separator: "\n")
-                            sseLines.removeAll()
-                            if let ev = ParsedGatewayEvent.parse(jsonLine: payload) {
-                                await MainActor.run {
-                                    self.apply(ev, activeThread: self.currentThreadId)
+                    var sseLines: [String] = []
+                    for try await line in bytes.lines {
+                        if Task.isCancelled { break }
+
+                        if line.isEmpty {
+                            if !sseLines.isEmpty {
+                                let payload = sseLines.joined(separator: "\n")
+                                sseLines.removeAll()
+                                if let ev = ParsedGatewayEvent.parse(jsonLine: payload) {
+                                    await MainActor.run {
+                                        self.apply(ev, activeThread: self.currentThreadId)
+                                    }
                                 }
                             }
+                            continue
                         }
-                        continue
+                        if line.hasPrefix(":") { continue }
+                        if line.hasPrefix("data:") {
+                            let rest = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                            sseLines.append(String(rest))
+                        }
                     }
-                    if line.hasPrefix(":") { continue }
-                    if line.hasPrefix("data:") {
-                        let rest = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                        sseLines.append(String(rest))
+                    await MainActor.run { self.sseRunning = false; self.statusLine = "SSE disconnected" }
+                    JarvisIOSLog.recordIronclaw("gateway SSE stream ended for \(base)")
+                } catch {
+                    if Task.isCancelled { break }
+                    await MainActor.run {
+                        self.statusLine = "SSE error (\(base))"
+                        self.sseRunning = false
                     }
+                    JarvisIOSLog.recordIronclawError("gateway SSE \(base): \(error.localizedDescription)")
                 }
-            } catch {
-                if Task.isCancelled { break }
-                await MainActor.run {
-                    self.statusLine = "SSE disconnected"
-                    self.sseRunning = false
-                }
-                JarvisIOSLog.recordIronclawError("gateway SSE: \(error.localizedDescription)")
-                try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
             }
 
-            await MainActor.run { self.sseRunning = false }
+            if !anyAttempt {
+                try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
+            } else {
+                try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
+            }
         }
         await MainActor.run { self.sseRunning = false; self.statusLine = "SSE stopped" }
     }
@@ -723,7 +792,7 @@ final class GatewayChatViewModel {
             guard matchesThread(tid) else { return }
             liveAssistant = ""
             if !content.isEmpty {
-                lines.append(ChatLine(role: .assistant, text: content))
+                lines.append(Self.chatLineAssistant(fromRaw: content))
             }
         case .streamChunk(let content, let tid):
             guard matchesThread(tid) else { return }
@@ -758,7 +827,9 @@ struct GatewayChatView: View {
 
     @State private var showThreadPicker = false
     @State private var photoPickerItems: [PhotosPickerItem] = []
+    @FocusState private var composerFocused: Bool
     @AppStorage(HubProfileSync.Gateway.userDefaultsBaseURLKey) private var gatewayBaseURL: String = ""
+    @AppStorage(HubProfileSync.Gateway.userDefaultsSecondaryBaseURLKey) private var gatewaySecondaryURL: String = ""
     @AppStorage(HubProfileSync.Gateway.userDefaultsAuthTokenKey) private var gatewayAuthToken: String = ""
 
     private var canSend: Bool {
@@ -794,7 +865,7 @@ struct GatewayChatView: View {
                                     .id(line.id)
                             }
                             if !model.liveAssistant.isEmpty {
-                                bubble(GatewayChatViewModel.ChatLine(role: .assistant, text: model.liveAssistant))
+                                bubble(model.liveAssistantBubbleLine)
                                     .id(model.liveScrollToken)
                             }
                         }
@@ -854,6 +925,7 @@ struct GatewayChatView: View {
                     TextField("Message", text: $model.draft, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(1 ... (compact ? 4 : 6))
+                        .focused($composerFocused)
                     Button {
                         Task { await model.send() }
                     } label: {
@@ -903,6 +975,18 @@ struct GatewayChatView: View {
                             .accessibilityLabel(model.sseRunning ? "SSE connected" : "SSE reconnecting")
                     }
                 }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        composerFocused = false
+                        UIApplication.shared.sendAction(
+                            #selector(UIResponder.resignFirstResponder),
+                            to: nil,
+                            from: nil,
+                            for: nil
+                        )
+                    }
+                }
             }
             .sheet(isPresented: $showThreadPicker) {
                 GatewayThreadPickerSheet(model: model) {
@@ -920,6 +1004,10 @@ struct GatewayChatView: View {
                 }
             }
             .onChange(of: gatewayBaseURL) { _, _ in
+                model.restartSse()
+                Task { await model.refreshThreads() }
+            }
+            .onChange(of: gatewaySecondaryURL) { _, _ in
                 model.restartSse()
                 Task { await model.refreshThreads() }
             }
@@ -958,10 +1046,27 @@ struct GatewayChatView: View {
         case .assistant:
             VStack(alignment: .leading, spacing: 8) {
                 if !line.text.isEmpty {
-                    Text(line.text)
-                        .padding(10)
-                        .background(Color(uiColor: .secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    Group {
+                        if let attr = try? AttributedString(
+                            markdown: line.text,
+                            options: AttributedString.MarkdownParsingOptions(
+                                interpretedSyntax: .inlineOnlyPreservingWhitespace
+                            )
+                        ) {
+                            Text(attr)
+                        } else {
+                            Text(line.text)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color(uiColor: .secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .textSelection(.enabled)
+                }
+                if let em = line.emotionCaption, !em.isEmpty {
+                    Text("emotion: \(em)")
+                        .font(.caption2)
+                        .foregroundStyle(line.emotionUnmapped ? Color.orange.opacity(0.95) : Color.secondary.opacity(0.55))
                 }
                 if !line.images.isEmpty {
                     ForEach(line.images) { img in

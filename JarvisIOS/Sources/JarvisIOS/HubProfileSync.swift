@@ -5,11 +5,14 @@ import Security
 /// Keys for desktop channel hub (same port as WebSocket, typically 6121).
 enum HubProfileSync {
     static let userDefaultsBaseURLKey = "jarvis.hub.baseURL"
+    /// Optional backup hub (same token). Tried for profile sync + hub WebSocket when primary fails.
+    static let userDefaultsSecondaryBaseURLKey = "jarvis.hub.secondaryBaseURL"
     static let userDefaultsAuthTokenKey = "jarvis.hub.authToken"
 
     /// IronClaw **gateway** (HTTP/SSE chat) — independent of the channel hub URL.
     enum Gateway {
         static let userDefaultsBaseURLKey = "jarvis.gateway.baseURL"
+        static let userDefaultsSecondaryBaseURLKey = "jarvis.gateway.secondaryBaseURL"
         static let userDefaultsAuthTokenKey = "jarvis.gateway.authToken"
     }
 
@@ -105,19 +108,43 @@ enum HubProfileSync {
     /// When `progress` is set, it is updated on the main actor (manifest fetch + each asset; suitable for `ProgressView`).
     @discardableResult
     static func syncFromHubToCache(progress: Progress? = nil) async -> Bool {
-        let hub = UserDefaults.standard.string(forKey: userDefaultsBaseURLKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !hub.isEmpty else { return false }
-        JarvisIOSLog.recordHub("syncFromHubToCache start hub=\(hub) hasToken=\(!resolvedHubBearerToken().isEmpty)")
-        do {
-            try await downloadHubProfileIntoCacheAndApplyEnv(baseURLString: hub, progress: progress)
-            JarvisIOSLog.recordHub("syncFromHubToCache success")
-            JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "syncFromHubToCache")
-            return true
-        } catch {
-            JarvisIOSLog.recordHubError("syncFromHubToCache failed: \(String(describing: error))")
-            return false
+        let candidates = hubProfileSyncBaseURLCandidates()
+        guard !candidates.isEmpty else { return false }
+        JarvisIOSLog.recordHub(
+            "syncFromHubToCache start candidates=\(candidates.count) hasToken=\(!resolvedHubBearerToken().isEmpty)"
+        )
+        var lastError: Error?
+        for hub in candidates {
+            JarvisIOSLog.recordHub("syncFromHubToCache try hub=\(hub)")
+            do {
+                try await downloadHubProfileIntoCacheAndApplyEnv(baseURLString: hub, progress: progress)
+                JarvisIOSLog.recordHub("syncFromHubToCache success hub=\(hub)")
+                JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "syncFromHubToCache")
+                return true
+            } catch {
+                lastError = error
+                JarvisIOSLog.recordHubError("syncFromHubToCache failed hub=\(hub): \(String(describing: error))")
+            }
         }
+        if let lastError {
+            JarvisIOSLog.recordHubError("syncFromHubToCache all candidates failed: \(String(describing: lastError))")
+        }
+        return false
+    }
+
+    private static func hubProfileSyncBaseURLCandidates() -> [String] {
+        let p = UserDefaults.standard.string(forKey: userDefaultsBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let s = UserDefaults.standard.string(forKey: userDefaultsSecondaryBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var out: [String] = []
+        for raw in [p, s] where !raw.isEmpty {
+            let n = normalizedHubBaseURL(raw)
+            if !out.contains(n) {
+                out.append(n)
+            }
+        }
+        return out
     }
 
     /// Copy the token field into the Keychain (called from SwiftUI when the user edits or syncs).
@@ -245,8 +272,26 @@ enum HubProfileSync {
 
     /// `ws://host:6121/ws` from the hub base URL field (same host as profile sync).
     static func hubWebSocketURL() -> URL? {
-        let raw = UserDefaults.standard.string(forKey: userDefaultsBaseURLKey)?
+        hubWebSocketURLCandidates().first
+    }
+
+    /// Primary hub WebSocket URL, then optional secondary (same bearer token).
+    static func hubWebSocketURLCandidates() -> [URL] {
+        let primary = UserDefaults.standard.string(forKey: userDefaultsBaseURLKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let secondary = UserDefaults.standard.string(forKey: userDefaultsSecondaryBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var out: [URL] = []
+        for raw in [primary, secondary] where !raw.isEmpty {
+            guard let u = hubWsURLFromHubBaseString(raw) else { continue }
+            if !out.contains(where: { $0.absoluteString == u.absoluteString }) {
+                out.append(u)
+            }
+        }
+        return out
+    }
+
+    private static func hubWsURLFromHubBaseString(_ raw: String) -> URL? {
         var s = normalizedHubBaseURL(raw)
         guard !s.isEmpty else { return nil }
         if s.hasPrefix("https://") {
@@ -261,6 +306,22 @@ enum HubProfileSync {
             return URL(string: s + "ws")
         }
         return URL(string: s + "/ws")
+    }
+
+    /// Ordered gateway bases (primary, then optional fallback) for HTTP/SSE.
+    static func gatewayBaseURLCandidates() -> [String] {
+        let p = UserDefaults.standard.string(forKey: Gateway.userDefaultsBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let f = UserDefaults.standard.string(forKey: Gateway.userDefaultsSecondaryBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var out: [String] = []
+        for s in [p, f] where !s.isEmpty {
+            let n = normalizedGatewayBaseURL(s)
+            if !out.contains(n) {
+                out.append(n)
+            }
+        }
+        return out
     }
 
     private static func applyPersistedHubCacheEnvIfValid(currentHubBaseURL: String) -> Bool {
@@ -833,5 +894,50 @@ extension HubProfileSync {
             p.removeLast()
         }
         return p
+    }
+
+    /// Keys already present in `config/emotions.json` (lowercased ACT labels).
+    static func mappedEmotionKeysLowercased() -> Set<String> {
+        let url = resolvedEmotionsJsonFileURL()
+        guard let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let mappings = root["mappings"] as? [String: Any]
+        else {
+            return []
+        }
+        return Set(mappings.keys.map { $0.lowercased() })
+    }
+
+    /// Adds minimal placeholder rows for unknown ACT emotion labels (desktop-compatible `emotions.json`).
+    static func ensurePlaceholderEmotions(for labels: [String]) {
+        let keys = mappedEmotionKeysLowercased()
+        var toAdd: [String] = []
+        for raw in labels {
+            let k = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !k.isEmpty, !keys.contains(k), !toAdd.contains(k) else { continue }
+            toAdd.append(k)
+        }
+        guard !toAdd.isEmpty else { return }
+
+        let url = resolvedEmotionsJsonFileURL()
+        ensureParentDirectoryExists(for: url)
+        var mappings: [String: Any] = [:]
+        if let data = try? Data(contentsOf: url),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let existing = root["mappings"] as? [String: Any]
+        {
+            mappings = existing
+        }
+        for k in toAdd {
+            mappings[k] = [
+                "notes": "auto placeholder (Jarvis iOS chat — map expression / animation in About)",
+                "hold_seconds": 2.5,
+            ] as [String: Any]
+        }
+        let out: [String: Any] = ["mappings": mappings]
+        guard let data = try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys])
+        else { return }
+        try? data.write(to: url, options: [.atomic])
+        JarvisIOSLog.recordUI("emotions.json placeholders added: \(toAdd.joined(separator: ", "))")
     }
 }

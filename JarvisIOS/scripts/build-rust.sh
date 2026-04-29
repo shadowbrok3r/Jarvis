@@ -77,6 +77,11 @@ if command -v llvm-nm >/dev/null 2>&1; then
     echo "Rebuild the iOS staticlib; then re-run xtool dev."
     exit 1
   fi
+  if [[ -n "$OUT" ]] && ! grep -qF '__swift_bridge__$jarvis_renderer_queue_anim_json' <<<"$OUT"; then
+    echo "ERROR: $COPIED is missing __swift_bridge__\$jarvis_renderer_queue_anim_json (FFI out of sync)."
+    echo "Rebuild the iOS staticlib; then re-run xtool dev."
+    exit 1
+  fi
 fi
 
 # 6) Copy generated C headers for BridgeFFI
