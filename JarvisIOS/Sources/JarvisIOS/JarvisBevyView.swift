@@ -18,6 +18,11 @@ enum JarvisBevySession {
         renderer = nil
     }
 
+    /// True while the Rust `IosEmbeddedRenderer` pointer is registered (Avatar tab has finished bootstrap).
+    static func hasRegisteredRenderer() -> Bool {
+        renderer != nil
+    }
+
     static func reloadProfileFromDiskManifest() {
         guard let r = renderer else {
             JarvisIOSLog.recordBevy("reloadProfile: no renderer (Avatar tab never started?)")
@@ -347,6 +352,7 @@ struct JarvisBevyView: UIViewRepresentable {
                 link.add(to: .main, forMode: .common)
                 self.displayLink = link
                 JarvisIOSLog.recordBevy("startRenderer: CADisplayLink attached")
+                AvatarFirstRunGreeting.scheduleIfNeededAfterBootstrap()
             }
         }
     }
