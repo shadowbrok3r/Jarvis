@@ -46,7 +46,7 @@ fn ios_asset_file_path() -> String {
 
 /// Marks the scene root entity for the active VRM (hot-swap / diagnostics).
 #[derive(Component, Debug, Clone, Copy, Default)]
-struct JarvisIosAvatarRoot;
+pub(crate) struct JarvisIosAvatarRoot;
 
 #[derive(Component)]
 struct JarvisIosSun;
@@ -296,7 +296,7 @@ fn observe_vrma_play_once(trigger: On<LoadedVrma>, mut commands: Commands) {
     });
 }
 
-fn is_safe_asset_relative(rel: &str) -> bool {
+pub(crate) fn is_safe_asset_rel(rel: &str) -> bool {
     !rel.is_empty() && !rel.starts_with('/') && !rel.contains("..")
 }
 
@@ -525,6 +525,8 @@ pub struct IosEmbeddedRenderer {
     profile_reload_pending: Mutex<bool>,
     /// VRMA paths relative to `JARVIS_ASSET_ROOT` (asset server root).
     vrma_play_queue: Mutex<Vec<(String, bool)>>,
+    /// Pose-library JSON paths relative to `JARVIS_ASSET_ROOT` (last queued wins).
+    json_anim_queue: Mutex<Vec<String>>,
 }
 
 impl IosEmbeddedRenderer {
@@ -585,6 +587,7 @@ impl IosEmbeddedRenderer {
                 .add_before::<RenderPlugin>(IosEmbedRawHandlesPlugin),
         );
         app.add_plugins((VrmPlugin, VrmaPlugin, EguiPlugin::default(), PanOrbitCameraPlugin));
+        crate::ios_anim_json::plugin(&mut app);
         // When the pointer is over egui (menu bar, windows), PanOrbit must not consume drags/pinch.
         let mut egui_global = bevy_egui::EguiGlobalSettings::default();
         egui_global.enable_absorb_bevy_input_system = true;
@@ -651,6 +654,7 @@ impl IosEmbeddedRenderer {
             touch_queue: Mutex::new(Vec::new()),
             profile_reload_pending: Mutex::new(false),
             vrma_play_queue: Mutex::new(Vec::new()),
+            json_anim_queue: Mutex::new(Vec::new()),
         })
     }
 
@@ -676,6 +680,28 @@ impl IosEmbeddedRenderer {
         }
     }
 
+    pub fn queue_json_anim_play(&self, path: String) {
+        if let Ok(mut g) = self.json_anim_queue.lock() {
+            g.push(path);
+        }
+    }
+
+    fn flush_queued_json_anim_requests(&mut self) {
+        let drained: Vec<String> = {
+            let mut g = self.json_anim_queue.lock().unwrap();
+            core::mem::take(&mut *g)
+        };
+        if drained.is_empty() {
+            return;
+        }
+        let path = drained.into_iter().last().unwrap();
+        let world = self.app.world_mut();
+        let clip = crate::ios_anim_json::try_build_clip(&path, world);
+        world
+            .resource_mut::<crate::ios_anim_json::IosJsonAnimPlayback>()
+            .replace_with_clip(clip);
+    }
+
     fn flush_queued_vrma_requests(&mut self) {
         let drained: Vec<_> = {
             let mut g = self.vrma_play_queue.lock().unwrap();
@@ -691,7 +717,7 @@ impl IosEmbeddedRenderer {
         };
         let asset_server = world.resource::<AssetServer>().clone();
         for (path, loop_forever) in drained {
-            if !is_safe_asset_relative(&path) {
+            if !is_safe_asset_rel(&path) {
                 crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: rejected unsafe path {path:?}");
                 continue;
             }
@@ -737,6 +763,9 @@ impl IosEmbeddedRenderer {
         let id = spawn_jarvis_ios_vrm_root(&mut world.commands(), &asset_server, &avatar);
         world.insert_resource(IosAvatarRootEntity(Some(id)));
         world.flush();
+        world
+            .resource_mut::<crate::ios_anim_json::IosJsonAnimPlayback>()
+            .replace_with_clip(None);
         crate::jarvis_ios_line!(
             "[JarvisIOS] profile reload applied model_path={} msaa_samples={}",
             avatar.model_path,
@@ -785,6 +814,7 @@ impl IosEmbeddedRenderer {
         if reload {
             self.apply_hub_profile_reload();
         }
+        self.flush_queued_json_anim_requests();
         self.flush_queued_vrma_requests();
         self.flush_queued_touch_inputs();
         self.app.update();

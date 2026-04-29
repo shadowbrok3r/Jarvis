@@ -24,6 +24,9 @@ public func jarvis_renderer_reload_profile(_ ptr: UnsafeMutablePointer<UInt8>) {
 public func jarvis_renderer_queue_vrma(_ ptr: UnsafeMutablePointer<UInt8>, _ path_ptr: UnsafePointer<UInt8>, _ path_len: UInt, _ loop_forever: UInt8) {
     __swift_bridge__$jarvis_renderer_queue_vrma(ptr, path_ptr, path_len, loop_forever)
 }
+public func jarvis_renderer_queue_anim_json(_ ptr: UnsafeMutablePointer<UInt8>, _ path_ptr: UnsafePointer<UInt8>, _ path_len: UInt) {
+    __swift_bridge__$jarvis_renderer_queue_anim_json(ptr, path_ptr, path_len)
+}
 public func jarvis_ios_debug_log_snapshot() -> RustString {
     RustString(ptr: __swift_bridge__$jarvis_ios_debug_log_snapshot())
 }

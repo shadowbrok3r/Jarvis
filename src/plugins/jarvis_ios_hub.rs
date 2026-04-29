@@ -93,6 +93,30 @@ fn build_manifest_value(settings: &Settings, revision: u64) -> Value {
         });
     }
 
+    let root = assets_root();
+    const MAX_SYNC_JSON: usize = 500;
+    for rel in collect_json_assets_under(&root.join("animations"), &root, MAX_SYNC_JSON) {
+        assets.push(JarvisIosAssetRef {
+            role: "anim_json".into(),
+            path: rel.clone(),
+            url: format!("/jarvis-ios/v1/asset/{rel}"),
+        });
+    }
+    for rel in collect_json_assets_under(&root.join("poses"), &root, MAX_SYNC_JSON) {
+        assets.push(JarvisIosAssetRef {
+            role: "pose_json".into(),
+            path: rel.clone(),
+            url: format!("/jarvis-ios/v1/asset/{rel}"),
+        });
+    }
+    if resolve_asset_file("config/emotions.json").is_some() {
+        assets.push(JarvisIosAssetRef {
+            role: "emotions".into(),
+            path: "config/emotions.json".into(),
+            url: "/jarvis-ios/v1/asset/config/emotions.json".into(),
+        });
+    }
+
     let preset_path = default_preset_path_for_logical_path(None, &settings.avatar.model_path);
     let spring = preset_path
         .file_name()
@@ -186,8 +210,45 @@ pub fn resolve_asset_file(rel: &str) -> Option<PathBuf> {
     if !is_safe_assets_rel(rel) {
         return None;
     }
+    // Allow syncing desktop `config/emotions.json` (not under `./assets/`).
+    if rel == "config/emotions.json" {
+        let p = std::env::current_dir().ok()?.join(rel);
+        return p.is_file().then_some(p);
+    }
     let p = assets_root().join(rel);
     p.is_file().then_some(p)
+}
+
+/// Collect JSON files under `dir` (recursive), returning paths relative to `assets_root()`.
+fn collect_json_assets_under(dir: &Path, assets_root: &Path, max_files: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return out;
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            if out.len() >= max_files {
+                return out;
+            }
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("json")) {
+                if let Ok(rel) = p.strip_prefix(assets_root) {
+                    let rel_s = rel.to_string_lossy().replace('\\', "/");
+                    if is_safe_assets_rel(&rel_s) {
+                        out.push(rel_s);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Only `xxxxxxxxxxxxxxxx.toml` (16 lowercase hex + `.toml`).

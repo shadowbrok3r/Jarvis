@@ -13,6 +13,8 @@ mod jarvis_egui_theme;
 #[cfg(target_os = "ios")]
 mod ios_egui_ui;
 #[cfg(target_os = "ios")]
+mod ios_anim_json;
+#[cfg(target_os = "ios")]
 mod ios_bevy;
 
 /// Opaque pointers cross the bridge as `*mut u8` (Swift: `UnsafeMutableRawPointer`).
@@ -39,6 +41,8 @@ mod ffi {
         fn jarvis_renderer_reload_profile(ptr: *mut u8);
 
         fn jarvis_renderer_queue_vrma(ptr: *mut u8, path_ptr: *const u8, path_len: usize, loop_forever: u8);
+
+        fn jarvis_renderer_queue_anim_json(ptr: *mut u8, path_ptr: *const u8, path_len: usize);
 
         fn jarvis_ios_debug_log_snapshot() -> String;
 
@@ -199,3 +203,20 @@ pub fn jarvis_renderer_queue_vrma(
     _loop_forever: u8,
 ) {
 }
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_queue_anim_json(ptr: *mut u8, path_ptr: *const u8, path_len: usize) {
+    if ptr.is_null() || path_ptr.is_null() || path_len == 0 {
+        return;
+    }
+    let path = unsafe { std::slice::from_raw_parts(path_ptr, path_len) };
+    let Ok(s) = std::str::from_utf8(path) else {
+        return;
+    };
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).queue_json_anim_play(s.to_owned());
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_queue_anim_json(_ptr: *mut u8, _path_ptr: *const u8, _path_len: usize) {}

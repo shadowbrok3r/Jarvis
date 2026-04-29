@@ -21,8 +21,10 @@ struct MainShellView: View {
     @State private var gatewayChatModel = GatewayChatViewModel()
     @AppStorage("jarvis.avatarChatOverlay") private var showAvatarChatOverlay = false
     @AppStorage(HubProfileSync.userDefaultsBaseURLKey) private var hubBaseURL: String = ""
+    @AppStorage(HubProfileSync.userDefaultsSecondaryBaseURLKey) private var hubSecondaryBaseURL: String = ""
     @AppStorage(HubProfileSync.userDefaultsAuthTokenKey) private var hubAuthToken: String = ""
     @AppStorage(HubProfileSync.Gateway.userDefaultsBaseURLKey) private var gatewayBaseURL: String = ""
+    @AppStorage(HubProfileSync.Gateway.userDefaultsSecondaryBaseURLKey) private var gatewaySecondaryBaseURL: String = ""
     @AppStorage(HubProfileSync.Gateway.userDefaultsAuthTokenKey) private var gatewayAuthToken: String = ""
     @State private var syncStatus: String = ""
     @State private var syncInFlight = false
@@ -46,6 +48,8 @@ struct MainShellView: View {
                     ZStack {
                         JarvisBevyView(sessionKey: bevySessionId, avatarTabVisible: shellTab == .avatar)
                             .frame(width: w, height: h)
+                            // Keep Metal + egui at full layout height when the chat composer keyboard is visible (overlay or system keyboard).
+                            .ignoresSafeArea(.keyboard, edges: .bottom)
                             // Respect top safe area so Metal + egui sit below the status bar (tappable UI, no black strip under system chrome).
                             .opacity(shellTab == .avatar ? 1 : 0)
                             .allowsHitTesting(shellTab == .avatar)
@@ -151,21 +155,34 @@ struct MainShellView: View {
                     )
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    NavigationLink("Play saved motion (JSON)") {
+                        SavedAnimationsPlayView()
+                    }
                 }
                 Section("IronClaw gateway (chat)") {
                     TextField("Gateway base URL (http://host:3000)", text: $gatewayBaseURL)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
+                    TextField("Fallback gateway URL (optional)", text: $gatewaySecondaryBaseURL)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
                     SecureField("Gateway bearer token (optional)", text: $gatewayAuthToken)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    Text("Chat uses HTTP + SSE to this URL. The channel hub WebSocket still uses the hub profile URL and hub token above.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    Text(
+                        "Chat uses HTTP + SSE (tries primary URL, then fallback). The channel hub WebSocket uses the hub URLs and hub token below."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 }
                 Section("Hub profile") {
                     TextField("Base URL (http://host:6121)", text: $hubBaseURL)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                    TextField("Fallback hub URL (optional)", text: $hubSecondaryBaseURL)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
@@ -269,6 +286,9 @@ struct MainShellView: View {
                 refreshAvatarModelDiscovery()
             }
             .onChange(of: hubBaseURL) { _, _ in
+                IronclawConnectivity.shared.start()
+            }
+            .onChange(of: hubSecondaryBaseURL) { _, _ in
                 IronclawConnectivity.shared.start()
             }
             .onChange(of: hubAuthToken) { _, newValue in

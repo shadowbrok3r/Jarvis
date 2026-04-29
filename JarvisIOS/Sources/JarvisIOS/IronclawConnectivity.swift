@@ -11,7 +11,8 @@ final class IronclawConnectivity {
     /// Call at launch (e.g. `ContentView.onAppear`) after hub env warm-up.
     func start() {
         HubProfileSync.migrateGatewayAuthTokenFromUserDefaultsIfNeeded()
-        guard let wsURL = HubProfileSync.hubWebSocketURL() else {
+        let urls = HubProfileSync.hubWebSocketURLCandidates()
+        guard !urls.isEmpty else {
             hubClient.stop()
             JarvisIOSLog.recordIronclaw("hub WS: skip (no hub base URL or invalid for ws)")
             return
@@ -22,7 +23,7 @@ final class IronclawConnectivity {
             JarvisIOSLog.recordIronclaw("hub WS: skip (empty hub bearer token)")
             return
         }
-        hubClient.connect(webSocketURL: wsURL, hubBearerToken: token)
+        hubClient.connect(candidates: urls, hubBearerToken: token)
     }
 
     func stopHubWebSocket() {

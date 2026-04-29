@@ -40,6 +40,19 @@ enum JarvisBevySession {
             jarvis_renderer_queue_vrma(r, base, UInt(buf.count), loopForever ? 1 : 0)
         }
     }
+
+    /// Pose-library JSON path relative to `JARVIS_ASSET_ROOT` (e.g. `animations/talk_nod.json`).
+    static func queueAnimJson(path: String) {
+        guard let r = renderer else {
+            JarvisIOSLog.recordBevy("queueAnimJson: no renderer")
+            return
+        }
+        let utf8 = Array(path.utf8)
+        utf8.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            jarvis_renderer_queue_anim_json(r, base, UInt(buf.count))
+        }
+    }
 }
 
 /// Forwards multi-touch to Bevy (`TouchInput` injection). `UIView.contentScaleFactor` is sometimes `1`

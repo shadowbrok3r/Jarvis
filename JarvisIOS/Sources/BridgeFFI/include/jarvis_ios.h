@@ -8,6 +8,7 @@ void __swift_bridge__$jarvis_renderer_resize(uint8_t* ptr, uint32_t width_px, ui
 void __swift_bridge__$jarvis_renderer_touch(uint8_t* ptr, uint8_t phase, float x, float y, uint64_t id);
 void __swift_bridge__$jarvis_renderer_reload_profile(uint8_t* ptr);
 void __swift_bridge__$jarvis_renderer_queue_vrma(uint8_t* ptr, uint8_t const * path_ptr, uintptr_t path_len, uint8_t loop_forever);
+void __swift_bridge__$jarvis_renderer_queue_anim_json(uint8_t* ptr, uint8_t const * path_ptr, uintptr_t path_len);
 void* __swift_bridge__$jarvis_ios_debug_log_snapshot(void);
 void __swift_bridge__$jarvis_ios_debug_log_clear(void);
 
