@@ -11,27 +11,29 @@ SWIFT_DST="$ROOT/Sources/JarvisIOS"
 C_DST="$ROOT/Sources/BridgeFFI/include"
 LIB_DST="$ROOT/RustLibs"
 
+mkdir -p "$SWIFT_DST"
+# SwiftPM `.copy("assets")` must materialize real files. A symlink to ../assets
+# is copied into the .bundle as a symlink and iOS installd rejects it (InvalidSymlink).
+ASSET_SRC="$ROOT/../assets"
+ASSET_DST="$SWIFT_DST/assets"
+mkdir -p "$ASSET_DST"
+if [[ -d "$ASSET_SRC" ]]; then
+  rsync -aL --delete --exclude '.gitkeep' "$ASSET_SRC/" "$ASSET_DST/"
+else
+  echo "WARN: Missing $ASSET_SRC; app bundle may lack VRM/animations until path exists." >&2
+fi
+
 # 1) Build Rust for device
 cargo build --manifest-path "$RUST/Cargo.toml" --target aarch64-apple-ios --release
 
-# 2) Remove stale generated bindings from the Swift target
+# 2) Remove stale generated bindings from the Swift target (swift-bridge overwrites below).
+# Do **not** delete other *.swift files here — hand-authored app sources live alongside generated
+# ones; an allowlist drift silently broke xtool builds (missing types after `build-rust.sh`).
 rm -f \
   "$SWIFT_DST/SwiftBridgeCore.swift" \
   "$SWIFT_DST/jarvis_ios.swift"
 
-find "$SWIFT_DST" -maxdepth 1 -type f -name '*.swift' \
-  -print0 | while IFS= read -r -d '' f; do
-    base="$(basename "$f")"
-    case "$base" in
-      SwiftBridgeCore.swift|jarvis_ios.swift) : ;;
-      JarvisIOSApp.swift|ContentView.swift|MainShellView.swift|JarvisBevyView.swift|HubProfileSync.swift|JarvisIOSLog.swift|DebugLogsView.swift|BridgeFFIImport.swift) : ;;
-      *) rm -f "$f" ;;
-    esac
-  done
-
 # 3) Copy generated Swift into the Swift target (flattened)
-mkdir -p "$SWIFT_DST"
-
 cp -f "$GEN/SwiftBridgeCore.swift" "$SWIFT_DST/SwiftBridgeCore.swift"
 
 if [[ -f "$GEN/jarvis_ios/jarvis_ios.swift" ]]; then
@@ -40,8 +42,9 @@ fi
 
 # 3b) Swift 6 / xtool: swift-bridge emits RustStr conformances without @retroactive.
 if command -v perl >/dev/null 2>&1 && [[ -f "$SWIFT_DST/SwiftBridgeCore.swift" ]]; then
-  perl -pi -e 's/extension RustStr:\s+Identifiable\b/extension RustStr: @retroactive Identifiable/' "$SWIFT_DST/SwiftBridgeCore.swift"
-  perl -pi -e 's/extension RustStr:\s+Equatable\b/extension RustStr: @retroactive Equatable/' "$SWIFT_DST/SwiftBridgeCore.swift"
+  # Generated header may use one or two spaces after the colon (Swift 6 needs @retroactive).
+  perl -pi -e 's/extension RustStr:\s*Identifiable\b/extension RustStr: @retroactive Identifiable/' "$SWIFT_DST/SwiftBridgeCore.swift"
+  perl -pi -e 's/extension RustStr:\s*Equatable\b/extension RustStr: @retroactive Equatable/' "$SWIFT_DST/SwiftBridgeCore.swift"
 fi
 
 # 4) Ensure generated Swift can see the C declarations from the BridgeFFI module

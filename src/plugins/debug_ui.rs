@@ -200,7 +200,7 @@ fn draw_menu_bar(
 
     if state.first_run {
         state.first_run = false;
-        match serde_json::from_str::<egui::Style>(crate::STYLE) {
+        match serde_json::from_str::<egui::Style>(jarvis_avatar::egui_theme::STYLE) {
             Ok(theme) => {
                 let style = std::sync::Arc::new(theme);
                 ctx.set_style(style);

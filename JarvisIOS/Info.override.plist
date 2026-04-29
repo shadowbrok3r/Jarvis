@@ -10,5 +10,21 @@
     <string>Jarvis uses the camera as an optional “eyes” feed for the desktop avatar, similar to a Home Assistant camera entity.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Jarvis uses the microphone for voice input to chat and for the desktop pipeline, similar to a Home Assistant assist satellite.</string>
+    <!-- Hub / IronClaw gateway are often plain HTTP on LAN or Tailscale; URLSession + SSE need these. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+        <!-- Some iOS versions still gate streaming / long-lived HTTP without these. -->
+        <key>NSAllowsArbitraryLoadsForMedia</key>
+        <true/>
+        <key>NSAllowsArbitraryLoadsInWebContent</key>
+        <true/>
+    </dict>
+    <!-- iOS 14+: prompts once for local/Tailscale peers; helps URLSession reach hub/gateway on LAN. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Jarvis connects to your Jarvis hub and IronClaw gateway on the local network or Tailscale for profile sync and chat.</string>
 </dict>
 </plist>

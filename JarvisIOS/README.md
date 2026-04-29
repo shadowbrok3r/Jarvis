@@ -19,7 +19,7 @@ Swift package that links a Rust `staticlib` (`jarvis_ios`) via **swift-bridge** 
 | `scripts/xcrun` | Optional Linux shim: implements `xcrun --show-sdk-path` (needs `SDKROOT`) and no-op `simctl` so `cc-rs` can probe an iOS SDK without a real Xcode `xcrun`. |
 | `xtool/` | **Gitignored** xtool output (`.app`, `.xtool-tmp`, etc.) |
 
-**Generated file policy:** After changing `rust/src/lib.rs` FFI, run `cargo build` in `rust/` (host) or `./scripts/build-rust.sh` when your Linux iOS Rust toolchain is set up, then commit updated `Sources/JarvisIOS/*.swift` and `Sources/BridgeFFI/include/*.h` if you want Swift to parse without a local codegen step.
+**Generated file policy:** After changing `rust/src/lib.rs` FFI, run `cargo build` in `rust/` (host) or `./scripts/build-rust.sh` when your Linux iOS Rust toolchain is set up, then commit updated `Sources/JarvisIOS/SwiftBridgeCore.swift`, `jarvis_ios.swift`, and `Sources/BridgeFFI/include/*.h` if you want Swift to parse without a local codegen step. **`build-rust.sh` only replaces those generated files** — other `Sources/JarvisIOS/*.swift` sources are never deleted by the script.
 
 ## Prerequisites (Linux + xtool)
 
@@ -43,6 +43,16 @@ Use **`xtool dev`** (and related `xtool` subcommands from upstream docs), not a 
 **Linker: `undefined symbol: __swift_bridge__$jarvis_renderer_…`** — Swift is newer than the Rust archive. From `JarvisIOS/`, run **`./scripts/build-rust.sh`** (aarch64-apple-ios **release** → copies `RustLibs/libjarvis_ios.a` + generated Swift/headers), then **`xtool dev`** again.
 
 Do not use **`#Preview`** in SwiftUI sources: xtool’s Swift toolchain does not ship the `PreviewsMacros` plugin, so preview macros fail at compile time.
+
+**Layout:** `MainShellView` wraps the tab `ZStack` in a **`GeometryReader`** and pins `JarvisBevyView` with an explicit `.frame(width:height:)` so the Metal `UIView` is not left at 0×0 (a common failure mode with `VStack` + `.frame(maxHeight: .infinity)` alone).
+
+**Reload after hub sync:** use **`JarvisBevyView(sessionKey: bevySessionId, avatarTabVisible: …)`** only — do not apply **`.id(bevySessionId)`** on that view. Recreating the `UIView` on every session bump races two coordinators (0×0 vs real bounds) and cancels the bootstrap `Task` before `startRenderer`.
+
+**Avatar tab only for Metal:** `JarvisBevyView` still receives a full-size layout behind About/Logs, but **bootstrap + `CADisplayLink` run only when the Avatar tab is selected**. Ticking Bevy/Metal while another tab is in front is brittle (e.g. **LiveContainer**) and can **`SIGABRT`** during the first `jarvis_renderer_render` after sync + switching tabs.
+
+**Crash logs (SIGABRT on `CADisplayLink` → JarvisIOS):** Apple’s `.ips` JSON rarely symbols Rust frames. If in-app logs show **`render: app.update() enter`** without **`leave`**, the panic is inside Bevy’s first `update()`. The `jarvis_ios` crate avoids **`default_platform`** so **`bevy_gilrs`** and other desktop-only plugins are not linked (rebuild Rust after changing `Cargo.toml`).
+
+**ATS / hub URL:** `Info.override.plist` enables **`NSAllowsLocalNetworking`** and **`NSAllowsArbitraryLoads`** so plain `http://` hub URLs (LAN, Tailscale IPs) are not blocked with `-1022`. Prefer **`https://`** to your hub when possible; remove or narrow arbitrary loads before a strict App Store submission if required.
 
 ## Optional app icon
 

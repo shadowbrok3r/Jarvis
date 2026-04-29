@@ -63,6 +63,7 @@ enum JarvisIOSLog {
     static let hub = Logger(subsystem: subsystem, category: "HubProfile")
     static let bevy = Logger(subsystem: subsystem, category: "BevyUIView")
     static let ui = Logger(subsystem: subsystem, category: "MainShell")
+    static let ironclaw = Logger(subsystem: subsystem, category: "Ironclaw")
 
     static func getenvString(_ name: String) -> String? {
         name.withCString { cName in
@@ -123,5 +124,17 @@ enum JarvisIOSLog {
     static func recordUIError(_ message: String) {
         JarvisIOSLogBus.appendSwiftLine("[Swift][UI][error] \(message)")
         ui.error("\(message, privacy: .public)")
+    }
+
+    // MARK: IronClaw (hub WS + gateway HTTP/SSE)
+
+    static func recordIronclaw(_ message: String) {
+        JarvisIOSLogBus.appendSwiftLine("[Swift][Ironclaw] \(message)")
+        ironclaw.info("\(message, privacy: .public)")
+    }
+
+    static func recordIronclawError(_ message: String) {
+        JarvisIOSLogBus.appendSwiftLine("[Swift][Ironclaw][error] \(message)")
+        ironclaw.error("\(message, privacy: .public)")
     }
 }

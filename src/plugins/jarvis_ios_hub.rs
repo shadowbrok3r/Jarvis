@@ -47,6 +47,9 @@ pub struct JarvisIosGraphicsLite {
     pub directional_illuminance: f32,
     pub directional_shadows: bool,
     pub directional_position: [f32; 3],
+    pub show_ground_plane: bool,
+    pub ground_size: f32,
+    pub ground_base_color: [f32; 3],
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,6 +119,9 @@ fn build_manifest_value(settings: &Settings, revision: u64) -> Value {
         directional_illuminance: settings.graphics.directional_illuminance,
         directional_shadows: settings.graphics.directional_shadows,
         directional_position: settings.graphics.directional_position,
+        show_ground_plane: settings.graphics.show_ground_plane,
+        ground_size: settings.graphics.ground_size,
+        ground_base_color: settings.graphics.ground_base_color,
     };
 
     serde_json::to_value(ManifestDto {

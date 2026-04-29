@@ -7,6 +7,26 @@ enum HubProfileSync {
     static let userDefaultsBaseURLKey = "jarvis.hub.baseURL"
     static let userDefaultsAuthTokenKey = "jarvis.hub.authToken"
 
+    /// IronClaw **gateway** (HTTP/SSE chat) — independent of the channel hub URL.
+    enum Gateway {
+        static let userDefaultsBaseURLKey = "jarvis.gateway.baseURL"
+        static let userDefaultsAuthTokenKey = "jarvis.gateway.authToken"
+    }
+
+    /// Local-only overrides (relative to `JARVIS_ASSET_ROOT`); applied via `setenv` before Bevy boot / profile reload.
+    enum IosAvatarCustomize {
+        static let userDefaultsModelRelPathOverrideKey = "jarvis.ios.overrideModelRelPath"
+        static let userDefaultsIdleVrmaRelPathOverrideKey = "jarvis.ios.overrideIdleVrmaRelPath"
+    }
+
+    /// Ground + clear-color overrides for the embedded Bevy scene (`JARVIS_IOS_*` env read in Rust).
+    enum IosSceneCustomize {
+        /// `""` = follow hub manifest; `show` / `hide` force ground visibility.
+        static let userDefaultsGroundOverrideKey = "jarvis.ios.scene.groundOverride"
+        /// Linear float `r,g,b,a` (e.g. `0.05,0.05,0.08,1`); empty = follow manifest `avatar.background_color`.
+        static let userDefaultsBackgroundLinearRgbaKey = "jarvis.ios.scene.backgroundLinearRgba"
+    }
+
     /// Last hub base URL that produced a successful cache (used to avoid reusing cache after URL change).
     private static let userDefaultsCachedHubBaseURLKey = "jarvis.hub.cachedProfileHubBaseURL"
     /// Filesystem paths from the last successful sync (re-applied before Bevy boots without re-downloading).
@@ -32,6 +52,20 @@ enum HubProfileSync {
         ]
         for k in keys {
             UserDefaults.standard.removeObject(forKey: k)
+        }
+    }
+
+    /// Call once at launch (e.g. from `ContentView.onAppear`) so `JARVIS_*` points at the last good
+    /// hub cache **before** the user opens Avatar — works offline when the hub URL still matches persisted paths.
+    @MainActor
+    static func warmUpCachedHubEnvironmentIfPossible() {
+        migrateAuthTokenFromUserDefaultsIfNeeded()
+        let hub = UserDefaults.standard.string(forKey: userDefaultsBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !hub.isEmpty else { return }
+        if applyPersistedHubCacheEnvIfValid(currentHubBaseURL: hub) {
+            JarvisIOSLog.recordHub("warmUpCachedHubEnvironment: applied persisted hub cache at launch")
+            JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "warmUp")
         }
     }
 
@@ -74,7 +108,7 @@ enum HubProfileSync {
         let hub = UserDefaults.standard.string(forKey: userDefaultsBaseURLKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !hub.isEmpty else { return false }
-        JarvisIOSLog.recordHub("syncFromHubToCache start hub=\(hub) hasToken=\(!resolvedAuthToken().isEmpty)")
+        JarvisIOSLog.recordHub("syncFromHubToCache start hub=\(hub) hasToken=\(!resolvedHubBearerToken().isEmpty)")
         do {
             try await downloadHubProfileIntoCacheAndApplyEnv(baseURLString: hub, progress: progress)
             JarvisIOSLog.recordHub("syncFromHubToCache success")
@@ -153,6 +187,42 @@ enum HubProfileSync {
 
     // MARK: - Private
 
+    /// If `storedPath` is a **file**, return it. If it is a **directory** (e.g. session `rev-*` folder),
+    /// return `…/manifest.json` inside when that path is a regular file.
+    private static func resolvedManifestFilePath(storedPath: String) -> String? {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: storedPath, isDirectory: &isDir) else { return nil }
+        if !isDir.boolValue {
+            return storedPath
+        }
+        let child = (storedPath as NSString).appendingPathComponent("manifest.json")
+        var childIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: child, isDirectory: &childIsDir), !childIsDir.boolValue else {
+            return nil
+        }
+        return child
+    }
+
+    /// When UserDefaults paths are wrong, pick the highest `rev-*` with `manifest.json` + `assets/`.
+    private static func discoverLatestCachedRevPaths() -> (manifest: String, assets: String)? {
+        let fm = FileManager.default
+        guard let root = try? hubProfileCacheRootURL() else { return nil }
+        var rootIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: root.path, isDirectory: &rootIsDir), rootIsDir.boolValue else { return nil }
+        guard let entries = try? fm.contentsOfDirectory(atPath: root.path) else { return nil }
+        let revs = entries.filter { $0.hasPrefix("rev-") }
+        guard let best = revs.max(by: { revisionSortKey($0) < revisionSortKey($1) }) else { return nil }
+        let session = root.appendingPathComponent(best, isDirectory: true)
+        let man = session.appendingPathComponent("manifest.json").path
+        let assets = session.appendingPathComponent("assets", isDirectory: true).path
+        var manDir: ObjCBool = false
+        guard fm.fileExists(atPath: man, isDirectory: &manDir), !manDir.boolValue else { return nil }
+        var assetsDir: ObjCBool = false
+        guard fm.fileExists(atPath: assets, isDirectory: &assetsDir), assetsDir.boolValue else { return nil }
+        return (man, assets)
+    }
+
     private struct ManifestHeader: Decodable {
         let schema: String
         let revision: UInt64
@@ -164,12 +234,33 @@ enum HubProfileSync {
         }
     }
 
-    private static func resolvedAuthToken() -> String {
+    /// Bearer for hub HTTP (`Authorization`) and WebSocket `module:authenticate` (Keychain first, then UserDefaults).
+    static func resolvedHubBearerToken() -> String {
         if let t = JarvisHubKeychain.bearerToken()?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
             return t
         }
         return UserDefaults.standard.string(forKey: userDefaultsAuthTokenKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    /// `ws://host:6121/ws` from the hub base URL field (same host as profile sync).
+    static func hubWebSocketURL() -> URL? {
+        let raw = UserDefaults.standard.string(forKey: userDefaultsBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var s = normalizedHubBaseURL(raw)
+        guard !s.isEmpty else { return nil }
+        if s.hasPrefix("https://") {
+            s = "wss://" + String(s.dropFirst(8))
+        } else if s.hasPrefix("http://") {
+            s = "ws://" + String(s.dropFirst(7))
+        } else if !(s.hasPrefix("ws://") || s.hasPrefix("wss://")) {
+            return nil
+        }
+        if s.hasSuffix("/ws") { return URL(string: s) }
+        if s.last == "/" {
+            return URL(string: s + "ws")
+        }
+        return URL(string: s + "/ws")
     }
 
     private static func applyPersistedHubCacheEnvIfValid(currentHubBaseURL: String) -> Bool {
@@ -184,11 +275,38 @@ enum HubProfileSync {
             return false
         }
 
-        guard let manifestPath = UserDefaults.standard.string(forKey: userDefaultsCachedManifestPathKey),
-              let assetRootPath = UserDefaults.standard.string(forKey: userDefaultsCachedAssetRootKey)
+        guard let manifestPathRaw = UserDefaults.standard.string(forKey: userDefaultsCachedManifestPathKey),
+              let assetRootPathRaw = UserDefaults.standard.string(forKey: userDefaultsCachedAssetRootKey)
         else {
             JarvisIOSLog.recordHub("applyPersistedHubCacheEnv: miss (missing UserDefaults manifest or asset paths)")
             return false
+        }
+
+        var manifestPathOpt = resolvedManifestFilePath(storedPath: manifestPathRaw)
+        var assetRootPath = assetRootPathRaw
+        if manifestPathOpt == nil {
+            if let pair = discoverLatestCachedRevPaths() {
+                JarvisIOSLog.recordHubWarning(
+                    "applyPersistedHubCacheEnv: UserDefaults manifest path unusable raw=\(manifestPathRaw); using newest rev-* on disk"
+                )
+                manifestPathOpt = pair.manifest
+                assetRootPath = pair.assets
+                persistSuccessfulHubCache(
+                    hubBaseURL: currentHubBaseURL,
+                    manifestFile: URL(fileURLWithPath: pair.manifest),
+                    assetsDir: URL(fileURLWithPath: pair.assets, isDirectory: true)
+                )
+            }
+        }
+        guard let manifestPath = manifestPathOpt else {
+            JarvisIOSLog.recordHubWarning(
+                "applyPersistedHubCacheEnv: could not resolve manifest file raw=\(manifestPathRaw)"
+            )
+            return false
+        }
+        if manifestPath != manifestPathRaw {
+            UserDefaults.standard.set(manifestPath, forKey: userDefaultsCachedManifestPathKey)
+            JarvisIOSLog.recordHub("applyPersistedHubCacheEnv: repaired manifest path in UserDefaults (was directory or session folder)")
         }
 
         let fm = FileManager.default
@@ -230,7 +348,7 @@ enum HubProfileSync {
         await updateHubDownloadProgress(progress, completed: 0, total: 1, localizedDescription: "Fetching manifest…")
 
         let manifestURL = baseURL.appending(path: "jarvis-ios/v1/manifest")
-        let token = resolvedAuthToken()
+        let token = resolvedHubBearerToken()
 
         var manifestRequest = URLRequest(url: manifestURL)
         manifestRequest.httpMethod = "GET"
@@ -450,7 +568,7 @@ private enum JarvisHubKeychain {
     }
 
     static func bearerToken() -> String? {
-        var query: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -469,5 +587,251 @@ private enum JarvisHubKeychain {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !ud.isEmpty else { return }
         setBearerToken(ud)
+    }
+}
+
+// MARK: - Keychain (IronClaw gateway bearer)
+
+private enum JarvisGatewayKeychain {
+    private static let service = "JarvisIOS.gateway"
+    private static let account = "bearer"
+
+    static func setBearerToken(_ token: String) {
+        let data = Data(token.utf8)
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(base as CFDictionary)
+        guard !token.isEmpty else { return }
+        var query = base
+        query[kSecValueData as String] = data
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        SecItemAdd(query as CFDictionary, nil)
+    }
+
+    static func bearerToken() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var out: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        guard status == errSecSuccess, let data = out as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func migrateFromUserDefaultsIfEmpty(userDefaultsKey: String) {
+        guard bearerToken() == nil else { return }
+        let ud = UserDefaults.standard.string(forKey: userDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !ud.isEmpty else { return }
+        setBearerToken(ud)
+    }
+}
+
+extension HubProfileSync {
+    static func migrateGatewayAuthTokenFromUserDefaultsIfNeeded() {
+        JarvisGatewayKeychain.migrateFromUserDefaultsIfEmpty(userDefaultsKey: Gateway.userDefaultsAuthTokenKey)
+    }
+
+    static func persistGatewayAuthTokenFromUI(_ token: String) {
+        UserDefaults.standard.set(token, forKey: Gateway.userDefaultsAuthTokenKey)
+        JarvisGatewayKeychain.setBearerToken(token)
+    }
+
+    static func resolvedGatewayBearerToken() -> String {
+        if let t = JarvisGatewayKeychain.bearerToken()?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+            return t
+        }
+        return UserDefaults.standard.string(forKey: Gateway.userDefaultsAuthTokenKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    static func normalizedGatewayBaseURL(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.count > 1, s.last == "/" {
+            s.removeLast()
+        }
+        return s
+    }
+
+    // MARK: - iOS avatar model (VRM / VRMA overrides + discovery)
+
+    /// Pushes `JARVIS_IOS_MODEL_PATH` / `JARVIS_IOS_IDLE_VRMA_PATH` for the Rust `jarvis_ios` staticlib.
+    /// Call before `jarvis_renderer_new` and before `jarvis_renderer_reload_profile`.
+    static func applyIosAvatarOverrideEnvFromUserDefaults() {
+        let m = UserDefaults.standard.string(forKey: IosAvatarCustomize.userDefaultsModelRelPathOverrideKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if m.isEmpty || m.contains("..") || m.hasPrefix("/") {
+            unsetenv("JARVIS_IOS_MODEL_PATH")
+        } else {
+            setenv("JARVIS_IOS_MODEL_PATH", m, 1)
+        }
+
+        let idle = UserDefaults.standard.string(forKey: IosAvatarCustomize.userDefaultsIdleVrmaRelPathOverrideKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if idle.isEmpty {
+            unsetenv("JARVIS_IOS_IDLE_VRMA_PATH")
+        } else if idle.contains("..") || idle.hasPrefix("/") {
+            unsetenv("JARVIS_IOS_IDLE_VRMA_PATH")
+        } else {
+            setenv("JARVIS_IOS_IDLE_VRMA_PATH", idle, 1)
+        }
+
+        let ground = UserDefaults.standard.string(forKey: IosSceneCustomize.userDefaultsGroundOverrideKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        switch ground {
+        case "show":
+            setenv("JARVIS_IOS_SHOW_GROUND", "1", 1)
+        case "hide":
+            setenv("JARVIS_IOS_SHOW_GROUND", "0", 1)
+        default:
+            unsetenv("JARVIS_IOS_SHOW_GROUND")
+        }
+
+        let bg = UserDefaults.standard.string(forKey: IosSceneCustomize.userDefaultsBackgroundLinearRgbaKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if bg.isEmpty {
+            unsetenv("JARVIS_IOS_BACKGROUND_LINEAR")
+        } else {
+            setenv("JARVIS_IOS_BACKGROUND_LINEAR", bg, 1)
+        }
+    }
+
+    /// `avatar.model_path` from the last synced hub `manifest.json` (for UI labels).
+    static func readHubManifestModelPath() -> String? {
+        guard let path = UserDefaults.standard.string(forKey: userDefaultsCachedManifestPathKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty
+        else { return nil }
+        let manifestURL: URL
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+            manifestURL = URL(fileURLWithPath: path, isDirectory: true).appendingPathComponent("manifest.json")
+        } else {
+            manifestURL = URL(fileURLWithPath: path)
+        }
+        guard let data = try? Data(contentsOf: manifestURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let av = obj["avatar"] as? [String: Any],
+              let mp = av["model_path"] as? String
+        else { return nil }
+        return mp.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Active `JARVIS_ASSET_ROOT` directory: process env first, then persisted hub cache asset folder.
+    static func resolvedAssetRootDirectoryURL() -> URL? {
+        if let ar = JarvisIOSLog.getenvString("JARVIS_ASSET_ROOT")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !ar.isEmpty
+        {
+            let u = URL(fileURLWithPath: ar, isDirectory: true)
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue {
+                return u
+            }
+        }
+        if let s = UserDefaults.standard.string(forKey: userDefaultsCachedAssetRootKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty
+        {
+            let u = URL(fileURLWithPath: s, isDirectory: true)
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue {
+                return u
+            }
+        }
+        return nil
+    }
+
+    /// All `.vrm` files under the resolved asset root, as repo-relative paths (e.g. `models/foo.vrm`).
+    static func listDiscoveredVrmRelativePaths(maxFiles: Int = 300) -> [String] {
+        guard let root = resolvedAssetRootDirectoryURL() else { return [] }
+        let fm = FileManager.default
+        guard let en = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var out: [String] = []
+        while out.count < maxFiles, let u = en.nextObject() as? URL {
+            guard u.pathExtension.lowercased() == "vrm" else { continue }
+            guard let rel = vrmPathRelativeToAssetRoot(file: u, assetRoot: root) else { continue }
+            out.append(rel)
+        }
+        return out.sorted()
+    }
+
+    /// JSON animation files under the resolved asset root (e.g. pose-library exports), as paths relative to that root.
+    /// Used by the ACT / emotion mapping editor to match desktop `EmotionBinding.animation` filenames.
+    static func listDiscoveredAnimationJsonRelativePaths(maxFiles: Int = 400) -> [String] {
+        guard let root = resolvedAssetRootDirectoryURL() else { return [] }
+        let fm = FileManager.default
+        guard let en = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var out: [String] = []
+        while out.count < maxFiles, let u = en.nextObject() as? URL {
+            guard u.pathExtension.lowercased() == "json" else { continue }
+            let name = u.lastPathComponent.lowercased()
+            if name == "manifest.json" { continue }
+            guard let rel = vrmPathRelativeToAssetRoot(file: u, assetRoot: root) else { continue }
+            out.append(rel)
+        }
+        return out.sorted()
+    }
+
+    private static func jarvisApplicationSupportDirectory() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("JarvisIOS", isDirectory: true)
+    }
+
+    /// Primary: `config/emotions.json` under the hub / bundled asset root. Fallback: Application Support when no root.
+    static func resolvedEmotionsJsonFileURL() -> URL {
+        if let root = resolvedAssetRootDirectoryURL() {
+            return root.appendingPathComponent("config/emotions.json", isDirectory: false)
+        }
+        let dir = jarvisApplicationSupportDirectory()
+        return dir.appendingPathComponent("emotions.json", isDirectory: false)
+    }
+
+    /// Ensures parent directories exist before writing `resolvedEmotionsJsonFileURL()`.
+    static func ensureParentDirectoryExists(for fileURL: URL) {
+        let parent = fileURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+    }
+
+    /// `dropFirst(root.path.count)` is unsafe on iOS: enumerator paths are often `/private/var/…` while
+    /// `URL.path` for the same root may be `/var/…`, producing garbage like `1/assets/models/…` and a broken
+    /// `JARVIS_IOS_MODEL_PATH` (Bevy then looks under `…/assets/1/assets/…`).
+    fileprivate static func vrmPathRelativeToAssetRoot(file: URL, assetRoot: URL) -> String? {
+        let rootP = posixPathForComparison(assetRoot)
+        let fileP = posixPathForComparison(file)
+        guard fileP.hasPrefix(rootP), fileP.count > rootP.count else { return nil }
+        var rel = String(fileP.dropFirst(rootP.count))
+        if rel.hasPrefix("/") { rel.removeFirst() }
+        guard !rel.isEmpty, !rel.contains("..") else { return nil }
+        return rel
+    }
+
+    /// Collapses `/private/var` → `/var` so two URLs that point at the same directory compare equal.
+    fileprivate static func posixPathForComparison(_ url: URL) -> String {
+        var p = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let privateVar = "/private/var/"
+        let plainVar = "/var/"
+        if p.hasPrefix(privateVar) {
+            p = plainVar + String(p.dropFirst(privateVar.count))
+        }
+        while p.count > 1, p.last == "/" {
+            p.removeLast()
+        }
+        return p
     }
 }
