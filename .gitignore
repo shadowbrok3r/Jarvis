@@ -28,4 +28,7 @@ JarvisIOS/.netrc
 JarvisIOS/xtool
 JarvisIOS/rust/target
 JarvisIOS/RustLibs/**
+# iOS: materialized SPM resources (synced from ../assets by scripts/build-rust.sh)
+JarvisIOS/Sources/JarvisIOS/assets/*
+!JarvisIOS/Sources/JarvisIOS/assets/.gitkeep
 .dev

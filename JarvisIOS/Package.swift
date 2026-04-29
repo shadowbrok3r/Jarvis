@@ -23,7 +23,8 @@ let package = Package(
       dependencies: ["BridgeFFI"],
       path: "Sources/JarvisIOS",
       resources: [
-        // In-package symlink `JarvisIOS/assets` → `../assets` (SwiftPM forbids `..` in resource paths).
+        // Real files only: `scripts/build-rust.sh` rsyncs `../assets` here with `-L`
+        // (symlinks in the bundle break iOS installd with InvalidSymlink).
         .copy("assets"),
       ],
       linkerSettings: [

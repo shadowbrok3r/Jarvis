@@ -3,7 +3,15 @@
 mod debug_log;
 
 #[cfg(target_os = "ios")]
+mod ios_graphics;
+#[cfg(target_os = "ios")]
 mod ios_profile_manifest;
+#[cfg(target_os = "ios")]
+mod ios_spring_preset;
+#[cfg(target_os = "ios")]
+mod jarvis_egui_theme;
+#[cfg(target_os = "ios")]
+mod ios_egui_ui;
 #[cfg(target_os = "ios")]
 mod ios_bevy;
 
@@ -25,6 +33,12 @@ mod ffi {
         fn jarvis_renderer_render(ptr: *mut u8, time_seconds: f64);
 
         fn jarvis_renderer_resize(ptr: *mut u8, width_px: u32, height_px: u32);
+
+        fn jarvis_renderer_touch(ptr: *mut u8, phase: u8, x: f32, y: f32, id: u64);
+
+        fn jarvis_renderer_reload_profile(ptr: *mut u8);
+
+        fn jarvis_renderer_queue_vrma(ptr: *mut u8, path_ptr: *const u8, path_len: usize, loop_forever: u8);
 
         fn jarvis_ios_debug_log_snapshot() -> String;
 
@@ -99,8 +113,24 @@ pub fn jarvis_renderer_render(ptr: *mut u8, _time_seconds: f64) {
         return;
     }
     #[cfg(target_os = "ios")]
-    unsafe {
-        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).render();
+    {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let r = ptr.cast::<ios_bevy::IosEmbeddedRenderer>();
+        let result = catch_unwind(AssertUnwindSafe(|| unsafe { (*r).render() }));
+        if let Err(payload) = result {
+            unsafe {
+                (*r).note_render_poisoned();
+            }
+            let msg = payload
+                .downcast_ref::<&'static str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("(non-string panic payload)");
+            crate::jarvis_ios_line!(
+                "[JarvisIOS] jarvis_renderer_render: caught Rust panic (would abort across Swift FFI). msg={}",
+                msg
+            );
+        }
     }
 }
 
@@ -114,4 +144,58 @@ pub fn jarvis_renderer_resize(ptr: *mut u8, width_px: u32, height_px: u32) {
     }
     #[cfg(not(target_os = "ios"))]
     let _ = (ptr, width_px, height_px);
+}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_touch(ptr: *mut u8, phase: u8, x: f32, y: f32, id: u64) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).queue_touch(phase, x, y, id);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_touch(_ptr: *mut u8, _phase: u8, _x: f32, _y: f32, _id: u64) {}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_reload_profile(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).queue_profile_reload();
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_reload_profile(_ptr: *mut u8) {}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_queue_vrma(
+    ptr: *mut u8,
+    path_ptr: *const u8,
+    path_len: usize,
+    loop_forever: u8,
+) {
+    if ptr.is_null() || path_ptr.is_null() || path_len == 0 {
+        return;
+    }
+    let path = unsafe { std::slice::from_raw_parts(path_ptr, path_len) };
+    let Ok(s) = std::str::from_utf8(path) else {
+        return;
+    };
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).queue_vrma_play(s.to_owned(), loop_forever != 0);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_queue_vrma(
+    _ptr: *mut u8,
+    _path_ptr: *const u8,
+    _path_len: usize,
+    _loop_forever: u8,
+) {
 }
