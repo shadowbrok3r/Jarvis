@@ -2,6 +2,10 @@
 
 Swift package that links a Rust `staticlib` (`jarvis_ios`) via **swift-bridge** and a small **BridgeFFI** C header target.
 
+`Info.override.plist` already carries the standard camera/microphone usage strings for the merged app `Info.plist`. This package adds **`JarvisAudioSession`** (`.playAndRecord` + `defaultToSpeaker` + activate/deactivate) and **`JarvisMicLevelMonitor`** (input-node RMS → 0…1) wired on the **Logs** tab for debugging only; full capture, encoding, and streaming remain future work.
+
+**Camera:** **`JarvisCameraSession`** + **`JarvisCameraPreviewRepresentable`** (`AVCaptureVideoPreviewLayer` via `UIViewRepresentable`) show a **debug-only** live preview on the Logs tab (front camera preferred, back wide-angle fallback). Permission is requested with `AVCaptureDevice.requestAccess(for: .video)`; denied state is shown in the UI. **No video frames are sent to the hub** in this build—transport would follow the same envelope style as **`IronclawHubWebSocket`** / hub text later, not raw binary WebSocket in this PR.
+
 **Official iOS workflow:** [xtool](https://github.com/xtool-org/xtool) on Linux (or wherever your xtool setup runs) — not a standalone Xcode project. You build the Rust static library for `aarch64-apple-ios`, place it where `Package.swift` expects (`RustLibs/`), then **`xtool dev`** (or other `xtool` commands) produces and runs the `.app`. Raw Xcode-only builds are not the supported path.
 
 ## Layout
@@ -53,6 +57,31 @@ Do not use **`#Preview`** in SwiftUI sources: xtool’s Swift toolchain does not
 **Crash logs (SIGABRT on `CADisplayLink` → JarvisIOS):** Apple’s `.ips` JSON rarely symbols Rust frames. If in-app logs show **`render: app.update() enter`** without **`leave`**, the panic is inside Bevy’s first `update()`. The `jarvis_ios` crate avoids **`default_platform`** so **`bevy_gilrs`** and other desktop-only plugins are not linked (rebuild Rust after changing `Cargo.toml`).
 
 **ATS / hub URL:** `Info.override.plist` enables **`NSAllowsLocalNetworking`** and **`NSAllowsArbitraryLoads`** so plain `http://` hub URLs (LAN, Tailscale IPs) are not blocked with `-1022`. Prefer **`https://`** to your hub when possible; remove or narrow arbitrary loads before a strict App Store submission if required.
+
+## First-run greeting (Avatar tab)
+
+**Who owns what:** **IronClaw (gateway)** owns persona, memory, and system prompts. The iOS app does **not** duplicate system prompts or embed a second “character brain” for chat.
+
+**What runs locally on first successful Bevy bootstrap** (after `jarvis_renderer_new` and `CADisplayLink` attach, ~650 ms delay so the VRM root exists):
+
+1. **`UserDefaults`** key `jarvis.avatar.did_first_greeting.<identity>` is checked. **`<identity>`** is derived from the device’s VRM choice: iOS model override (`jarvis.ios.overrideModelRelPath`) if set, else `avatar.model_path` from the synced hub `manifest.json`, else the literal `bundled-default`.
+2. If the flag is **false**, the app tries **existing FFI only** — no new Rust in this path unless you add assets:
+   - **`models/wave.vrma`** (one shot, `loop_forever = false`), else
+   - **`models/idle_loop.vrma`** (one shot for the greet beat), else
+   - **`animations/talk_nod.json`** (pose-library JSON via `jarvis_renderer_queue_anim_json`).
+3. If a motion file is found and queued, the flag is set to **true** so the greet runs **once per avatar identity** (changing model or manifest path uses a new key).
+4. If **no** candidate file exists under `JARVIS_ASSET_ROOT`, the flag is **not** set (hub sync or bundle can add assets later).
+
+**Logging:** `JarvisIOSLog` category **`Greeting`** (in-app Logs tab + Console.app).
+
+**IronClaw gateway:** The Swift client only has **`POST /api/chat/send`** with a **non-empty** user message or images (`GatewayChatViewModel.send`). There is **no** “greet without a user turn” API wired here; the app logs a **TODO** in the greeting flow instead of fabricating a fake user message. When the gateway exposes an explicit opening turn (or a documented empty-/system-message contract), hook it in one place next to `AvatarFirstRunGreeting` and stream via the existing **SSE** (`/api/chat/events`).
+
+**TODOs**
+
+- **TTS:** speak assistant lines on device or stream audio from gateway.
+- **STT:** push-to-talk or continuous listen + send to gateway.
+- **Barge-in:** cancel TTS / truncate SSE when the user starts speaking.
+- **VRM expressions from Swift:** today’s FFI is VRMA + JSON pose clips only; a minimal `jarvis_ios_*` expression preset would reuse desktop expression paths if added later.
 
 ## Optional app icon
 

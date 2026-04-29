@@ -64,6 +64,10 @@ enum JarvisIOSLog {
     static let bevy = Logger(subsystem: subsystem, category: "BevyUIView")
     static let ui = Logger(subsystem: subsystem, category: "MainShell")
     static let ironclaw = Logger(subsystem: subsystem, category: "Ironclaw")
+    /// First-open avatar tab: local motion + IronClaw wiring notes (not hub profile sync).
+    static let greeting = Logger(subsystem: subsystem, category: "Greeting")
+    static let audio = Logger(subsystem: subsystem, category: "Audio")
+    static let camera = Logger(subsystem: subsystem, category: "Camera")
 
     static func getenvString(_ name: String) -> String? {
         name.withCString { cName in
@@ -136,5 +140,41 @@ enum JarvisIOSLog {
     static func recordIronclawError(_ message: String) {
         JarvisIOSLogBus.appendSwiftLine("[Swift][Ironclaw][error] \(message)")
         ironclaw.error("\(message, privacy: .public)")
+    }
+
+    // MARK: First-run avatar greeting (local motion; IronClaw owns persona)
+
+    static func recordGreeting(_ message: String) {
+        JarvisIOSLogBus.appendSwiftLine("[Swift][Greeting] \(message)")
+        greeting.info("\(message, privacy: .public)")
+    }
+
+    static func recordGreetingError(_ message: String) {
+        JarvisIOSLogBus.appendSwiftLine("[Swift][Greeting][error] \(message)")
+        greeting.error("\(message, privacy: .public)")
+    }
+
+    // MARK: Audio (session + debug mic meter)
+
+    static func recordAudio(_ message: String) {
+        JarvisIOSLogBus.appendSwiftLine("[Swift][Audio] \(message)")
+        audio.info("\(message, privacy: .public)")
+    }
+
+    static func recordAudioError(_ message: String) {
+        JarvisIOSLogBus.appendSwiftLine("[Swift][Audio][error] \(message)")
+        audio.error("\(message, privacy: .public)")
+    }
+
+    // MARK: Camera (debug preview only)
+
+    static func recordCamera(_ message: String) {
+        JarvisIOSLogBus.appendSwiftLine("[Swift][Camera] \(message)")
+        camera.info("\(message, privacy: .public)")
+    }
+
+    static func recordCameraError(_ message: String) {
+        JarvisIOSLogBus.appendSwiftLine("[Swift][Camera][error] \(message)")
+        camera.error("\(message, privacy: .public)")
     }
 }

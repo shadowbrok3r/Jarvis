@@ -224,7 +224,8 @@ private enum IronclawGatewayHTTP {
 private enum ParsedGatewayEvent {
     case response(content: String, threadId: String?)
     case streamChunk(content: String, threadId: String?)
-    case thinking(message: String)
+    /// Model reasoning / chain-of-thought (`thread_id` optional; same as desktop `AppEvent::Thinking`).
+    case thinking(message: String, threadId: String?)
     case status(message: String)
     case toolStarted(name: String, detail: String?)
     case toolCompleted(name: String, success: Bool, error: String?)
@@ -244,7 +245,10 @@ private enum ParsedGatewayEvent {
         case "stream_chunk":
             return .streamChunk(content: o["content"] as? String ?? "", threadId: o["thread_id"] as? String)
         case "thinking":
-            return .thinking(message: o["message"] as? String ?? "")
+            return .thinking(
+                message: o["message"] as? String ?? "",
+                threadId: o["thread_id"] as? String
+            )
         case "status":
             return .status(message: o["message"] as? String ?? "")
         case "tool_started":
@@ -573,6 +577,7 @@ final class GatewayChatViewModel {
     func send() async {
         let bases = HubProfileSync.gatewayBaseURLCandidates()
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        // IronClaw gateway requires non-empty user content or images — no assistant-only “greet” POST in this client (see README “First-run greeting”).
         guard !bases.isEmpty, !text.isEmpty || !pendingImages.isEmpty else { return }
 
         let bearer = HubProfileSync.resolvedGatewayBearerToken()
