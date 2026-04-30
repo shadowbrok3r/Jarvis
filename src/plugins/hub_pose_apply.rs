@@ -100,11 +100,7 @@ fn parse_bone_map(data: &Value) -> Option<HashMap<String, [f32; 4]>> {
             }
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn parse_expression_map(data: &Value) -> Option<HashMap<String, f32>> {

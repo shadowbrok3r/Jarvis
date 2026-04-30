@@ -71,8 +71,8 @@ use rand::RngExt;
 use jarvis_avatar::pose_library::{AnimationFile, PoseFile};
 
 use crate::plugins::pose_driver::{
-    apply_pose_commands, normalized_from_local, sync_bone_entity_index, IndexedBones, PoseCommand,
-    PoseCommandSender, VRM_BONE_NAMES,
+    IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES, apply_pose_commands,
+    normalized_from_local, sync_bone_entity_index,
 };
 
 pub struct AnimLayersPlugin;
@@ -196,12 +196,20 @@ impl LayerStack {
             Layer::new("auto-blink", "Auto-Blink", DriverKind::blink_default())
                 .blend(BlendMode::Override)
                 .weight(1.0),
-            Layer::new("weight-shift", "Weight Shift", DriverKind::weight_shift_default())
-                .blend(BlendMode::RestRelative)
-                .weight(0.8),
-            Layer::new("finger-fidget", "Finger Fidget", DriverKind::finger_fidget_default())
-                .blend(BlendMode::RestRelative)
-                .weight(0.6),
+            Layer::new(
+                "weight-shift",
+                "Weight Shift",
+                DriverKind::weight_shift_default(),
+            )
+            .blend(BlendMode::RestRelative)
+            .weight(0.8),
+            Layer::new(
+                "finger-fidget",
+                "Finger Fidget",
+                DriverKind::finger_fidget_default(),
+            )
+            .blend(BlendMode::RestRelative)
+            .weight(0.6),
             Layer::new("toe-fidget", "Toe Fidget", DriverKind::toe_fidget_default())
                 .blend(BlendMode::RestRelative)
                 .weight(0.4),
@@ -342,14 +350,10 @@ impl BoneMask {
 pub enum DriverKind {
     /// Replays a saved [`AnimationFile`] keyframe by keyframe. Emits
     /// absolute local rotations — use [`BlendMode::Override`].
-    Clip {
-        animation: Box<AnimationFile>,
-    },
+    Clip { animation: Box<AnimationFile> },
     /// Holds one [`PoseFile`] from the pose library (static bones + optional
     /// expression weights). Emits absolute rotations — use [`BlendMode::Override`].
-    PoseHold {
-        pose: Box<PoseFile>,
-    },
+    PoseHold { pose: Box<PoseFile> },
     /// Sinusoidal chest / upper-chest pitch + roll. Emits rest-relative
     /// deltas — use [`BlendMode::RestRelative`].
     Breathing {
@@ -522,12 +526,14 @@ fn refresh_rest_pose_snapshot(
     // already had entities in the index (VRM init ordering), by checking that
     // every joint that *has* `RestTransform` is represented in `snap.rest`.
     let indexed_len = indexed.len();
-    let snapshot_covers_all_rt = indexed.entities.iter().all(|(name, entity)| {
-        match rest_q.get(*entity) {
-            Ok(_) => snap.rest.contains_key(name),
-            Err(_) => true,
-        }
-    });
+    let snapshot_covers_all_rt =
+        indexed
+            .entities
+            .iter()
+            .all(|(name, entity)| match rest_q.get(*entity) {
+                Ok(_) => snap.rest.contains_key(name),
+                Err(_) => true,
+            });
     if snap.captured == indexed_len
         && snapshot_covers_all_rt
         && snap.rest_world.len() == snap.rest.len()
@@ -664,7 +670,10 @@ fn advance_and_apply_layers(
                 .copied()
                 .unwrap_or(Quat::IDENTITY);
             let pose_q = normalized_from_local(rest_local, rest_world, *q_raw);
-            bones_out.insert((*name).to_string(), [pose_q.x, pose_q.y, pose_q.z, pose_q.w]);
+            bones_out.insert(
+                (*name).to_string(),
+                [pose_q.x, pose_q.y, pose_q.z, pose_q.w],
+            );
         }
     });
 
@@ -718,7 +727,14 @@ fn sample_driver(
             phase_t,
             mean_interval,
             double_blink_chance,
-        } => sample_blink(dt, next_in, phase, phase_t, *mean_interval, *double_blink_chance),
+        } => sample_blink(
+            dt,
+            next_in,
+            phase,
+            phase_t,
+            *mean_interval,
+            *double_blink_chance,
+        ),
         DriverKind::WeightShift {
             rate_hz,
             hip_roll_deg,
@@ -744,10 +760,7 @@ fn sample_pose_hold(pose: &PoseFile) -> DriverSample {
         bones.insert(name.clone(), Quat::from_xyzw(x, y, z, w));
     }
     let expressions = pose.expressions.clone();
-    DriverSample {
-        bones,
-        expressions,
-    }
+    DriverSample { bones, expressions }
 }
 
 fn sample_clip(animation: &AnimationFile, t: f32) -> DriverSample {
@@ -764,10 +777,7 @@ fn sample_clip(animation: &AnimationFile, t: f32) -> DriverSample {
         bones.insert(name.clone(), Quat::from_xyzw(x, y, z, w));
     }
     let expressions = frame.expressions.clone();
-    DriverSample {
-        bones,
-        expressions,
-    }
+    DriverSample { bones, expressions }
 }
 
 fn sample_breathing(t: f32, rate_hz: f32, pitch_deg: f32, roll_deg: f32) -> DriverSample {
@@ -917,12 +927,7 @@ fn sample_finger_fidget(
 
 const TOE_BONES: &[&str] = &["leftToes", "rightToes"];
 
-fn sample_toe_fidget(
-    t: f32,
-    amplitude_deg: f32,
-    frequency_hz: f32,
-    seed: u64,
-) -> DriverSample {
+fn sample_toe_fidget(t: f32, amplitude_deg: f32, frequency_hz: f32, seed: u64) -> DriverSample {
     let mut bones = HashMap::new();
     let amp = amplitude_deg.to_radians();
     for (i, name) in TOE_BONES.iter().enumerate() {

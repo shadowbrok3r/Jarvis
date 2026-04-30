@@ -4,12 +4,17 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
+use bevy::animation::RepeatAnimation;
+use bevy::app::AnimationSystems;
 use bevy::prelude::*;
+use bevy::transform::TransformSystems;
 use bevy_vrm1::prelude::*;
 use serde::Deserialize;
 
 use crate::ios_bevy::JarvisIosAvatarRoot;
+use crate::ios_profile_manifest::IosAvatarSettings;
 
 #[derive(Resource, Default)]
 pub struct IosJsonAnimPlayback {
@@ -27,6 +32,8 @@ pub(crate) struct ActiveJsonClip {
     last_applied_frame: Option<usize>,
     bone_lower_to_entity: HashMap<String, Entity>,
     vrm_entity: Entity,
+    /// Idle VRMA entities we [`StopVrma`] so JSON can own bone transforms; replay on clip end.
+    pub(crate) stopped_idle_vrma: Vec<Entity>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +74,14 @@ impl IosJsonAnimPlayback {
     pub fn replace_with_clip(&mut self, clip: Option<ActiveJsonClip>) {
         self.inner = clip;
     }
+
+    /// Idle VRMA entities paused for the current JSON clip (for supersede / replay before a new clip).
+    pub(crate) fn supersede_stopped_idle_snapshot(&self) -> Vec<Entity> {
+        self.inner
+            .as_ref()
+            .map(|c| c.stopped_idle_vrma.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// Load JSON from `JARVIS_ASSET_ROOT` / `rel_path` and snapshot bone entities under the avatar root.
@@ -102,11 +117,12 @@ pub(crate) fn try_build_clip(rel_path: &str, world: &mut World) -> Option<Active
     let hold_duration_secs = animation.hold_duration.unwrap_or(0.35).max(0.05);
 
     crate::jarvis_ios_line!(
-        "[JarvisIOS] json anim: start {} frames={} fps={} loop={}",
+        "[JarvisIOS] json anim: start {} frames={} fps={} loop={} bone_name_index={}",
         animation.name,
         animation.frames.len(),
         fps,
-        looping
+        looping,
+        bone_lower_to_entity.len()
     );
 
     Some(ActiveJsonClip {
@@ -120,13 +136,122 @@ pub(crate) fn try_build_clip(rel_path: &str, world: &mut World) -> Option<Active
         last_applied_frame: None,
         bone_lower_to_entity,
         vrm_entity,
+        stopped_idle_vrma: Vec::new(),
     })
+}
+
+/// BFS descendants including `root`.
+fn collect_descendants(world: &World, root: Entity) -> Vec<Entity> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(e) = stack.pop() {
+        out.push(e);
+        if let Some(ch) = world.get::<Children>(e) {
+            for c in ch.iter() {
+                stack.push(c);
+            }
+        }
+    }
+    out
+}
+
+fn vrma_path_matches_idle(vp: &Path, idle_rel: &str) -> bool {
+    let idle_trim = idle_rel.trim();
+    if idle_trim.is_empty() {
+        return false;
+    }
+    let idle_norm = idle_trim.replace('\\', "/");
+    let s = vp.to_string_lossy().replace('\\', "/");
+    if s.ends_with(&idle_norm) {
+        return true;
+    }
+    let idle_file = Path::new(idle_trim).file_name();
+    let vp_file = vp.file_name();
+    idle_file.is_some() && idle_file == vp_file
+}
+
+/// Stop the configured idle VRMA so pose JSON can drive bones without `AnimationPlayer` fighting us.
+pub(crate) fn pause_matching_idle_vrma(
+    world: &mut World,
+    avatar_root: Entity,
+    settings: &IosAvatarSettings,
+) -> Vec<Entity> {
+    let idle = settings.idle_vrma_path.trim();
+    if idle.is_empty() {
+        return Vec::new();
+    }
+    let mut stopped = Vec::new();
+    for e in collect_descendants(world, avatar_root) {
+        if world.get::<Vrma>(e).is_none() {
+            continue;
+        }
+        let Some(vp) = world.get::<VrmaPath>(e) else {
+            continue;
+        };
+        if !vrma_path_matches_idle(&vp.0, idle) {
+            continue;
+        }
+        world
+            .entity_mut(e)
+            .trigger(|ent| StopVrma { entity: ent });
+        stopped.push(e);
+    }
+    if !stopped.is_empty() {
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] json anim: paused idle VRMA ({} target(s)) for pose JSON",
+            stopped.len()
+        );
+    }
+    stopped
+}
+
+fn resume_idle_vrmas(commands: &mut Commands, stopped: &[Entity]) {
+    for &vrma_e in stopped {
+        commands.entity(vrma_e).trigger(|e| PlayVrma {
+            repeat: RepeatAnimation::Forever,
+            transition_duration: Duration::ZERO,
+            vrma: e,
+            reset_spring_bones: false,
+        });
+    }
+    if !stopped.is_empty() {
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] json anim: resumed {} idle VRMA target(s)",
+            stopped.len()
+        );
+    }
+}
+
+/// When queueing a new clip while one is active, the old clip never ran its “finished” path —
+/// replay idle before we [`StopVrma`] again for the new clip.
+pub(crate) fn resume_idle_vrmas_on_world(world: &mut World, stopped: &[Entity]) {
+    for &e in stopped {
+        world.entity_mut(e).trigger(|ent| PlayVrma {
+            repeat: RepeatAnimation::Forever,
+            transition_duration: Duration::ZERO,
+            vrma: ent,
+            reset_spring_bones: false,
+        });
+    }
+    if !stopped.is_empty() {
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] json anim: supersede — replayed {} idle VRMA before new JSON",
+            stopped.len()
+        );
+    }
 }
 
 fn build_bone_name_map(world: &mut World, root: Entity) -> HashMap<String, Entity> {
     let mut out = HashMap::new();
     visit_named_bones(&*world, root, &mut out);
     out
+}
+
+/// Same as desktop `pose_driver::local_from_normalized`: Kimodo / pose-library JSON stores
+/// **normalized humanoid** quaternions, not raw rig `Transform.rotation`.
+#[inline]
+fn local_from_normalized(rest_local: Quat, rest_world: Quat, pose_q: Quat) -> Quat {
+    rest_local * rest_world.inverse() * pose_q * rest_world
 }
 
 fn visit_named_bones(world: &World, e: Entity, out: &mut HashMap<String, Entity>) {
@@ -146,7 +271,11 @@ fn visit_named_bones(world: &World, e: Entity, out: &mut HashMap<String, Entity>
 fn ios_json_anim_tick(
     time: Res<Time>,
     mut playback: ResMut<IosJsonAnimPlayback>,
-    mut transforms: Query<&mut Transform>,
+    mut transforms: Query<(
+        &mut Transform,
+        Option<&RestTransform>,
+        Option<&RestGlobalTransform>,
+    )>,
     mut commands: Commands,
 ) {
     let Some(clip) = playback.inner.as_mut() else {
@@ -154,7 +283,9 @@ fn ios_json_anim_tick(
     };
     let total = clip.animation.frames.len();
     if total == 0 {
+        let stopped = clip.stopped_idle_vrma.clone();
         playback.stop();
+        resume_idle_vrmas(&mut commands, &stopped);
         return;
     }
 
@@ -190,14 +321,20 @@ fn ios_json_anim_tick(
             entity: clip.vrm_entity,
         });
         crate::jarvis_ios_line!("[JarvisIOS] json anim: finished {}", clip.animation.name);
+        let stopped = clip.stopped_idle_vrma.clone();
         playback.stop();
+        resume_idle_vrmas(&mut commands, &stopped);
     }
 }
 
 fn apply_frame(
     frame: &IosAnimFrame,
     bone_map: &HashMap<String, Entity>,
-    transforms: &mut Query<&mut Transform>,
+    transforms: &mut Query<(
+        &mut Transform,
+        Option<&RestTransform>,
+        Option<&RestGlobalTransform>,
+    )>,
     commands: &mut Commands,
     vrm_entity: Entity,
 ) {
@@ -206,17 +343,38 @@ fn apply_frame(
         let Some(&ent) = bone_map.get(&key) else {
             continue;
         };
-        let Ok(mut tf) = transforms.get_mut(ent) else {
+        let Ok((mut tf, rest, rest_world)) = transforms.get_mut(ent) else {
             continue;
         };
-        let q = Quat::from_xyzw(
+        let pose_q = Quat::from_xyzw(
             rot.rotation[0],
             rot.rotation[1],
             rot.rotation[2],
             rot.rotation[3],
         );
-        if q.x.is_finite() && q.y.is_finite() && q.z.is_finite() && q.w.is_finite() {
-            tf.rotation = q.normalize();
+        if !(pose_q.x.is_finite()
+            && pose_q.y.is_finite()
+            && pose_q.z.is_finite()
+            && pose_q.w.is_finite())
+        {
+            continue;
+        }
+        let pose_q = pose_q.normalize();
+        let final_q = match (rest, rest_world) {
+            (Some(rt), Some(rgt)) => {
+                let rest_local = rt.0.rotation;
+                let rw = rgt.0.rotation();
+                local_from_normalized(rest_local, rw, pose_q)
+            }
+            // Skin extras or timing: fall back to legacy raw write (better than skipping).
+            _ => pose_q,
+        };
+        if final_q.x.is_finite()
+            && final_q.y.is_finite()
+            && final_q.z.is_finite()
+            && final_q.w.is_finite()
+        {
+            tf.rotation = final_q.normalize();
         }
     }
 
@@ -239,6 +397,15 @@ fn apply_frame(
 }
 
 pub fn plugin(app: &mut App) {
-    app.init_resource::<IosJsonAnimPlayback>()
-        .add_systems(Update, ios_json_anim_tick);
+    app.init_resource::<IosJsonAnimPlayback>().add_systems(
+        PostUpdate,
+        // 1) After VRMA sampling (`AnimationSystems`). 2) Before VRM roll / rotation constraints
+        //    (same slot as desktop `apply_pose_commands`) so constraints do not stomp our pose.
+        // 3) Before transform propagation. JSON rotations are **normalized humanoid** space; see
+        //    `local_from_normalized` + `apply_frame`.
+        ios_json_anim_tick
+            .after(AnimationSystems)
+            .before(VrmSystemSets::Constraints)
+            .before(TransformSystems::Propagate),
+    );
 }

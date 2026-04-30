@@ -130,10 +130,7 @@ impl PoseLibrary {
     }
 
     pub fn find_pose(&self, name: &str) -> Result<Option<PoseFile>, LibraryError> {
-        Ok(self
-            .load_all_poses()?
-            .into_iter()
-            .find(|p| p.name == name))
+        Ok(self.load_all_poses()?.into_iter().find(|p| p.name == name))
     }
 
     /// Load a pose from disk for layer drivers and tooling.
@@ -173,10 +170,7 @@ impl PoseLibrary {
             Ok(p) => Ok(p),
             Err(LibraryError::NotFound(_)) => {
                 let all = self.load_all_poses()?;
-                let stem = key
-                    .trim()
-                    .strip_suffix(".json")
-                    .unwrap_or(key.trim());
+                let stem = key.trim().strip_suffix(".json").unwrap_or(key.trim());
                 all.into_iter()
                     .find(|p| {
                         slugify(&p.name) == stem
@@ -339,9 +333,7 @@ impl PoseLibrary {
         if let Some(obj) = v.as_object_mut() {
             obj.insert(
                 "name".to_string(),
-                serde_json::Value::String(
-                    new_filename.trim_end_matches(".json").to_string(),
-                ),
+                serde_json::Value::String(new_filename.trim_end_matches(".json").to_string()),
             );
         }
         let new_path = self.animations_dir.join(new_filename);
@@ -454,7 +446,9 @@ mod tests {
             category: "greeting".into(),
             bones: HashMap::from([(
                 "rightHand".to_string(),
-                BoneRotation { rotation: [0.0, 0.1, 0.0, 0.995] },
+                BoneRotation {
+                    rotation: [0.0, 0.1, 0.0, 0.995],
+                },
             )]),
             expressions: HashMap::from([("happy".to_string(), 0.5)]),
             transition_duration: 0.5,
@@ -476,7 +470,10 @@ mod tests {
         assert_eq!(via_name.name, "Bigger Wave");
 
         lib.update_pose_category("Bigger Wave", "emotion").unwrap();
-        assert_eq!(lib.find_pose("Bigger Wave").unwrap().unwrap().category, "emotion");
+        assert_eq!(
+            lib.find_pose("Bigger Wave").unwrap().unwrap().category,
+            "emotion"
+        );
 
         lib.delete_pose("Bigger Wave").unwrap();
         assert!(lib.find_pose("Bigger Wave").unwrap().is_none());

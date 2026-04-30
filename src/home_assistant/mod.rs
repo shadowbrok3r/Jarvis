@@ -101,11 +101,7 @@ fn unwrap_ha_config_list(v: Value) -> Vec<Value> {
             .get("result")
             .and_then(|x| x.as_array())
             .cloned()
-            .or_else(|| {
-                map.get("data")
-                    .and_then(|x| x.as_array())
-                    .cloned()
-            })
+            .or_else(|| map.get("data").and_then(|x| x.as_array()).cloned())
             .unwrap_or_default(),
         _ => vec![],
     }
@@ -132,7 +128,10 @@ fn parse_entity_registry_rows(items: &[Value]) -> Vec<EntityRegRow> {
         .filter_map(|v| {
             let entity_id = v.get("entity_id")?.as_str()?.to_string();
             let area_id = v.get("area_id").and_then(Value::as_str).map(str::to_owned);
-            let device_id = v.get("device_id").and_then(Value::as_str).map(str::to_owned);
+            let device_id = v
+                .get("device_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             Some(EntityRegRow {
                 entity_id,
                 area_id,
@@ -178,10 +177,10 @@ pub fn ha_get(
     let bridge = settings.bridge_url.trim();
     if !bridge.is_empty() {
         let url = format!("{}/ha-proxy{path}", trim_slash(bridge));
-        client.get(url).header("X-HA-URL", settings.ha_url.trim()).header(
-            "X-HA-Token",
-            settings.ha_token.trim(),
-        )
+        client
+            .get(url)
+            .header("X-HA-URL", settings.ha_url.trim())
+            .header("X-HA-Token", settings.ha_token.trim())
     } else {
         let base = trim_slash(settings.ha_url.trim());
         let url = format!("{base}{path}");
@@ -231,12 +230,20 @@ pub fn ha_post_json(
 }
 
 /// Latest state object for a single entity (`GET /api/states/<entity_id>`).
-pub async fn fetch_state(client: &Client, settings: &HomeAssistantSettings, entity_id: &str) -> Result<Value, HaError> {
+pub async fn fetch_state(
+    client: &Client,
+    settings: &HomeAssistantSettings,
+    entity_id: &str,
+) -> Result<Value, HaError> {
     let path = format!("/api/states/{entity_id}");
     fetch_json_get(client, settings, &path).await
 }
 
-async fn fetch_json_get(client: &Client, settings: &HomeAssistantSettings, path: &str) -> Result<Value, HaError> {
+async fn fetch_json_get(
+    client: &Client,
+    settings: &HomeAssistantSettings,
+    path: &str,
+) -> Result<Value, HaError> {
     let resp = ha_get(client, settings, path).send().await?;
     let status = resp.status();
     let txt = resp.text().await.unwrap_or_default();
@@ -283,7 +290,10 @@ fn friendly_name(entity_id: &str, attributes: &Value) -> String {
 }
 
 /// Full device scan (cameras, mics, speakers, detection sensors + areas).
-pub async fn discover(client: &Client, settings: &HomeAssistantSettings) -> Result<DiscoverySnapshot, HaError> {
+pub async fn discover(
+    client: &Client,
+    settings: &HomeAssistantSettings,
+) -> Result<DiscoverySnapshot, HaError> {
     if settings.ha_url.trim().is_empty() || settings.ha_token.trim().is_empty() {
         return Err(HaError::NotConfigured);
     }

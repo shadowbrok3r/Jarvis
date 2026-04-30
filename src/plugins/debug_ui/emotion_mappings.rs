@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::emotions::EmotionBinding;
@@ -108,9 +108,7 @@ pub fn draw_emotion_mappings_window(
 
 fn toolbar(ui: &mut egui::Ui, _state: &mut EmotionMappingsUiState, map: &mut EmotionMapRes) {
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(format!("{} mappings", map.inner.mappings.len())).monospace(),
-        );
+        ui.label(egui::RichText::new(format!("{} mappings", map.inner.mappings.len())).monospace());
         ui.separator();
         if ui
             .button("💾 Save")
@@ -119,7 +117,11 @@ fn toolbar(ui: &mut egui::Ui, _state: &mut EmotionMappingsUiState, map: &mut Emo
         {
             map.save();
         }
-        if ui.button("⟳ Reload").on_hover_text("discard unsaved edits").clicked() {
+        if ui
+            .button("⟳ Reload")
+            .on_hover_text("discard unsaved edits")
+            .clicked()
+        {
             map.reload();
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -347,10 +349,7 @@ fn expression_combo(ui: &mut egui::Ui, label: &str, binding: &mut EmotionBinding
             })
             .show_ui(ui, |ui| {
                 for preset in VRM_PRESETS {
-                    if ui
-                        .selectable_label(current == *preset, *preset)
-                        .clicked()
-                    {
+                    if ui.selectable_label(current == *preset, *preset).clicked() {
                         current = (*preset).to_string();
                     }
                 }
@@ -390,10 +389,7 @@ fn animation_combo(
             .selected_text(display_label)
             .width(180.0)
             .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(selected.is_empty(), "(none)")
-                    .clicked()
-                {
+                if ui.selectable_label(selected.is_empty(), "(none)").clicked() {
                     binding.animation = None;
                 }
                 for meta in animations {
@@ -415,11 +411,7 @@ fn animation_combo(
     });
 }
 
-fn add_row(
-    ui: &mut egui::Ui,
-    state: &mut EmotionMappingsUiState,
-    map: &mut EmotionMapRes,
-) {
+fn add_row(ui: &mut egui::Ui, state: &mut EmotionMappingsUiState, map: &mut EmotionMapRes) {
     ui.horizontal(|ui| {
         ui.label("add emotion:");
         ui.add(

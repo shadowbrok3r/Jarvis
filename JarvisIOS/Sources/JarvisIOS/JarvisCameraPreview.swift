@@ -220,7 +220,7 @@ final class JarvisCameraSession {
 
 // MARK: - Preview layer (UIKit)
 
-private final class PreviewContainerView: UIView {
+final class PreviewContainerView: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
 
     var previewLayer: AVCaptureVideoPreviewLayer {

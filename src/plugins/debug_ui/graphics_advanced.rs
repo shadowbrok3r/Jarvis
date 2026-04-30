@@ -11,16 +11,16 @@ use std::collections::HashSet;
 use bevy::gltf::GltfMaterialName;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 use bevy_vrm1::prelude::{MToonMaterial, Vrm};
 
 use jarvis_avatar::config::{
-    msaa_allows_ssao, BloomSettings, GraphicsAdvancedSettings, LightRigSettings, LightSpec,
-    Settings,
+    BloomSettings, GraphicsAdvancedSettings, LightRigSettings, LightSpec, Settings,
+    msaa_allows_ssao,
 };
 
 use crate::plugins::mtoon_overrides::{
-    apply_override_entry, mtoon_mesh_override_key, MToonOverrideEntry, MToonOverridesStore,
+    MToonOverrideEntry, MToonOverridesStore, apply_override_entry, mtoon_mesh_override_key,
 };
 
 use super::widgets::{rgb_row, rgba_row, vec3_row};
@@ -74,7 +74,12 @@ pub struct MaterialDraft {
 impl MaterialDraft {
     fn from_material(name: &str, m: &MToonMaterial, existing: Option<&MToonOverrideEntry>) -> Self {
         let base_color = color_to_arr(m.base_color);
-        let emissive = [m.emissive.red, m.emissive.green, m.emissive.blue, m.emissive.alpha];
+        let emissive = [
+            m.emissive.red,
+            m.emissive.green,
+            m.emissive.blue,
+            m.emissive.alpha,
+        ];
         let shade_color = [
             m.shade.color.red,
             m.shade.color.green,
@@ -162,7 +167,8 @@ impl MaterialDraft {
                 d.override_rim_mix_factor = true;
             }
             if let Some(mode) = e.outline_mode.as_deref() {
-                d.outline_mode_world = matches!(mode, "worldCoordinates" | "WorldCoordinates" | "world");
+                d.outline_mode_world =
+                    matches!(mode, "worldCoordinates" | "WorldCoordinates" | "world");
                 d.override_outline_mode = true;
             }
             if let Some(v) = e.outline_width_factor {
@@ -194,7 +200,9 @@ impl MaterialDraft {
             rim_fresnel_power: self
                 .override_rim_fresnel_power
                 .then_some(self.rim_fresnel_power),
-            rim_lift_factor: self.override_rim_lift_factor.then_some(self.rim_lift_factor),
+            rim_lift_factor: self
+                .override_rim_lift_factor
+                .then_some(self.rim_lift_factor),
             rim_mix_factor: self.override_rim_mix_factor.then_some(self.rim_mix_factor),
             outline_mode: self.override_outline_mode.then(|| {
                 if self.outline_mode_world {
@@ -247,14 +255,12 @@ pub fn draw_graphics_advanced_window(
     mut contexts: EguiContexts,
     mut settings: ResMut<Settings>,
     materials: Res<Assets<MToonMaterial>>,
-    mtoon_meshes_q: Query<
-        (
-            Entity,
-            Option<&Name>,
-            Option<&GltfMaterialName>,
-            &MeshMaterial3d<MToonMaterial>,
-        ),
-    >,
+    mtoon_meshes_q: Query<(
+        Entity,
+        Option<&Name>,
+        Option<&GltfMaterialName>,
+        &MeshMaterial3d<MToonMaterial>,
+    )>,
     vrm_roots_q: Query<Entity, With<Vrm>>,
     child_of_q: Query<&ChildOf>,
     std_meshes_q: Query<Entity, With<MeshMaterial3d<StandardMaterial>>>,
@@ -345,8 +351,7 @@ fn draw_post_process(ui: &mut egui::Ui, msaa_samples: u32, adv: &mut GraphicsAdv
         .on_hover_text("Asset stem only: <stem>_diffuse.ktx2 + <stem>_specular.ktx2");
     ui.text_edit_singleline(&mut adv.environment_map);
     ui.add(
-        egui::Slider::new(&mut adv.environment_intensity, 0.0..=80.0)
-            .text("environment_intensity"),
+        egui::Slider::new(&mut adv.environment_intensity, 0.0..=80.0).text("environment_intensity"),
     );
 
     ui.separator();
@@ -359,7 +364,10 @@ fn draw_post_process(ui: &mut egui::Ui, msaa_samples: u32, adv: &mut GraphicsAdv
             "SSAO requires MSAA off (set msaa_samples to 0 under Graphics / lights). Toggle is disabled while MSAA ≥ 2.",
         );
     }
-    ui.add_enabled(ssao_allowed, egui::Checkbox::new(&mut adv.ssao_enabled, "enabled"));
+    ui.add_enabled(
+        ssao_allowed,
+        egui::Checkbox::new(&mut adv.ssao_enabled, "enabled"),
+    );
     ui.add_enabled_ui(ssao_allowed, |ui| {
         egui::ComboBox::from_label("ssao_quality")
             .selected_text(adv.ssao_quality.clone())
@@ -378,17 +386,10 @@ fn draw_post_process(ui: &mut egui::Ui, msaa_samples: u32, adv: &mut GraphicsAdv
 fn draw_bloom(ui: &mut egui::Ui, b: &mut BloomSettings) {
     ui.checkbox(&mut b.enabled, "enabled");
     ui.add(egui::Slider::new(&mut b.intensity, 0.0..=1.0).text("intensity"));
-    ui.add(
-        egui::Slider::new(&mut b.low_frequency_boost, 0.0..=1.5)
-            .text("low_frequency_boost"),
-    );
-    ui.add(
-        egui::Slider::new(&mut b.high_pass_frequency, 0.0..=1.0).text("high_pass_frequency"),
-    );
+    ui.add(egui::Slider::new(&mut b.low_frequency_boost, 0.0..=1.5).text("low_frequency_boost"));
+    ui.add(egui::Slider::new(&mut b.high_pass_frequency, 0.0..=1.0).text("high_pass_frequency"));
     ui.add(egui::Slider::new(&mut b.threshold, 0.0..=5.0).text("threshold"));
-    ui.add(
-        egui::Slider::new(&mut b.threshold_softness, 0.0..=1.0).text("threshold_softness"),
-    );
+    ui.add(egui::Slider::new(&mut b.threshold_softness, 0.0..=1.0).text("threshold_softness"));
     egui::ComboBox::from_label("composite_mode")
         .selected_text(b.composite_mode.clone())
         .show_ui(ui, |ui| {
@@ -403,7 +404,9 @@ fn draw_light_rig(ui: &mut egui::Ui, rig: &mut LightRigSettings) {
         .on_hover_text("Three directional lights: key, fill, and rim.");
     ui.checkbox(&mut rig.enabled, "enable rig (disables default sun)");
     ui.collapsing("Key light", |ui| draw_light_spec(ui, "key", &mut rig.key));
-    ui.collapsing("Fill light", |ui| draw_light_spec(ui, "fill", &mut rig.fill));
+    ui.collapsing("Fill light", |ui| {
+        draw_light_spec(ui, "fill", &mut rig.fill)
+    });
     ui.collapsing("Rim light", |ui| draw_light_spec(ui, "rim", &mut rig.rim));
 }
 
@@ -443,10 +446,7 @@ fn draw_mtoon_editor(
     let mut choices: Vec<(String, Handle<MToonMaterial>)> = meshes_q
         .iter()
         .map(|(_, name, gltf_name, h)| {
-            (
-                mtoon_mesh_override_key(name, gltf_name, &h.0),
-                h.0.clone(),
-            )
+            (mtoon_mesh_override_key(name, gltf_name, &h.0), h.0.clone())
         })
         .collect();
     choices.sort_by(|a, b| a.0.cmp(&b.0));
@@ -512,18 +512,24 @@ fn draw_mtoon_editor(
 
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_base_color, "base_color");
-        ui.add_enabled_ui(draft.override_base_color, |ui| rgba_row(ui, &mut draft.base_color));
+        ui.add_enabled_ui(draft.override_base_color, |ui| {
+            rgba_row(ui, &mut draft.base_color)
+        });
     });
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_emissive, "emissive");
-        ui.add_enabled_ui(draft.override_emissive, |ui| rgba_row(ui, &mut draft.emissive));
+        ui.add_enabled_ui(draft.override_emissive, |ui| {
+            rgba_row(ui, &mut draft.emissive)
+        });
     });
 
     ui.separator();
     ui.label("Shade");
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_shade_color, "shade_color");
-        ui.add_enabled_ui(draft.override_shade_color, |ui| rgba_row(ui, &mut draft.shade_color));
+        ui.add_enabled_ui(draft.override_shade_color, |ui| {
+            rgba_row(ui, &mut draft.shade_color)
+        });
     });
     ui.horizontal(|ui| {
         ui.checkbox(
@@ -547,7 +553,9 @@ fn draw_mtoon_editor(
     ui.label("Rim");
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_rim_color, "rim_color");
-        ui.add_enabled_ui(draft.override_rim_color, |ui| rgba_row(ui, &mut draft.rim_color));
+        ui.add_enabled_ui(draft.override_rim_color, |ui| {
+            rgba_row(ui, &mut draft.rim_color)
+        });
     });
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_rim_fresnel_power, "rim_fresnel_power");
@@ -578,7 +586,10 @@ fn draw_mtoon_editor(
         ui.checkbox(&mut draft.override_outline_mode, "outline_mode");
         ui.add_enabled(
             draft.override_outline_mode,
-            egui::Checkbox::new(&mut draft.outline_mode_world, "worldCoordinates (off = None)"),
+            egui::Checkbox::new(
+                &mut draft.outline_mode_world,
+                "worldCoordinates (off = None)",
+            ),
         );
     });
     ui.horizontal(|ui| {
@@ -595,7 +606,9 @@ fn draw_mtoon_editor(
     });
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_outline_color, "outline_color");
-        ui.add_enabled_ui(draft.override_outline_color, |ui| rgba_row(ui, &mut draft.outline_color));
+        ui.add_enabled_ui(draft.override_outline_color, |ui| {
+            rgba_row(ui, &mut draft.outline_color)
+        });
     });
     ui.horizontal(|ui| {
         ui.checkbox(

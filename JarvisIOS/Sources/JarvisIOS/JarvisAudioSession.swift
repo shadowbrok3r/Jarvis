@@ -28,7 +28,7 @@ enum JarvisAudioSession {
             try session.setCategory(
                 .playAndRecord,
                 mode: .default,
-                options: [.defaultToSpeaker, .allowBluetooth]
+                options: [.defaultToSpeaker, .allowBluetoothHFP]
             )
             try session.setActive(true, options: [])
             return .ok

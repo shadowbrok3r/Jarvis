@@ -121,7 +121,14 @@ fn apply_collider_shape(dst: &mut ColliderShape, src: &PresetColliderShapeV1) ->
             d.radius = *radius;
             true
         }
-        (ColliderShape::Capsule(d), PresetColliderShapeV1::Capsule { offset, tail, radius }) => {
+        (
+            ColliderShape::Capsule(d),
+            PresetColliderShapeV1::Capsule {
+                offset,
+                tail,
+                radius,
+            },
+        ) => {
             d.offset = *offset;
             d.tail = *tail;
             d.radius = *radius;
@@ -215,8 +222,7 @@ pub fn save_preset_file(path: &Path, preset: &SpringPresetFile) -> Result<(), St
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create_dir {}: {e}", parent.display()))?;
     }
-    let s = toml::to_string_pretty(preset)
-        .map_err(|e| format!("serialize preset: {e}"))?;
+    let s = toml::to_string_pretty(preset).map_err(|e| format!("serialize preset: {e}"))?;
     std::fs::write(path, s).map_err(|e| format!("write {}: {e}", path.display()))
 }
 

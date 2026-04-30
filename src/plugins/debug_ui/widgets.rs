@@ -32,16 +32,35 @@ pub fn vec3_row(
 }
 
 pub fn rgb_row(ui: &mut egui::Ui, v: &mut [f32; 3]) {
-    let mut srgb = [linear_to_srgb(v[0]), linear_to_srgb(v[1]), linear_to_srgb(v[2])];
+    let mut srgb = [
+        linear_to_srgb(v[0]),
+        linear_to_srgb(v[1]),
+        linear_to_srgb(v[2]),
+    ];
     if ui.color_edit_button_rgb(&mut srgb).changed() {
         v[0] = srgb_to_linear(srgb[0]);
         v[1] = srgb_to_linear(srgb[1]);
         v[2] = srgb_to_linear(srgb[2]);
     }
     ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(&mut v[0]).speed(0.005).range(0.0..=8.0).prefix("r "));
-        ui.add(egui::DragValue::new(&mut v[1]).speed(0.005).range(0.0..=8.0).prefix("g "));
-        ui.add(egui::DragValue::new(&mut v[2]).speed(0.005).range(0.0..=8.0).prefix("b "));
+        ui.add(
+            egui::DragValue::new(&mut v[0])
+                .speed(0.005)
+                .range(0.0..=8.0)
+                .prefix("r "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut v[1])
+                .speed(0.005)
+                .range(0.0..=8.0)
+                .prefix("g "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut v[2])
+                .speed(0.005)
+                .range(0.0..=8.0)
+                .prefix("b "),
+        );
     });
 }
 
@@ -52,20 +71,37 @@ pub fn rgba_row(ui: &mut egui::Ui, v: &mut [f32; 4]) {
         linear_to_srgb(v[2]),
         v[3].clamp(0.0, 1.0),
     ];
-    if ui
-        .color_edit_button_rgba_unmultiplied(&mut srgba)
-        .changed()
-    {
+    if ui.color_edit_button_rgba_unmultiplied(&mut srgba).changed() {
         v[0] = srgb_to_linear(srgba[0]);
         v[1] = srgb_to_linear(srgba[1]);
         v[2] = srgb_to_linear(srgba[2]);
         v[3] = srgba[3];
     }
     ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(&mut v[0]).speed(0.005).range(0.0..=8.0).prefix("r "));
-        ui.add(egui::DragValue::new(&mut v[1]).speed(0.005).range(0.0..=8.0).prefix("g "));
-        ui.add(egui::DragValue::new(&mut v[2]).speed(0.005).range(0.0..=8.0).prefix("b "));
-        ui.add(egui::DragValue::new(&mut v[3]).speed(0.005).range(0.0..=1.0).prefix("a "));
+        ui.add(
+            egui::DragValue::new(&mut v[0])
+                .speed(0.005)
+                .range(0.0..=8.0)
+                .prefix("r "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut v[1])
+                .speed(0.005)
+                .range(0.0..=8.0)
+                .prefix("g "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut v[2])
+                .speed(0.005)
+                .range(0.0..=8.0)
+                .prefix("b "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut v[3])
+                .speed(0.005)
+                .range(0.0..=1.0)
+                .prefix("a "),
+        );
     });
 }
 

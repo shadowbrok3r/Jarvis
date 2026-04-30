@@ -79,10 +79,7 @@ impl EmotionBinding {
         if let Some(ref name) = self.expression {
             let trimmed = name.trim();
             if !trimmed.is_empty() {
-                m.insert(
-                    trimmed.to_string(),
-                    self.expression_weight.clamp(0.0, 1.0),
-                );
+                m.insert(trimmed.to_string(), self.expression_weight.clamp(0.0, 1.0));
             }
         }
         m

@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::paths::expand_home;
-use jarvis_avatar::pose_library::{slugify, PoseLibrary};
+use jarvis_avatar::pose_library::{PoseLibrary, slugify};
 
 use super::anim_layers::{BlendMode, BoneMask, DriverKind, Layer, LayerStack};
 
@@ -70,10 +70,19 @@ impl LayerSetsStore {
         self.inner.write().sets.remove(name);
     }
 
-    pub fn load_into(&self, name: &str, stack: &mut LayerStack, library: &PoseLibrary) -> Result<usize, String> {
+    pub fn load_into(
+        &self,
+        name: &str,
+        stack: &mut LayerStack,
+        library: &PoseLibrary,
+    ) -> Result<usize, String> {
         let set = {
             let guard = self.inner.read();
-            guard.sets.get(name).cloned().ok_or_else(|| format!("set '{name}' not found"))?
+            guard
+                .sets
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("set '{name}' not found"))?
         };
         let rehydrated = set.hydrate_into_stack(stack, library);
         Ok(rehydrated)
@@ -100,7 +109,9 @@ impl LayerSetsStore {
         }
         let write_result = serde_json::to_string_pretty(&file)
             .map_err(|e| format!("serialize: {e}"))
-            .and_then(|s| fs::write(&path, s).map_err(|e| format!("write {}: {e}", path.display())));
+            .and_then(|s| {
+                fs::write(&path, s).map_err(|e| format!("write {}: {e}", path.display()))
+            });
         match write_result {
             Ok(()) => {
                 let mut g = self.inner.write();
@@ -172,7 +183,11 @@ impl LayerSet {
         Self {
             name: name.to_string(),
             master_enabled: stack.master_enabled,
-            layers: stack.layers.iter().map(LayerBlueprint::from_layer).collect(),
+            layers: stack
+                .layers
+                .iter()
+                .map(LayerBlueprint::from_layer)
+                .collect(),
         }
     }
 
@@ -218,8 +233,12 @@ pub struct LayerBlueprint {
     pub looping: bool,
 }
 
-fn one() -> f32 { 1.0 }
-fn yes() -> bool { true }
+fn one() -> f32 {
+    1.0
+}
+fn yes() -> bool {
+    true
+}
 
 impl LayerBlueprint {
     pub fn from_layer(layer: &Layer) -> Self {

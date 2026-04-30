@@ -300,12 +300,11 @@ fn seed_initial_states(mut status: ResMut<ServiceStatus>, settings: Res<Settings
 
 // ----- Hub-derived state -----------------------------------------------------
 
-fn apply_hub_state(
-    hub: Option<Res<HubState>>,
-    mut status: ResMut<ServiceStatus>,
-) {
+fn apply_hub_state(hub: Option<Res<HubState>>, mut status: ResMut<ServiceStatus>) {
     let Some(hub) = hub else { return };
-    if !hub.is_changed() && status.get(ServiceId::ChannelHub).map(|e| e.state) != Some(ServiceState::Connecting) {
+    if !hub.is_changed()
+        && status.get(ServiceId::ChannelHub).map(|e| e.state) != Some(ServiceState::Connecting)
+    {
         return;
     }
     let endpoint = hub.bound_to.clone().unwrap_or_default();
@@ -332,15 +331,32 @@ fn apply_hub_peer_names(
         if msg.envelope.message_type != "module:announce" {
             continue;
         }
-        let Some(name) = peer_name(&msg.envelope) else { continue };
+        let Some(name) = peer_name(&msg.envelope) else {
+            continue;
+        };
         let n = name.to_ascii_lowercase();
         let detail = format!("announced '{name}'");
         if n.contains("kimodo") {
-            status.set(ServiceId::KimodoPeer, ServiceState::Online, name.clone(), detail);
+            status.set(
+                ServiceId::KimodoPeer,
+                ServiceState::Online,
+                name.clone(),
+                detail,
+            );
         } else if n.contains("ironclaw") || n.contains("proxy") {
-            status.set(ServiceId::IronclawPeer, ServiceState::Online, name.clone(), detail);
+            status.set(
+                ServiceId::IronclawPeer,
+                ServiceState::Online,
+                name.clone(),
+                detail,
+            );
         } else if n.contains("ha-voice") || n.contains("voice-bridge") || n.contains("ha_voice") {
-            status.set(ServiceId::HaVoiceBridge, ServiceState::Online, name.clone(), detail);
+            status.set(
+                ServiceId::HaVoiceBridge,
+                ServiceState::Online,
+                name.clone(),
+                detail,
+            );
         }
     }
 }
@@ -375,7 +391,11 @@ fn apply_gateway_state(
     // "connected" status as Online, transient reconnect messages as
     // Connecting, and anything with an active last_error as Offline.
     let state = if let Some(err) = chat.last_error.as_deref() {
-        if chat.last_status.as_deref().is_some_and(|s| s.contains("open") || s.contains("connected")) {
+        if chat
+            .last_status
+            .as_deref()
+            .is_some_and(|s| s.contains("open") || s.contains("connected"))
+        {
             // SSE reconnected after a prior error.
             ServiceState::Online
         } else {
@@ -397,7 +417,12 @@ fn apply_gateway_state(
         (Some(s), _) => s.clone(),
         _ => String::new(),
     };
-    status.set(ServiceId::IronclawGateway, state, chat.base_url.clone(), detail);
+    status.set(
+        ServiceId::IronclawGateway,
+        state,
+        chat.base_url.clone(),
+        detail,
+    );
 }
 
 // ----- HTTP probes (A2F health, TTS, MCP, Gateway) ---------------------------
@@ -419,11 +444,7 @@ fn run_http_probes(
         return;
     }
     // Don't overlap probes; if the last one is still running, wait.
-    if timers
-        .in_flight
-        .as_ref()
-        .is_some_and(|h| !h.is_finished())
-    {
+    if timers.in_flight.as_ref().is_some_and(|h| !h.is_finished()) {
         return;
     }
     timers.last_probe = Some(now);
@@ -486,7 +507,9 @@ fn run_http_probes(
 }
 
 fn apply_probe_results(timers: Res<ProbeTimers>, mut status: ResMut<ServiceStatus>) {
-    let Some(rx) = timers.result_rx.as_ref() else { return };
+    let Some(rx) = timers.result_rx.as_ref() else {
+        return;
+    };
     while let Ok(batch) = rx.try_recv() {
         if let Some(u) = batch.a2f_health {
             status.set(ServiceId::A2fHealth, u.state, u.endpoint, u.detail);
@@ -638,12 +661,7 @@ async fn probe_grpc_tcp(endpoint: &str) -> ServiceUpdate {
             detail: "no a2f endpoint configured".into(),
         };
     }
-    match tokio::time::timeout(
-        Duration::from_secs(2),
-        tokio::net::TcpStream::connect(addr),
-    )
-    .await
-    {
+    match tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr)).await {
         Ok(Ok(_)) => ServiceUpdate {
             state: ServiceState::Online,
             endpoint: endpoint.to_string(),

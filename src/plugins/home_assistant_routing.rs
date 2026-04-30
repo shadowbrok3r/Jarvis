@@ -41,7 +41,9 @@ pub fn resolve_active_area(routing: &PresenceRouting, now_ms: u128) -> String {
     }
 
     let slug = routing.ha_room_slug.trim();
-    if !slug.is_empty() && now_ms.saturating_sub(routing.ha_room_updated_at_ms) <= HA_ROOM_AUTHORITY_TTL_MS {
+    if !slug.is_empty()
+        && now_ms.saturating_sub(routing.ha_room_updated_at_ms) <= HA_ROOM_AUTHORITY_TTL_MS
+    {
         return slug.to_string();
     }
 
@@ -131,7 +133,11 @@ pub fn active_camera<'a>(
     let active = resolve_active_area(routing, now);
     let def = settings.default_area.trim();
 
-    let area_key = if active.is_empty() { def } else { active.as_str() };
+    let area_key = if active.is_empty() {
+        def
+    } else {
+        active.as_str()
+    };
     if area_key.is_empty() {
         return enabled_cameras(snapshot, settings).into_iter().next();
     }
@@ -151,7 +157,11 @@ pub fn active_mic<'a>(
     let now = now_ms();
     let active = resolve_active_area(routing, now);
     let def = settings.default_area.trim();
-    let area_key = if active.is_empty() { def } else { active.as_str() };
+    let area_key = if active.is_empty() {
+        def
+    } else {
+        active.as_str()
+    };
     if area_key.is_empty() {
         return enabled_mics(snapshot, settings).into_iter().next();
     }
@@ -170,7 +180,11 @@ pub fn active_speaker<'a>(
     let now = now_ms();
     let active = resolve_active_area(routing, now);
     let def = settings.default_area.trim();
-    let area_key = if active.is_empty() { def } else { active.as_str() };
+    let area_key = if active.is_empty() {
+        def
+    } else {
+        active.as_str()
+    };
     if area_key.is_empty() {
         return enabled_speakers(snapshot, settings).into_iter().next();
     }

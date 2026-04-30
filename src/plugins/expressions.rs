@@ -23,11 +23,12 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use bevy_vrm1::prelude::{SetExpressions, Vrm, VrmExpression};
 
-use jarvis_avatar::act::{emotion_from_act_json, emotion_labels, Emotion};
+use jarvis_avatar::act::{Emotion, emotion_from_act_json, emotion_labels};
 use jarvis_avatar::emotions::EmotionBinding;
 use jarvis_avatar::pose_library::AnimationFile;
 
 use super::channel_server::ChatCompleteMessage;
+use super::chat_pipeline_status::{ChatPipelineStage, ChatPipelineStatus};
 use super::emotion_map::EmotionMapRes;
 use super::native_anim_player::ActiveNativeAnimation;
 use super::pose_library_assets::PoseLibraryAssets;
@@ -36,8 +37,10 @@ pub struct ExpressionsPlugin;
 
 impl Plugin for ExpressionsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ExpressionState>()
-            .add_systems(Update, (apply_chat_expressions, decay_expression_to_neutral));
+        app.init_resource::<ExpressionState>().add_systems(
+            Update,
+            (apply_chat_expressions, decay_expression_to_neutral),
+        );
     }
 }
 
@@ -64,12 +67,18 @@ fn apply_chat_expressions(
     emotion_map: Option<Res<EmotionMapRes>>,
     pose_lib: Option<Res<PoseLibraryAssets>>,
     mut active_anim: Option<ResMut<ActiveNativeAnimation>>,
+    mut pipeline: ResMut<ChatPipelineStatus>,
 ) {
     for msg in chat.read() {
         let labels = emotion_labels(&msg.content);
         let Some(label) = labels.into_iter().next() else {
             continue;
         };
+
+        pipeline.set(
+            ChatPipelineStage::ApplyingActToVrm,
+            format!("emotion `{label}`"),
+        );
 
         // Resolve emotion → binding (either the user's EmotionMap entry
         // or a synthesised one derived from the legacy `Emotion` enum).
@@ -90,10 +99,8 @@ fn apply_chat_expressions(
                     state.default_hold
                 };
                 state.active_until = Some(Instant::now() + hold);
-                let preview: Vec<String> = pairs
-                    .iter()
-                    .map(|(k, w)| format!("{k}@{w:.2}"))
-                    .collect();
+                let preview: Vec<String> =
+                    pairs.iter().map(|(k, w)| format!("{k}@{w:.2}")).collect();
                 info!(
                     "emotion '{label}' → VRM expressions [{}] for {:.1}s",
                     preview.join(", "),
@@ -128,10 +135,7 @@ fn apply_chat_expressions(
 }
 
 fn animation_playback_params(anim: &AnimationFile, binding: &EmotionBinding) -> (bool, f32) {
-    let looping = binding
-        .looping
-        .or(anim.looping)
-        .unwrap_or(false);
+    let looping = binding.looping.or(anim.looping).unwrap_or(false);
     let hold = anim.hold_duration.unwrap_or(0.5);
     (looping, hold)
 }

@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use bevy::prelude::*;
-use rand::seq::IndexedRandom;
 use rand::RngExt;
+use rand::seq::IndexedRandom;
 
 use jarvis_avatar::config::Settings;
 

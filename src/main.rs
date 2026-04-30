@@ -6,9 +6,9 @@ mod plugins;
 
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowResolution};
-use jarvis_avatar::config::parse_present_mode;
 use bevy_vrm1::prelude::*;
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::config::parse_present_mode;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -110,9 +110,7 @@ fn configure_primary_window(
         return;
     };
     window.title = "jarvis-avatar".into();
-    window.resolution = WindowResolution::new(
-        settings.avatar.window_width,
-        settings.avatar.window_height,
-    );
+    window.resolution =
+        WindowResolution::new(settings.avatar.window_width, settings.avatar.window_height);
     window.present_mode = parse_present_mode(&settings.graphics.present_mode);
 }

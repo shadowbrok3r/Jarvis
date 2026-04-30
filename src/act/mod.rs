@@ -4,7 +4,8 @@ pub mod parser;
 pub mod types;
 
 pub use parser::{
-    emotion_from_act_json, emotion_label_from_act_json, emotion_labels, parse_act_tokens,
-    strip_act_delay, strip_act_delay_for_tts, EitherToken,
+    EitherToken, emotion_from_act_json, emotion_label_from_act_json, emotion_labels,
+    parse_act_tokens, should_skip_tts_for_error_like_response, strip_act_delay,
+    strip_act_delay_for_tts,
 };
 pub use types::{ActToken, DelayToken, Emotion};

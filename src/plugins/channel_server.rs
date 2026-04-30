@@ -40,14 +40,14 @@ use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use bevy::prelude::*;
-use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
-use serde_json::{json, Value};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::runtime::Builder;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
-use jarvis_avatar::act::strip_act_delay_for_tts;
+use jarvis_avatar::act::{should_skip_tts_for_error_like_response, strip_act_delay_for_tts};
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::ironclaw::protocol::EnvelopeBody;
 
@@ -58,6 +58,7 @@ pub struct ChannelHubPlugin;
 impl Plugin for ChannelHubPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HubState>()
+            .init_resource::<super::chat_pipeline_status::ChatPipelineStatus>()
             .add_message::<ChatCompleteMessage>()
             .add_message::<LookAtRequestMessage>()
             .add_message::<TtsSpeakMessage>()
@@ -198,9 +199,9 @@ fn spawn_hub_thread(
     let (tx_in, rx_in) = unbounded::<Inbound>();
     let (tx_bcast, _rx_bcast) = tokio::sync::broadcast::channel::<EnvelopeBody>(256);
 
-    let jarvis_ios = std::sync::Arc::new(super::jarvis_ios_hub::JarvisIosHubProfile::from_settings(
-        &*settings,
-    ));
+    let jarvis_ios = std::sync::Arc::new(
+        super::jarvis_ios_hub::JarvisIosHubProfile::from_settings(&*settings),
+    );
 
     commands.insert_resource(HubBroadcast {
         tx: tx_out,
@@ -317,7 +318,10 @@ async fn run_hub(
         .route("/broadcast", post(broadcast_handler))
         .route("/health", get(health_handler))
         .route("/jarvis-ios/v1/manifest", get(jarvis_ios_manifest_handler))
-        .route("/jarvis-ios/v1/asset/{*path}", get(jarvis_ios_asset_handler))
+        .route(
+            "/jarvis-ios/v1/asset/{*path}",
+            get(jarvis_ios_asset_handler),
+        )
         .route(
             "/jarvis-ios/v1/config/spring-presets/{name}",
             get(jarvis_ios_spring_preset_handler),
@@ -338,7 +342,9 @@ async fn run_hub(
             return;
         }
     };
-    info!("channel-hub listening on {bind} (ws /ws · http /broadcast · /health · /jarvis-ios/v1/…)");
+    info!(
+        "channel-hub listening on {bind} (ws /ws · http /broadcast · /health · /jarvis-ios/v1/…)"
+    );
     if let Err(e) = axum::serve(listener, app).await {
         error!("axum serve exited: {e}");
     }
@@ -364,7 +370,9 @@ async fn jarvis_ios_manifest_handler(
     State(shared): State<HubShared>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
     if !super::jarvis_ios_hub::http_authorized(&shared.auth_token, auth) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -376,7 +384,9 @@ async fn jarvis_ios_asset_handler(
     Path(rel): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
     if !super::jarvis_ios_hub::http_authorized(&shared.auth_token, auth) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -404,7 +414,9 @@ async fn jarvis_ios_spring_preset_handler(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
     if !super::jarvis_ios_hub::http_authorized(&shared.auth_token, auth) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -605,7 +617,11 @@ async fn handle_peer_text(shared: &HubShared, peer_id: Uuid, text: &str) {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            let identity = envelope.data.get("identity").cloned().unwrap_or(Value::Null);
+            let identity = envelope
+                .data
+                .get("identity")
+                .cloned()
+                .unwrap_or(Value::Null);
 
             {
                 let peers = shared.peers.read().await;
@@ -666,7 +682,11 @@ async fn handle_peer_text(shared: &HubShared, peer_id: Uuid, text: &str) {
             // Require auth to publish anything else when a token is configured.
             if !shared.auth_token.is_empty() {
                 let peers = shared.peers.read().await;
-                if !peers.get(&peer_id).map(|p| p.authenticated).unwrap_or(false) {
+                if !peers
+                    .get(&peer_id)
+                    .map(|p| p.authenticated)
+                    .unwrap_or(false)
+                {
                     return;
                 }
             }
@@ -731,6 +751,7 @@ fn pump_hub_into_bevy(
     mut tts: MessageWriter<TtsSpeakMessage>,
     mut input_text: MessageWriter<HubInputTextMessage>,
     mut raw: MessageWriter<WsIncomingMessage>,
+    mut pipeline: ResMut<super::chat_pipeline_status::ChatPipelineStatus>,
 ) {
     let Some(inbound) = inbound else {
         return;
@@ -743,9 +764,19 @@ fn pump_hub_into_bevy(
                     "output:gen-ai:chat:complete" => {
                         if let Some(content) = extract_chat_content(&body.data) {
                             let speak = strip_act_delay_for_tts(&content).to_string();
+                            let skip_tts = should_skip_tts_for_error_like_response(&speak);
                             chat.write(ChatCompleteMessage { content });
-                            if !speak.is_empty() {
+                            if !speak.trim().is_empty() && !skip_tts {
+                                pipeline.set(
+                                    super::chat_pipeline_status::ChatPipelineStage::KokoroQueued,
+                                    format!("hub TTS {} chars", speak.len()),
+                                );
                                 tts.write(TtsSpeakMessage { text: speak });
+                            } else if skip_tts {
+                                pipeline.set(
+                                    super::chat_pipeline_status::ChatPipelineStage::Idle,
+                                    "hub chat complete (error-like; TTS skipped)",
+                                );
                             }
                         }
                     }

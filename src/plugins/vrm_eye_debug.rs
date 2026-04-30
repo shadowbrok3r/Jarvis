@@ -86,11 +86,7 @@ fn calc_yaw_pitch(look_at_space: &GlobalTransform, target: Vec3) -> (f32, f32) {
 }
 
 fn safe_div(n: f32, d: f32) -> f32 {
-    if d.abs() < 1.0e-6 {
-        0.0
-    } else {
-        n / d
-    }
+    if d.abs() < 1.0e-6 { 0.0 } else { n / d }
 }
 
 fn map_yaw_left_eye(p: &LookAtProperties, yaw_deg: f32) -> f32 {
@@ -116,39 +112,33 @@ fn map_yaw_right_eye(p: &LookAtProperties, yaw_deg: f32) -> f32 {
 fn map_pitch_eye(p: &LookAtProperties, pitch_deg: f32) -> f32 {
     if pitch_deg > 0.0 {
         let d = p.range_map_vertical_down;
-        pitch_deg
-            .min(d.input_max_value)
-            * safe_div(d.output_scale, d.input_max_value)
+        pitch_deg.min(d.input_max_value) * safe_div(d.output_scale, d.input_max_value)
     } else {
         let u = p.range_map_vertical_up;
-        -(pitch_deg
-            .abs()
-            .min(u.input_max_value)
-            * safe_div(u.output_scale, u.input_max_value))
+        -(pitch_deg.abs().min(u.input_max_value) * safe_div(u.output_scale, u.input_max_value))
     }
 }
 
 /// `EulerRot::YXZ` → (Y, X, Z) in degrees, stored as `Vec3(y, x, z)`.
 fn quat_euler_yxz_yxz_deg(q: Quat) -> Vec3 {
     let (y, x, z) = q.to_euler(EulerRot::YXZ);
-    Vec3::new(
-        y.to_degrees(),
-        x.to_degrees(),
-        z.to_degrees(),
-    )
+    Vec3::new(y.to_degrees(), x.to_degrees(), z.to_degrees())
 }
 
 /// Run **after** look-at and expressions and their transform propagations so the bone `Transform` matches
 /// what the shader / next frame will use. See VRM `vrm::VrmPlugin` schedule in `bevy_vrm1`.
 pub fn update_vrm_eye_lookat_debug(
     mut res: ResMut<VrmEyeLookatDebug>,
-    vrm: Query<(
-        &LookAt,
-        &LookAtProperties,
-        &HeadBoneEntity,
-        &LeftEyeBoneEntity,
-        &RightEyeBoneEntity,
-    ), With<Vrm>>,
+    vrm: Query<
+        (
+            &LookAt,
+            &LookAtProperties,
+            &HeadBoneEntity,
+            &LeftEyeBoneEntity,
+            &RightEyeBoneEntity,
+        ),
+        With<Vrm>,
+    >,
     gtf: Query<&GlobalTransform>,
     tf: Query<&Transform>,
 ) {

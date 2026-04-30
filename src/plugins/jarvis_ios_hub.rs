@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use jarvis_avatar::config::{AvatarSettings, CameraSettings, Settings};
 
@@ -195,7 +195,10 @@ pub fn is_safe_assets_rel(rel: &str) -> bool {
         return false;
     }
     for c in Path::new(rel).components() {
-        if matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir) {
+        if matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        ) {
             return false;
         }
     }
@@ -237,7 +240,10 @@ fn collect_json_assets_under(dir: &Path, assets_root: &Path, max_files: usize) -
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("json")) {
+            } else if p
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+            {
                 if let Ok(rel) = p.strip_prefix(assets_root) {
                     let rel_s = rel.to_string_lossy().replace('\\', "/");
                     if is_safe_assets_rel(&rel_s) {
@@ -269,7 +275,13 @@ pub fn resolve_spring_preset_file(name: &str) -> Option<PathBuf> {
 }
 
 pub fn content_type_for_path(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "vrm" | "glb" => "application/octet-stream",
         "gltf" | "json" => "application/json",
         "vrma" => "application/octet-stream",

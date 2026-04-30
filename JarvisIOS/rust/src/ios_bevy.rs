@@ -696,7 +696,24 @@ impl IosEmbeddedRenderer {
         }
         let path = drained.into_iter().last().unwrap();
         let world = self.app.world_mut();
-        let clip = crate::ios_anim_json::try_build_clip(&path, world);
+        let old_stopped = world
+            .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
+            .supersede_stopped_idle_snapshot();
+        let mut clip = crate::ios_anim_json::try_build_clip(&path, world);
+        if !old_stopped.is_empty() {
+            crate::ios_anim_json::resume_idle_vrmas_on_world(world, &old_stopped);
+            world.flush();
+        }
+        if let Some(ref mut c) = clip {
+            if let Some(root) = world.resource::<IosAvatarRootEntity>().0 {
+                let settings = world.resource::<IosAvatarSettings>().clone();
+                c.stopped_idle_vrma =
+                    crate::ios_anim_json::pause_matching_idle_vrma(world, root, &settings);
+                if !c.stopped_idle_vrma.is_empty() {
+                    world.flush();
+                }
+            }
+        }
         world
             .resource_mut::<crate::ios_anim_json::IosJsonAnimPlayback>()
             .replace_with_clip(clip);

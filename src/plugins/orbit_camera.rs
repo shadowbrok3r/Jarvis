@@ -27,7 +27,7 @@ use bevy_egui::EguiContexts;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
 use bevy_vrm1::prelude::Vrm;
 
-use jarvis_avatar::config::{msaa_from_settings, Settings};
+use jarvis_avatar::config::{Settings, msaa_from_settings};
 
 use crate::plugins::rig_editor::RigEditorState;
 

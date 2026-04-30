@@ -10,7 +10,7 @@ use bevy::window::PrimaryWindow;
 use bevy_panorbit_camera::PanOrbitCamera;
 use bevy_vrm1::prelude::Vrm;
 
-use jarvis_avatar::config::{msaa_from_settings, parse_present_mode, Settings};
+use jarvis_avatar::config::{Settings, msaa_from_settings, parse_present_mode};
 
 use super::DebugUiState;
 use crate::plugins::environment::{GroundPlane, SunLight};
@@ -65,10 +65,7 @@ pub fn apply_avatar_transform(
 
 /// Pushes `Settings::graphics.msaa_samples` onto every [`Camera3d`]'s [`Msaa`]
 /// component so MSAA changes apply without restarting the app.
-pub fn sync_camera_msaa(
-    settings: Res<Settings>,
-    mut msaa_q: Query<&mut Msaa, With<Camera3d>>,
-) {
+pub fn sync_camera_msaa(settings: Res<Settings>, mut msaa_q: Query<&mut Msaa, With<Camera3d>>) {
     if !settings.is_changed() {
         return;
     }

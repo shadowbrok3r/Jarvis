@@ -1,6 +1,6 @@
 //! `module:authenticate` / `module:announce` payloads (serialize into `EnvelopeBody`).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Build `data` object for `module:authenticate`.
 #[must_use]

@@ -1,7 +1,7 @@
 //! Global ambient + directional light and optional ground plane.
 
-use bevy::prelude::*;
 use bevy::light::GlobalAmbientLight;
+use bevy::prelude::*;
 
 use jarvis_avatar::config::Settings;
 

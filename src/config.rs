@@ -336,6 +336,15 @@ pub struct A2fSettings {
     pub endpoint: String,
     /// HTTP health probe, e.g. `http://localhost:8000/v1/health/ready`.
     pub health_url: String,
+    /// Must match the Audio2Face NIM / service **`--function-id`** (avatar model).
+    /// Example (Claire): `0961a6da-fb9e-4f2e-8491-247e5fd7bf8d`. Not sent on the gRPC wire;
+    /// documented here so config, MCP `a2f_status`, and the running container stay aligned.
+    #[serde(default)]
+    pub function_id: String,
+    /// After Kokoro returns playable audio, run `ProcessAudioStream` and drive
+    /// [`PoseCommand::AnimateExpressions`] lip-sync on the VRM (same mapping as MCP tests).
+    #[serde(default = "default_true")]
+    pub apply_from_tts: bool,
 }
 
 /// Kimodo motion-generation timeouts / defaults. The service itself runs as a
@@ -420,10 +429,31 @@ pub struct TtsSettings {
     pub voice: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Kokoro `response_format`: `wav`, `pcm`, `mp3`, `opus`, `flac`, … (`pcm` = raw s16le mono for A2F).
+    #[serde(default = "default_tts_response_format")]
+    pub response_format: String,
+    /// Kokoro `stream`. **`false`** avoids chunked WAV/PCM that breaks `hound` / A2F one-shot decode.
+    #[serde(default = "default_tts_stream")]
+    pub stream: bool,
+    /// Sample rate when `response_format` is `pcm` (Kokoro default **24000**).
+    #[serde(default = "default_kokoro_pcm_sample_rate")]
+    pub pcm_sample_rate: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_tts_response_format() -> String {
+    "wav".to_string()
+}
+
+fn default_tts_stream() -> bool {
+    false
+}
+
+fn default_kokoro_pcm_sample_rate() -> u32 {
+    24_000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -264,10 +264,21 @@ pub fn emotion_labels(input: &str) -> Vec<String> {
 pub fn strip_act_delay_for_tts(input: &str) -> Cow<'_, str> {
     let cleaned = strip_act_delay(input);
     // Match AIRI-ish markdown stripping for TTS: `*emphasis*`.
-    static STAR_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"\*[^*\n]+\*").expect("star regex"));
+    static STAR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*[^*\n]+\*").expect("star regex"));
     let out = STAR_RE.replace_all(&cleaned, "").trim().to_string();
     Cow::Owned(out)
+}
+
+/// Heuristic: gateway/provider failure text that must not be sent to Kokoro (avoids huge bogus WAV/PCM).
+/// Same rules as desktop `ironclaw_chat` — keep hub + gateway paths aligned.
+pub fn should_skip_tts_for_error_like_response(text: &str) -> bool {
+    let head: String = text.trim().chars().take(80).collect();
+    let lowered = head.to_ascii_lowercase();
+    lowered.starts_with("error:")
+        || lowered.starts_with("error -")
+        || lowered.starts_with("gateway error")
+        || lowered.contains("llm error")
+        || (lowered.starts_with("provider ") && lowered.contains(" error"))
 }
 
 /// Strip ACT + DELAY tokens (both syntaxes), leaving markdown intact. Use
@@ -280,7 +291,10 @@ pub fn strip_act_delay(input: &str) -> Cow<'_, str> {
     // Collapse the double-spaces the removal leaves behind (e.g.
     // `Hello  world` after `Hello <ACT> world`). Keeps single newlines.
     static MULTI_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[ \t]{2,}").expect("space re"));
-    let tidy = MULTI_SPACE.replace_all(&without_all, " ").trim().to_string();
+    let tidy = MULTI_SPACE
+        .replace_all(&without_all, " ")
+        .trim()
+        .to_string();
     Cow::Owned(tidy)
 }
 
@@ -293,17 +307,16 @@ pub fn strip_act_delay(input: &str) -> Cow<'_, str> {
 fn attrs_to_json(attrs: &str) -> String {
     let mut out = serde_json::Map::new();
     for caps in ATTR_PAIR_RE.captures_iter(attrs) {
-        let Some(key) = caps.name("key") else { continue };
+        let Some(key) = caps.name("key") else {
+            continue;
+        };
         let val = caps
             .name("qd")
             .or_else(|| caps.name("qs"))
             .or_else(|| caps.name("bare"))
             .map(|m| m.as_str().to_string())
             .unwrap_or_default();
-        out.insert(
-            key.as_str().to_string(),
-            serde_json::Value::String(val),
-        );
+        out.insert(key.as_str().to_string(), serde_json::Value::String(val));
     }
     serde_json::Value::Object(out).to_string()
 }
@@ -313,6 +326,14 @@ fn attrs_to_json(attrs: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skips_tts_for_provider_error_like_strings() {
+        assert!(should_skip_tts_for_error_like_response(
+            "Error: LLM error: Provider timeout"
+        ));
+        assert!(!should_skip_tts_for_error_like_response("Hello world"));
+    }
 
     #[test]
     fn strips_pipe_act_and_delay() {

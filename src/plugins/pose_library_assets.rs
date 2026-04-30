@@ -104,14 +104,22 @@ fn refresh_pose_library(assets: Option<Res<PoseLibraryAssets>>) {
 
     match assets.library.load_all_poses() {
         Ok(mut p) => {
-            p.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+            p.sort_by(|a, b| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            });
             *assets.poses.write() = p;
         }
         Err(e) => assets.set_error(format!("load_all_poses: {e}")),
     }
     match assets.library.list_animations() {
         Ok(mut a) => {
-            a.sort_by(|x, y| x.name.to_ascii_lowercase().cmp(&y.name.to_ascii_lowercase()));
+            a.sort_by(|x, y| {
+                x.name
+                    .to_ascii_lowercase()
+                    .cmp(&y.name.to_ascii_lowercase())
+            });
             *assets.animations.write() = a;
         }
         Err(e) => assets.set_error(format!("list_animations: {e}")),

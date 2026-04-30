@@ -23,10 +23,10 @@
 //! system never race.
 
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::config::Settings;
-use jarvis_avatar::pose_library::{slugify, AnimationFile};
+use jarvis_avatar::pose_library::{AnimationFile, slugify};
 
 use crate::plugins::anim_layer_sets::LayerSetsStore;
 use crate::plugins::anim_layers::{
@@ -125,12 +125,7 @@ pub fn draw_anim_layers_window(
                 ui.separator();
                 layer_list(ui, &mut state.anim_layers, stack, &available_bones);
                 ui.separator();
-                add_layer_bar(
-                    ui,
-                    &mut state.anim_layers,
-                    stack,
-                    library.as_deref(),
-                );
+                add_layer_bar(ui, &mut state.anim_layers, stack, library.as_deref());
                 if let Some(msg) = &state.anim_layers.status {
                     ui.add_space(4.0);
                     ui.colored_label(egui::Color32::from_rgb(160, 200, 160), msg);
@@ -313,7 +308,11 @@ fn layer_sets_bar(
                 .unwrap_or_else(|| "persisted".into());
             ui_state.status = Some(msg);
         }
-        if ui.button("⟳ Reload").on_hover_text("Drop in-memory sets and re-read from disk").clicked() {
+        if ui
+            .button("⟳ Reload")
+            .on_hover_text("Drop in-memory sets and re-read from disk")
+            .clicked()
+        {
             store.reload();
             ui_state.status = Some("reloaded from disk".into());
         }
@@ -382,7 +381,12 @@ fn layer_row(
     let mut action: Option<LayerAction> = None;
     let header_color = kind_color(layer.driver.kind_label());
     let frame_color = if layer.enabled {
-        egui::Color32::from_rgba_unmultiplied(header_color.r(), header_color.g(), header_color.b(), 28)
+        egui::Color32::from_rgba_unmultiplied(
+            header_color.r(),
+            header_color.g(),
+            header_color.b(),
+            28,
+        )
     } else {
         egui::Color32::from_gray(30)
     };
@@ -650,7 +654,9 @@ fn bone_mask_editor(
                     egui::Color32::from_rgb(220, 170, 120)
                 };
                 let chip = egui::Button::new(
-                    egui::RichText::new(format!("{bone}  ×")).small().color(color),
+                    egui::RichText::new(format!("{bone}  ×"))
+                        .small()
+                        .color(color),
                 );
                 if ui
                     .add(chip)
@@ -670,8 +676,10 @@ fn bone_mask_editor(
         }
 
         // Add-combo: only offers bones not already selected.
-        let remaining: Vec<&String> =
-            all_bones.iter().filter(|b| !selection.contains(*b)).collect();
+        let remaining: Vec<&String> = all_bones
+            .iter()
+            .filter(|b| !selection.contains(*b))
+            .collect();
         egui::ComboBox::from_id_salt(id.with("add_combo"))
             .selected_text("+ bone…")
             .width(170.0)
@@ -717,8 +725,12 @@ fn split_csv(s: &str) -> Vec<String> {
         .collect()
 }
 
-fn slider<Num>(ui: &mut egui::Ui, label: &str, value: &mut Num, range: std::ops::RangeInclusive<Num>)
-where
+fn slider<Num>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Num,
+    range: std::ops::RangeInclusive<Num>,
+) where
     Num: egui::emath::Numeric,
 {
     ui.horizontal(|ui| {
@@ -798,9 +810,7 @@ fn add_layer_bar(
         ui.separator();
         if ui
             .button("Install defaults")
-            .on_hover_text(
-                "Add the default procedural stack.",
-            )
+            .on_hover_text("Add the default procedural stack.")
             .clicked()
         {
             stack.install_default_procedural_layers();
@@ -819,20 +829,16 @@ fn try_build_layer(
     library: Option<&PoseLibraryAssets>,
 ) -> Result<Layer, String> {
     let layer = match ui_state.add_kind {
-        AddDriverChoice::Breathing => Layer::new(
-            "breathing",
-            "Breathing",
-            DriverKind::breathing_default(),
-        )
-        .blend(BlendMode::RestRelative)
-        .weight(1.0),
-        AddDriverChoice::AutoBlink => Layer::new(
-            "auto-blink",
-            "Auto-Blink",
-            DriverKind::blink_default(),
-        )
-        .blend(BlendMode::Override)
-        .weight(1.0),
+        AddDriverChoice::Breathing => {
+            Layer::new("breathing", "Breathing", DriverKind::breathing_default())
+                .blend(BlendMode::RestRelative)
+                .weight(1.0)
+        }
+        AddDriverChoice::AutoBlink => {
+            Layer::new("auto-blink", "Auto-Blink", DriverKind::blink_default())
+                .blend(BlendMode::Override)
+                .weight(1.0)
+        }
         AddDriverChoice::WeightShift => Layer::new(
             "weight-shift",
             "Weight Shift",
@@ -847,13 +853,11 @@ fn try_build_layer(
         )
         .blend(BlendMode::RestRelative)
         .weight(0.6),
-        AddDriverChoice::ToeFidget => Layer::new(
-            "toe-fidget",
-            "Toe Fidget",
-            DriverKind::toe_fidget_default(),
-        )
-        .blend(BlendMode::RestRelative)
-        .weight(0.4),
+        AddDriverChoice::ToeFidget => {
+            Layer::new("toe-fidget", "Toe Fidget", DriverKind::toe_fidget_default())
+                .blend(BlendMode::RestRelative)
+                .weight(0.4)
+        }
         AddDriverChoice::ClipFromLibrary => {
             let library = library.ok_or("pose library not ready")?;
             if ui_state.picked_clip.is_empty() {
@@ -864,9 +868,15 @@ fn try_build_layer(
                 .load_animation(&ui_state.picked_clip)
                 .map_err(|e| format!("load_animation({}): {e}", ui_state.picked_clip))?;
             let name = animation.name.clone();
-            Layer::new(name.clone(), name, DriverKind::Clip { animation: Box::new(animation) })
-                .blend(BlendMode::Override)
-                .weight(1.0)
+            Layer::new(
+                name.clone(),
+                name,
+                DriverKind::Clip {
+                    animation: Box::new(animation),
+                },
+            )
+            .blend(BlendMode::Override)
+            .weight(1.0)
         }
         AddDriverChoice::PoseFromLibrary => {
             let library = library.ok_or("pose library not ready")?;

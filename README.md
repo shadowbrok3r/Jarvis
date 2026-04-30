@@ -105,6 +105,14 @@ See **`JarvisIOS/README.md`** (`Desktop hub: profile sync over HTTP`) for asset 
 protocol it speaks is the same one jarvis-avatar now hosts. Set
 `IRONCLAW_TOKEN` on both sides if you want auth.
 
+## Gateway chat images
+
+The desktop chat window decodes **markdown / data-URL images** and **`image_generated`** gateway SSE events into inline thumbnails. JarvisIOS parses the same SSE shape and strips embedded data URLs from assistant text.
+
+ComfyUI from coding agents is handled outside this repo (e.g. [comfyui-mcp](https://github.com/artokun/comfyui-mcp) over SSH stdio to the GPU host). See `examples/cursor-mcp-comfyui.json` for a Cursor MCP snippet (uses `shadowbroker@100.102.254.81` — change user/IP to match your Tailscale node and ensure that machine’s SSH key is in `authorized_keys` on the Comfy host). Alternatively use an `~/.ssh/config` `Host` alias and put that host name in `args` instead of the raw address.
+
+**ComfyUI Sentinel:** apply `patches/comfyui-mcp-sentinel-auth.patch` in a clone of artokun/comfyui-mcp (`git apply …`), or use the pre-built tree under `vendor/comfyui-mcp` after `npm install && npm run build`. Then set `COMFYUI_USERNAME` / `COMFYUI_PASSWORD` and/or `COMFYUI_TOKEN` in the MCP `env` (Ironclaw/Cursor) so HTTP and WebSocket calls carry a JWT.
+
 ## Debug UI
 
 **View → Services (all)** (or the individual hub / gateway / TTS / MCP windows)

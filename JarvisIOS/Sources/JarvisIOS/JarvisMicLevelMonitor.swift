@@ -123,7 +123,7 @@ final class JarvisMicLevelMonitor {
         }
     }
 
-    private static func rmsMono(from buffer: AVAudioPCMBuffer) -> Float {
+    nonisolated private static func rmsMono(from buffer: AVAudioPCMBuffer) -> Float {
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return 0 }
         let chCount = Int(buffer.format.channelCount)
@@ -143,7 +143,7 @@ final class JarvisMicLevelMonitor {
     }
 
     /// Maps RMS to 0…1 for `ProgressView` (roughly −55 dBFS → 0, 0 dBFS → 1).
-    private static func normalizeRmsToUnitInterval(_ rms: Float) -> Double {
+    nonisolated private static func normalizeRmsToUnitInterval(_ rms: Float) -> Double {
         let floor: Float = 1e-5
         let clamped = max(rms, floor)
         let db = 20 * log10(clamped)

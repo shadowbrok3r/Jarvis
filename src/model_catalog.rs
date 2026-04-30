@@ -58,7 +58,11 @@ pub fn list_vrm_models(filter: Option<&str>) -> Result<Vec<ModelEntry>, String> 
             })
         })
         .collect();
-    out.sort_by(|a, b| a.basename.to_ascii_lowercase().cmp(&b.basename.to_ascii_lowercase()));
+    out.sort_by(|a, b| {
+        a.basename
+            .to_ascii_lowercase()
+            .cmp(&b.basename.to_ascii_lowercase())
+    });
     Ok(out)
 }
 
@@ -69,12 +73,9 @@ fn canonical_under(parent: &Path, child: &Path) -> Result<PathBuf, String> {
             parent.display()
         )
     })?;
-    let cc = child.canonicalize().map_err(|e| {
-        format!(
-            "canonicalize {}: {e}",
-            child.display()
-        )
-    })?;
+    let cc = child
+        .canonicalize()
+        .map_err(|e| format!("canonicalize {}: {e}", child.display()))?;
     if !cc.starts_with(&pc) {
         return Err(format!(
             "path escapes allowed directory: {} not under {}",

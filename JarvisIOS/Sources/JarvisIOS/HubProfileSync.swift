@@ -16,6 +16,12 @@ enum HubProfileSync {
         static let userDefaultsAuthTokenKey = "jarvis.gateway.authToken"
     }
 
+    /// Kokoro FastAPI (same `/v1/audio/speech` contract as desktop `kokoro_http`).
+    enum Kokoro {
+        static let userDefaultsBaseURLKey = "jarvis.kokoro.baseURL"
+        static let userDefaultsVoiceKey = "jarvis.kokoro.voice"
+    }
+
     /// Local-only overrides (relative to `JARVIS_ASSET_ROOT`); applied via `setenv` before Bevy boot / profile reload.
     enum IosAvatarCustomize {
         static let userDefaultsModelRelPathOverrideKey = "jarvis.ios.overrideModelRelPath"

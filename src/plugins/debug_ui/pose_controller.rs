@@ -20,7 +20,7 @@ use std::time::Duration;
 use bevy::animation::RepeatAnimation;
 use bevy::prelude::*;
 use bevy_egui::egui::{Layout, TopBottomPanel};
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 use bevy_vrm1::prelude::*;
 
 use jarvis_avatar::config::Settings;
@@ -29,8 +29,8 @@ use jarvis_avatar::pose_library::{AnimationMeta, PoseFile};
 use crate::kimodo::{GenerateRequest, KimodoClient};
 use crate::plugins::native_anim_player::{ActiveNativeAnimation, StreamingAnimation};
 use crate::plugins::pose_driver::{
-    def_toe_big_yaw_slider_extra_deg, is_vrm_humanoid_bone, IndexedBones, PoseCommand,
-    PoseCommandSender, VRM_BONE_NAMES,
+    IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES, def_toe_big_yaw_slider_extra_deg,
+    is_vrm_humanoid_bone,
 };
 use crate::plugins::pose_library_assets::PoseLibraryAssets;
 use crate::plugins::shared_runtime::SharedTokio;
@@ -49,7 +49,12 @@ const BONE_GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Right Arm",
-        &["rightShoulder", "rightUpperArm", "rightLowerArm", "rightHand"],
+        &[
+            "rightShoulder",
+            "rightUpperArm",
+            "rightLowerArm",
+            "rightHand",
+        ],
     ),
     (
         "Left Leg",
@@ -338,13 +343,9 @@ pub fn draw_pose_controller_window(
                     &mut settings.pose_controller,
                 ),
                 PoseControllerTab::Library => library_tab(ui, pc, &library, sender.as_deref()),
-                PoseControllerTab::Animations => animations_tab(
-                    ui,
-                    pc,
-                    &library,
-                    &mut active_anim,
-                    kimodo_client.as_deref(),
-                ),
+                PoseControllerTab::Animations => {
+                    animations_tab(ui, pc, &library, &mut active_anim, kimodo_client.as_deref())
+                }
                 PoseControllerTab::AiGen => ai_gen_tab(
                     ui,
                     pc,
@@ -363,8 +364,7 @@ pub fn draw_pose_controller_window(
                 ),
             }
 
-            TopBottomPanel::bottom("Pose Controller Bottom Panel")
-            .show_inside(ui, |ui| {
+            TopBottomPanel::bottom("Pose Controller Bottom Panel").show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(msg) = &pc.status {
                         ui.label(msg);
@@ -402,7 +402,12 @@ fn tab_bar(ui: &mut egui::Ui, state: &mut PoseControllerUiState) {
         ui.separator();
         tab_btn(ui, &mut state.tab, PoseControllerTab::Library, "Poses");
         ui.separator();
-        tab_btn(ui, &mut state.tab, PoseControllerTab::Animations, "Animations");
+        tab_btn(
+            ui,
+            &mut state.tab,
+            PoseControllerTab::Animations,
+            "Animations",
+        );
         ui.separator();
         tab_btn(ui, &mut state.tab, PoseControllerTab::AiGen, "AI Gen");
         ui.separator();
@@ -577,7 +582,7 @@ fn library_tab(
     let search = state.search.trim().to_ascii_lowercase();
     let cat = state.category_filter.trim().to_ascii_lowercase();
     egui::ScrollArea::both()
-        .max_height(ui.available_height()/1.1)
+        .max_height(ui.available_height() / 1.1)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for pose in poses {
@@ -653,8 +658,7 @@ fn pose_row(
                     if !cat.is_empty() {
                         match library.library.update_pose_category(&pose.name, &cat) {
                             Ok(()) => {
-                                state.status =
-                                    Some(format!("{} category → {cat}", pose.name));
+                                state.status = Some(format!("{} category → {cat}", pose.name));
                                 library.mark_dirty();
                             }
                             Err(e) => state.status = Some(format!("category failed: {e}")),
@@ -710,7 +714,7 @@ fn animations_tab(
     let search = state.search.trim().to_ascii_lowercase();
     let cat = state.category_filter.trim().to_ascii_lowercase();
     egui::ScrollArea::both()
-        .max_height(ui.available_height()/1.1)
+        .max_height(ui.available_height() / 1.1)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for meta in anims {
@@ -744,7 +748,11 @@ fn anim_row(
                 .weak(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("▶ Native").on_hover_text("Play via Bevy native player").clicked() {
+                if ui
+                    .button("▶ Native")
+                    .on_hover_text("Play via Bevy native player")
+                    .clicked()
+                {
                     match library.library.load_animation(&meta.filename) {
                         Ok(anim) => {
                             let hold = meta.hold_duration;
@@ -754,7 +762,11 @@ fn anim_row(
                         Err(e) => state.status = Some(format!("load failed: {e}")),
                     }
                 }
-                if ui.button("▶ Kimodo").on_hover_text("Ask Kimodo peer to stream it").clicked() {
+                if ui
+                    .button("▶ Kimodo")
+                    .on_hover_text("Ask Kimodo peer to stream it")
+                    .clicked()
+                {
                     if let Some(k) = kimodo {
                         k.play_saved_animation(meta.filename.clone());
                         state.status = Some(format!("kimodo play {}", meta.name));
@@ -775,8 +787,7 @@ fn anim_row(
                         };
                         match library.library.rename_animation(&meta.filename, &new_name) {
                             Ok(()) => {
-                                state.status =
-                                    Some(format!("{} → {new_name}", meta.filename));
+                                state.status = Some(format!("{} → {new_name}", meta.filename));
                                 library.mark_dirty();
                             }
                             Err(e) => state.status = Some(format!("rename failed: {e}")),
@@ -826,8 +837,7 @@ fn anim_row(
                     Some(new_hold),
                 ) {
                     Ok(()) => {
-                        state.status =
-                            Some(format!("metadata saved for {}", meta.filename));
+                        state.status = Some(format!("metadata saved for {}", meta.filename));
                         library.mark_dirty();
                     }
                     Err(e) => state.status = Some(format!("metadata failed: {e}")),
@@ -868,8 +878,7 @@ fn ai_gen_tab(
         ui.text_edit_singleline(&mut state.gen_save_name);
     });
     ui.horizontal(|ui| {
-        let enabled =
-            kimodo.is_some() && tokio_rt.is_some() && !state.gen_prompt.trim().is_empty();
+        let enabled = kimodo.is_some() && tokio_rt.is_some() && !state.gen_prompt.trim().is_empty();
         if ui
             .add_enabled(enabled, egui::Button::new("Generate"))
             .clicked()
@@ -933,9 +942,15 @@ fn idle_tab(
         );
     ui.horizontal(|ui| {
         ui.label("Min interval (s)");
-        ui.add(egui::Slider::new(&mut settings.idle_interval_min_sec, 1.0..=120.0));
+        ui.add(egui::Slider::new(
+            &mut settings.idle_interval_min_sec,
+            1.0..=120.0,
+        ));
         ui.label("Max interval (s)");
-        ui.add(egui::Slider::new(&mut settings.idle_interval_max_sec, 1.0..=300.0));
+        ui.add(egui::Slider::new(
+            &mut settings.idle_interval_max_sec,
+            1.0..=300.0,
+        ));
     });
     ui.horizontal(|ui| {
         ui.label("Category filter");
@@ -949,7 +964,9 @@ fn idle_tab(
     );
     ui.horizontal(|ui| {
         ui.label("Default transition (s)");
-        ui.add(egui::Slider::new(&mut settings.default_transition_seconds, 0.0..=5.0).step_by(0.05));
+        ui.add(
+            egui::Slider::new(&mut settings.default_transition_seconds, 0.0..=5.0).step_by(0.05),
+        );
         ui.label("Default weight");
         ui.add(egui::Slider::new(&mut settings.default_blend_weight, 0.0..=1.0).step_by(0.05));
     });
@@ -1281,10 +1298,10 @@ fn bone_row(
         if let Some(s) = sender {
             // Full bind (translation + rotation + scale) — needed for Rigify DEF-*.
             s.send(PoseCommand::ResetBones(vec![bone.to_string()]));
-                    // `ResetBones` copies raw `RestTransform`; slider "zero" uses normalized pose_q
-                    // → `local_from_normalized` (see pose_driver). Those can differ on Helen
-                    // `DEF-toe_{big,index,middle,ring,little}` (±180° display-yaw cosmetic) and any
-                    // bind where file rest rotation ≠ slider-neutral pose.
+            // `ResetBones` copies raw `RestTransform`; slider "zero" uses normalized pose_q
+            // → `local_from_normalized` (see pose_driver). Those can differ on Helen
+            // `DEF-toe_{big,index,middle,ring,little}` (±180° display-yaw cosmetic) and any
+            // bind where file rest rotation ≠ slider-neutral pose.
             // Re-apply the same quaternion the sliders would send for (0°,0°,0°) so ↺ matches
             // a manual zero apply without flipping.
             send_apply_bones_euler_deg(s, bone, [0.0, 0.0, 0.0]);

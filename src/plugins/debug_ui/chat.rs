@@ -7,6 +7,8 @@
 //! always hit the gateway as canonical `ImageData` regardless of how the user
 //! added them (dialog vs drag-and-drop).
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use bevy::prelude::*;
 use bevy_egui::egui::{Button, Layout, TopBottomPanel, Vec2, Widget};
 use bevy_egui::{EguiContexts, egui};
@@ -75,16 +77,17 @@ pub fn draw_chat_window(
                 TopBottomPanel::top("chat_top_panel").show_inside(ui, |ui| {
                     ui.with_layout(Layout::left_to_right(egui::Align::Min), |ui| {
                         if ui
-                            .button(if state.chat.sidebar_collapsed { "»" } else { "«" })
+                            .button(if state.chat.sidebar_collapsed {
+                                "»"
+                            } else {
+                                "«"
+                            })
                             .on_hover_text("collapse / expand sidebar")
                             .clicked()
                         {
                             state.chat.sidebar_collapsed = !state.chat.sidebar_collapsed;
                         }
-                        if ui
-                            .button("+ New Chat")
-                            .clicked()
-                        {
+                        if ui.button("+ New Chat").clicked() {
                             if let Some(g) = gateway.as_ref() {
                                 g.new_thread();
                             }
@@ -97,7 +100,9 @@ pub fn draw_chat_window(
                         .resizable(true)
                         .default_width(210.0)
                         .min_width(44.0)
-                        .show_inside(ui, |ui| thread_sidebar(ui, &mut state, chat, gateway.as_deref()));
+                        .show_inside(ui, |ui| {
+                            thread_sidebar(ui, &mut state, chat, gateway.as_deref())
+                        });
                 }
 
                 egui::TopBottomPanel::bottom("chat_compose_bar")
@@ -175,23 +180,17 @@ fn render_thread_row(
     thread: &ThreadInfo,
 ) {
     let is_active = chat.active_thread.as_deref() == Some(thread.id.as_str());
-    let title = thread
-        .title
-        .clone()
-        .unwrap_or_else(|| short_id(&thread.id));
+    let title = thread.title.clone().unwrap_or_else(|| short_id(&thread.id));
     let label = format!("{title}\n  {} turns", thread.turn_count);
-    if Button::selectable(
-        is_active, 
-        egui::RichText::new(label).monospace()
-    )
-    .truncate()
-    .min_size(
-        Vec2::new(
-            ui.available_size().x/1.1, 
-            ui.text_style_height(&egui::TextStyle::Body)
-        )
-    ).ui(ui)
-    .clicked() {
+    if Button::selectable(is_active, egui::RichText::new(label).monospace())
+        .truncate()
+        .min_size(Vec2::new(
+            ui.available_size().x / 1.1,
+            ui.text_style_height(&egui::TextStyle::Body),
+        ))
+        .ui(ui)
+        .clicked()
+    {
         if let Some(g) = gateway {
             g.set_active_thread(thread.id.clone());
         }
@@ -223,6 +222,35 @@ fn connection_indicator(ui: &mut egui::Ui, chat: &ChatState) {
 }
 
 // ---------- Transcript --------------------------------------------------------
+
+/// Decode gateway [`ImageData`] (base64) and show under the markdown bubble.
+fn render_transcript_inline_images(ui: &mut egui::Ui, line_idx: usize, images: &[ImageData]) {
+    const MAX_H: f32 = 240.0;
+    for (img_i, im) in images.iter().enumerate() {
+        let Ok(raw) = B64.decode(im.data.as_bytes()) else {
+            continue;
+        };
+        let Ok(img) = image::load_from_memory(&raw) else {
+            continue;
+        };
+        let rgba = img.to_rgba8();
+        let w = rgba.width() as usize;
+        let h = rgba.height() as usize;
+        if w == 0 || h == 0 {
+            continue;
+        }
+        let color = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
+        let name = format!("gw_img_l{line_idx}_i{img_i}_b{}", im.data.len());
+        let tex = ui
+            .ctx()
+            .load_texture(name, color, egui::TextureOptions::LINEAR);
+        let mut sz = tex.size_vec2();
+        if sz.y > MAX_H {
+            sz *= MAX_H / sz.y;
+        }
+        ui.image((tex.id(), sz));
+    }
+}
 
 fn transcript(ui: &mut egui::Ui, chat_ui: &mut ChatUiState, chat: &ChatState) {
     egui::ScrollArea::vertical()
@@ -262,7 +290,11 @@ fn render_bubble(
     // ACT / DELAY tokens belong to the dispatcher, not the reader —
     // scrub them so `[ACT emotion="sensual"]` doesn't clutter bubbles.
     let body = strip_act_delay(&line.text);
-    let body = if body.trim().is_empty() { " " } else { body.as_ref() };
+    let body = if body.trim().is_empty() {
+        " "
+    } else {
+        body.as_ref()
+    };
     ui.with_layout(egui::Layout::top_down(align), |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(accent, label);
@@ -288,6 +320,11 @@ fn render_bubble(
                 ui.set_max_width((ui.available_width() - 40.0).max(200.0));
                 CommonMarkViewer::new().show(ui, cache, body);
             });
+        if !line.images.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                render_transcript_inline_images(ui, idx, &line.images);
+            });
+        }
         if line.role == TranscriptRole::Assistant {
             render_suggestion_chips(ui, compose_input, &line.suggestions, idx);
         }
@@ -302,7 +339,8 @@ fn render_streaming_bubble(
     thinking: Option<&str>,
     compose_input: &mut String,
 ) {
-    let (display_raw, suggestions, tool_calls_json) = TranscriptLine::parse_raw_assistant_bubble(body);
+    let (display_raw, suggestions, tool_calls_json) =
+        TranscriptLine::parse_raw_assistant_bubble(body);
     let stripped = strip_act_delay(&display_raw);
     let display = if stripped.trim().is_empty() {
         " "
@@ -455,7 +493,9 @@ fn bubble_fill(role: TranscriptRole, visuals: &egui::Visuals) -> egui::Color32 {
 fn blend(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     let lerp = |x: u8, y: u8| -> u8 {
-        ((x as f32) * (1.0 - t) + (y as f32) * t).round().clamp(0.0, 255.0) as u8
+        ((x as f32) * (1.0 - t) + (y as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
     };
     egui::Color32::from_rgb(lerp(a.r(), b.r()), lerp(a.g(), b.g()), lerp(a.b(), b.b()))
 }
@@ -495,8 +535,7 @@ fn compose_bar(
                 .add_enabled(can_send, egui::Button::new("Send"))
                 .clicked()
                 || (response.has_focus()
-                    && ui
-                        .input(|i| i.modifiers.ctrl || i.modifiers.command)
+                    && ui.input(|i| i.modifiers.ctrl || i.modifiers.command)
                     && ui.input(|i| i.key_pressed(egui::Key::Enter))
                     && can_send)
             {
@@ -530,10 +569,7 @@ fn attachment_strip(ui: &mut egui::Ui, state: &mut DebugUiState) {
 
 fn open_attach_dialog(pending: &mut Vec<PendingAttachment>) {
     let files = rfd::FileDialog::new()
-        .add_filter(
-            "Images",
-            &["png", "jpg", "jpeg", "gif", "webp", "bmp"],
-        )
+        .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
         .pick_files();
     let Some(files) = files else { return };
     for path in files {
@@ -562,12 +598,7 @@ fn send_current(
 ) {
     let Some(g) = gateway else { return };
     let text = state.chat.input.trim().to_string();
-    let images: Vec<ImageData> = state
-        .chat
-        .pending
-        .drain(..)
-        .map(|att| att.image)
-        .collect();
+    let images: Vec<ImageData> = state.chat.pending.drain(..).map(|att| att.image).collect();
     let attachment_count = images.len();
     let thread = chat.active_thread.clone();
     let outbound_text = if let Some(queue) = airi_events {
@@ -680,5 +711,9 @@ fn draw_drop_overlay(ctx: &egui::Context) {
 // ---------- Helpers -----------------------------------------------------------
 
 fn short_id(id: &str) -> String {
-    if id.len() > 8 { id[..8].to_string() } else { id.to_string() }
+    if id.len() > 8 {
+        id[..8].to_string()
+    } else {
+        id.to_string()
+    }
 }

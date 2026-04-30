@@ -14,10 +14,10 @@ use jarvis_avatar::model_catalog::{list_vrm_models, models_dir, resolve_vrm_load
 use super::widgets::{rgb_row, rgba_row, vec3_row};
 use super::{AvatarVrmPickerState, DebugUiState};
 use crate::plugins::avatar::AvatarDebugStats;
-use crate::plugins::pose_driver::{PoseCommand, PoseCommandSender};
 use crate::plugins::channel_server::{
     ChatCompleteMessage, HubBroadcast, HubState, LookAtRequestMessage, TtsSpeakMessage,
 };
+use crate::plugins::pose_driver::{PoseCommand, PoseCommandSender};
 
 // ---------- Avatar ------------------------------------------------------------
 
@@ -66,11 +66,7 @@ pub fn draw_avatar_window(
 
             let filter_opt = {
                 let t = picker.filter.trim();
-                if t.is_empty() {
-                    None
-                } else {
-                    Some(t)
-                }
+                if t.is_empty() { None } else { Some(t) }
             };
 
             match list_vrm_models(filter_opt) {
@@ -80,21 +76,15 @@ pub fn draw_avatar_window(
                         let can_load = picker.selected_basename.is_some() && pose_tx.is_some();
                         if ui
                             .add_enabled(can_load, egui::Button::new("Load selected"))
-                            .on_disabled_hover_text(
-                                if pose_tx.is_none() {
-                                    "PoseCommandSender not available"
-                                } else {
-                                    "Select a .vrm row first"
-                                },
-                            )
+                            .on_disabled_hover_text(if pose_tx.is_none() {
+                                "PoseCommandSender not available"
+                            } else {
+                                "Select a .vrm row first"
+                            })
                             .clicked()
                         {
                             if let Some(name) = picker.selected_basename.clone() {
-                                queue_avatar_vrm_load(
-                                    pose_tx.as_deref(),
-                                    name.as_str(),
-                                    picker,
-                                );
+                                queue_avatar_vrm_load(pose_tx.as_deref(), name.as_str(), picker);
                             }
                         }
                     });
@@ -104,9 +94,7 @@ pub fn draw_avatar_window(
                         .id_salt("avatar_vrm_model_list")
                         .show(ui, |ui| {
                             for entry in &entries {
-                                let selected = picker
-                                    .selected_basename
-                                    .as_deref()
+                                let selected = picker.selected_basename.as_deref()
                                     == Some(entry.basename.as_str());
                                 let r = ui.selectable_label(selected, &entry.basename);
                                 if r.double_clicked() {
@@ -193,9 +181,8 @@ fn queue_avatar_vrm_load(
 ) {
     picker.op_error = None;
     let Some(tx) = pose_tx else {
-        picker.op_error = Some(
-            "PoseCommandSender unavailable — PoseDriverPlugin must be active.".into(),
-        );
+        picker.op_error =
+            Some("PoseCommandSender unavailable — PoseDriverPlugin must be active.".into());
         return;
     };
     match resolve_vrm_load_argument(load_arg) {
@@ -304,9 +291,7 @@ pub fn draw_camera_window(
             ui.label("Orbit focus (fallback before VRM snap):");
             vec3_row(ui, "focus", &mut cam.focus, -100.0..=100.0);
 
-            ui.add(
-                egui::Slider::new(&mut cam.initial_radius, 0.1..=50.0).text("initial_radius"),
-            );
+            ui.add(egui::Slider::new(&mut cam.initial_radius, 0.1..=50.0).text("initial_radius"));
             ui.add(
                 egui::Slider::new(&mut cam.min_radius, 0.001..=5.0)
                     .logarithmic(true)
@@ -318,34 +303,24 @@ pub fn draw_camera_window(
 
             ui.separator();
             ui.add(
-                egui::Slider::new(&mut cam.orbit_sensitivity, 0.05..=5.0)
-                    .text("orbit_sensitivity"),
+                egui::Slider::new(&mut cam.orbit_sensitivity, 0.05..=5.0).text("orbit_sensitivity"),
             );
+            ui.add(egui::Slider::new(&mut cam.pan_sensitivity, 0.05..=5.0).text("pan_sensitivity"));
             ui.add(
-                egui::Slider::new(&mut cam.pan_sensitivity, 0.05..=5.0).text("pan_sensitivity"),
-            );
-            ui.add(
-                egui::Slider::new(&mut cam.zoom_sensitivity, 0.05..=5.0)
-                    .text("zoom_sensitivity"),
+                egui::Slider::new(&mut cam.zoom_sensitivity, 0.05..=5.0).text("zoom_sensitivity"),
             );
 
             ui.separator();
             ui.add(
                 egui::Slider::new(&mut cam.orbit_smoothness, 0.0..=0.99).text("orbit_smoothness"),
             );
-            ui.add(
-                egui::Slider::new(&mut cam.zoom_smoothness, 0.0..=0.99).text("zoom_smoothness"),
-            );
-            ui.add(
-                egui::Slider::new(&mut cam.pan_smoothness, 0.0..=0.99).text("pan_smoothness"),
-            );
+            ui.add(egui::Slider::new(&mut cam.zoom_smoothness, 0.0..=0.99).text("zoom_smoothness"));
+            ui.add(egui::Slider::new(&mut cam.pan_smoothness, 0.0..=0.99).text("pan_smoothness"));
 
             ui.separator();
             ui.checkbox(&mut cam.focus_follow_vrm, "focus_follow_vrm");
             ui.add(egui::Slider::new(&mut cam.focus_y_lift, -2.0..=3.0).text("focus_y_lift"));
-            ui.add(
-                egui::Slider::new(&mut cam.snap_wait_frames, 0..=240).text("snap_wait_frames"),
-            );
+            ui.add(egui::Slider::new(&mut cam.snap_wait_frames, 0..=240).text("snap_wait_frames"));
 
             if ui
                 .button("Re-center on VRM now")
@@ -405,15 +380,12 @@ pub fn draw_graphics_window(mut contexts: EguiContexts, mut settings: ResMut<Set
                 });
 
             ui.separator();
-            ui.add(
-                egui::Slider::new(&mut g.exposure_ev100, -6.0..=17.0).text("exposure_ev100"),
-            );
+            ui.add(egui::Slider::new(&mut g.exposure_ev100, -6.0..=17.0).text("exposure_ev100"));
 
             ui.separator();
             ui.label("Ambient");
             ui.add(
-                egui::Slider::new(&mut g.ambient_brightness, 0.0..=5.0)
-                    .text("ambient_brightness"),
+                egui::Slider::new(&mut g.ambient_brightness, 0.0..=5.0).text("ambient_brightness"),
             );
             rgba_row(ui, &mut g.ambient_color);
 
@@ -532,12 +504,9 @@ pub fn draw_live_test_window(
                             }
                         });
                     if ui.button("trigger").clicked() {
-                        let emotion_label =
-                            format!("{:?}", state.test.emotion).to_lowercase();
+                        let emotion_label = format!("{:?}", state.test.emotion).to_lowercase();
                         chat_writer.write(ChatCompleteMessage {
-                            content: format!(
-                                "<|ACT:{{\"emotion\":\"{emotion_label}\"}}|>test"
-                            ),
+                            content: format!("<|ACT:{{\"emotion\":\"{emotion_label}\"}}|>test"),
                         });
                     }
                 });
@@ -677,6 +646,21 @@ pub fn draw_tts_window(mut contexts: EguiContexts, mut settings: ResMut<Settings
             ui.text_edit_singleline(&mut t.kokoro_url);
             ui.label("voice:");
             ui.text_edit_singleline(&mut t.voice);
+            ui.label("response_format (wav | pcm | mp3 | …):");
+            ui.text_edit_singleline(&mut t.response_format);
+            ui.checkbox(&mut t.stream, "stream (leave off for one-shot WAV/PCM)");
+            let mut sr = t.pcm_sample_rate as i64;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut sr)
+                        .speed(100)
+                        .range(8000..=48_000)
+                        .prefix("pcm_sample_rate "),
+                )
+                .changed()
+            {
+                t.pcm_sample_rate = sr.clamp(8000, 48_000) as u32;
+            }
         });
     settings.ui.show_tts = open;
 }
@@ -752,6 +736,10 @@ pub fn draw_mcp_window(mut contexts: EguiContexts, mut settings: ResMut<Settings
                 ui.separator();
                 ui.label("Audio2Face-3D:");
                 ui.checkbox(&mut settings.a2f.enabled, "enabled (restart)");
+                ui.checkbox(
+                    &mut settings.a2f.apply_from_tts,
+                    "apply_from_tts — Kokoro → A2F → face clip after each chat utterance (restart)",
+                );
                 ui.horizontal(|ui| {
                     ui.label("gRPC endpoint:");
                     ui.text_edit_singleline(&mut settings.a2f.endpoint);
@@ -760,9 +748,13 @@ pub fn draw_mcp_window(mut contexts: EguiContexts, mut settings: ResMut<Settings
                     ui.label("health URL:");
                     ui.text_edit_singleline(&mut settings.a2f.health_url);
                 });
+                ui.horizontal(|ui| {
+                    ui.label("function_id (match A2F --function-id, e.g. Claire):");
+                    ui.text_edit_singleline(&mut settings.a2f.function_id);
+                });
                 ui.label(
                     "Tip: run the `a2f_status` MCP tool to probe `/v1/health/ready` and\n\
-                     confirm the gRPC stream can be opened.",
+                     confirm the gRPC stream can be opened. Test Kokoro→A2F with MCP `a2f_from_text`.",
                 );
 
                 ui.separator();
