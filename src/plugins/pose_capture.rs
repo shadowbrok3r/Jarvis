@@ -14,7 +14,7 @@ use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy::transform::TransformSystems;
 use bevy_vrm1::prelude::Vrm;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use serde::Serialize;
 
 pub const AVATAR_CAPTURE_LAYER: usize = 7;
@@ -308,8 +308,9 @@ fn promote_warmed_capture_screenshots(
             let view_for_cb = job.view.clone();
             let png_path = job.path.clone();
             let handle = job.image_handle.clone();
-            commands.spawn(Screenshot::image(handle)).observe(
-                move |ev: On<ScreenshotCaptured>| {
+            commands
+                .spawn(Screenshot::image(handle))
+                .observe(move |ev: On<ScreenshotCaptured>| {
                     let mut err = None;
                     if let Err(e) = save_rgba_png(Path::new(&png_path), &ev.image) {
                         err = Some(e);
@@ -320,8 +321,7 @@ fn promote_warmed_capture_screenshots(
                         path: png_path.clone(),
                         error: err,
                     });
-                },
-            );
+                });
         }
         sessions.sessions.insert(
             session_id,
@@ -399,15 +399,21 @@ fn drain_capture_requests(
         let mut jobs = Vec::with_capacity(req.views.len());
 
         for view in &req.views {
-            let render_target =
-                Image::new_target_texture(req.width, req.height, TextureFormat::Rgba8UnormSrgb, None);
+            let render_target = Image::new_target_texture(
+                req.width,
+                req.height,
+                TextureFormat::Rgba8UnormSrgb,
+                None,
+            );
             let image_handle = images.add(render_target);
             let eye = focus + view.camera_direction() * radius + Vec3::Y * height_lift;
             let camera = commands
                 .spawn((
                     Camera3d::default(),
                     Camera {
-                        clear_color: ClearColorConfig::Custom(Color::linear_rgba(0.0, 0.0, 0.0, 0.0)),
+                        clear_color: ClearColorConfig::Custom(Color::linear_rgba(
+                            0.0, 0.0, 0.0, 0.0,
+                        )),
                         ..default()
                     },
                     RenderTarget::Image(image_handle.clone().into()),

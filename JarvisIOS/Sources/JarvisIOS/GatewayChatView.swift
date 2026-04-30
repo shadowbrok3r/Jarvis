@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import PhotosUI
 import UIKit
@@ -223,6 +224,7 @@ private enum IronclawGatewayHTTP {
 
 private enum ParsedGatewayEvent {
     case response(content: String, threadId: String?)
+    case imageGenerated(dataUrl: String, path: String?, threadId: String?)
     case streamChunk(content: String, threadId: String?)
     /// Model reasoning / chain-of-thought (`thread_id` optional; same as desktop `AppEvent::Thinking`).
     case thinking(message: String, threadId: String?)
@@ -242,6 +244,12 @@ private enum ParsedGatewayEvent {
         switch typ {
         case "response":
             return .response(content: o["content"] as? String ?? "", threadId: o["thread_id"] as? String)
+        case "image_generated":
+            return .imageGenerated(
+                dataUrl: o["data_url"] as? String ?? "",
+                path: o["path"] as? String,
+                threadId: o["thread_id"] as? String
+            )
         case "stream_chunk":
             return .streamChunk(content: o["content"] as? String ?? "", threadId: o["thread_id"] as? String)
         case "thinking":
@@ -327,13 +335,25 @@ final class GatewayChatViewModel {
             HubProfileSync.ensurePlaceholderEmotions(for: labels)
         }
         let display = IosChatFormatting.stripActDelay(raw)
+        let (text, pairs) = IosChatFormatting.stripGatewayInlineImages(from: display)
+        let imgs = pairs.map { ChatLine.InlineImage(mediaType: $0.0, data: $0.1) }
         return ChatLine(
             role: .assistant,
-            text: display,
-            images: [],
+            text: text,
+            images: imgs,
             emotionCaption: labels.last,
             emotionUnmapped: unmapped
         )
+    }
+
+    private static func inlineImageFromDataURL(_ dataUrl: String) -> ChatLine.InlineImage? {
+        guard let sep = dataUrl.range(of: ";base64,") else { return nil }
+        let mimePart = String(dataUrl[..<sep.lowerBound])
+        guard mimePart.hasPrefix("data:image/") else { return nil }
+        let mime = String(mimePart.dropFirst("data:".count))
+        let b64 = String(dataUrl[sep.upperBound...])
+        guard let data = Data(base64Encoded: b64, options: [.ignoreUnknownCharacters]) else { return nil }
+        return ChatLine.InlineImage(mediaType: mime, data: data)
     }
 
     struct PendingImage: Identifiable, Equatable {
@@ -352,6 +372,9 @@ final class GatewayChatViewModel {
     var banner: String = ""
     var sendInFlight = false
     private(set) var sseRunning = false
+
+    /// Plays Kokoro WAV when About → Kokoro base URL is set (same HTTP body as desktop).
+    private var kokoroPlayer: AVAudioPlayer?
 
     /// Rows from last `GET /api/chat/threads` (for picker UI).
     struct ThreadRow: Identifiable, Hashable {
@@ -372,6 +395,50 @@ final class GatewayChatViewModel {
         HubProfileSync.migrateGatewayAuthTokenFromUserDefaultsIfNeeded()
         restartSse()
         Task { await refreshThreads() }
+    }
+
+    /// Same heuristics as Rust `should_skip_tts_for_error_like_response` — never send provider errors to Kokoro.
+    private static func isErrorLikeKokoroInput(_ text: String) -> Bool {
+        let head = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)).lowercased()
+        return head.hasPrefix("error:")
+            || head.hasPrefix("error -")
+            || head.hasPrefix("gateway error")
+            || head.contains("llm error")
+            || (head.hasPrefix("provider ") && head.contains(" error"))
+    }
+
+    /// After a final assistant `response` SSE, fetch one-shot WAV from Kokoro and play it.
+    func speakAssistantTurnWithKokoroIfConfigured(rawContent: String) {
+        let base = UserDefaults.standard.string(forKey: HubProfileSync.Kokoro.userDefaultsBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !base.isEmpty else { return }
+        let speak = IosChatFormatting.stripForKokoro(rawContent)
+        guard !speak.isEmpty, !Self.isErrorLikeKokoroInput(speak) else { return }
+        let voiceRaw = UserDefaults.standard.string(forKey: HubProfileSync.Kokoro.userDefaultsVoiceKey) ?? "af_heart"
+        let voiceTrim = voiceRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let voice = voiceTrim.isEmpty ? "af_heart" : voiceTrim
+        Task {
+            do {
+                let data = try await KokoroSpeechClient.fetchWav(baseURL: base, voice: voice, text: speak)
+                await MainActor.run {
+                    do {
+                        let session = AVAudioSession.sharedInstance()
+                        try session.setCategory(.playback, mode: .default)
+                        try session.setActive(true)
+                        kokoroPlayer = try AVAudioPlayer(data: data)
+                        kokoroPlayer?.prepareToPlay()
+                        kokoroPlayer?.play()
+                        JarvisIOSLog.recordIronclaw("kokoro: playing assistant TTS (\(data.count) bytes wav)")
+                    } catch {
+                        JarvisIOSLog.recordIronclawError("kokoro AVAudioPlayer: \(error.localizedDescription)")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    JarvisIOSLog.recordIronclawError("kokoro fetch: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     func onDisappear() {
@@ -798,11 +865,26 @@ final class GatewayChatViewModel {
             liveAssistant = ""
             if !content.isEmpty {
                 lines.append(Self.chatLineAssistant(fromRaw: content))
+                speakAssistantTurnWithKokoroIfConfigured(rawContent: content)
             }
+        case .imageGenerated(let dataUrl, let path, let tid):
+            guard matchesThread(tid) else { return }
+            guard let img = Self.inlineImageFromDataURL(dataUrl) else { return }
+            let cap = path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            lines.append(
+                ChatLine(
+                    role: .assistant,
+                    text: cap,
+                    images: [img],
+                    emotionCaption: nil,
+                    emotionUnmapped: false
+                )
+            )
         case .streamChunk(let content, let tid):
             guard matchesThread(tid) else { return }
             liveAssistant += content
-        case .thinking(let message):
+        case .thinking(let message, let tid):
+            guard matchesThread(tid) else { return }
             statusLine = message
         case .status(let message):
             statusLine = message

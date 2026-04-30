@@ -50,7 +50,8 @@ impl AiriHaEventQueue {
         let take = self.pending.len().min(MAX_EVENTS_PER_TURN);
         let start = self.pending.len().saturating_sub(take);
         let mut lines = Vec::with_capacity(take + 2);
-        lines.push("Home Assistant state_changed events (entity_id starts with airi_):".to_string());
+        lines
+            .push("Home Assistant state_changed events (entity_id starts with airi_):".to_string());
         for ev in self.pending.drain(start..) {
             let old = ev.old_state.unwrap_or_else(|| "null".to_string());
             let new = ev.new_state.unwrap_or_else(|| "null".to_string());
@@ -112,7 +113,9 @@ fn websocket_url_from_ha_url(ha_url: &str) -> Result<String, String> {
 }
 
 async fn read_json_message(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
 ) -> Result<Value, String> {
     loop {
         let msg = ws
@@ -174,11 +177,7 @@ fn parse_airi_state_changed(v: &Value) -> Option<AiriHaStateEvent> {
     })
 }
 
-async fn run_ha_airi_event_loop(
-    ws_url: String,
-    token: String,
-    tx: Sender<AiriHaStateEvent>,
-) {
+async fn run_ha_airi_event_loop(ws_url: String, token: String, tx: Sender<AiriHaStateEvent>) {
     loop {
         let connected = connect_async(&ws_url).await;
         let (mut ws, _) = match connected {
@@ -256,8 +255,9 @@ async fn run_ha_airi_event_loop(
 
         // 4) Wait for subscribe result
         match read_json_message(&mut ws).await {
-            Ok(v) if v.get("type").and_then(Value::as_str) == Some("result")
-                && v.get("success").and_then(Value::as_bool) == Some(true) => {}
+            Ok(v)
+                if v.get("type").and_then(Value::as_str) == Some("result")
+                    && v.get("success").and_then(Value::as_bool) == Some(true) => {}
             Ok(v) => {
                 warn!(target: "home_assistant", "HA ws subscribe failed/unexpected: {v}");
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -323,10 +323,7 @@ fn start_ha_airi_ws_task(
     rt.started = true;
 }
 
-fn pump_ha_airi_ws_events(
-    bridge: Res<HaWsAiriBridge>,
-    mut queue: ResMut<AiriHaEventQueue>,
-) {
+fn pump_ha_airi_ws_events(bridge: Res<HaWsAiriBridge>, mut queue: ResMut<AiriHaEventQueue>) {
     loop {
         match bridge.rx.try_recv() {
             Ok(ev) => queue.push(ev),

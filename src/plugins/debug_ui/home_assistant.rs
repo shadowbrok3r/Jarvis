@@ -1,17 +1,15 @@
 //! Home Assistant connection, device registry, presence routing (Airi-style).
 
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::home_assistant::{self, HaCameraEntity, HaDetectionSensorEntity, HaMediaEntity};
 
-use crate::plugins::ha_vision_gaze::HaVisionGazeRuntime;
 use crate::plugins::VrmEyeLookatDebug;
+use crate::plugins::ha_vision_gaze::HaVisionGazeRuntime;
 use crate::plugins::home_assistant::{HaDiscoverBridge, HaDiscoveryUiCache};
-use crate::plugins::home_assistant_routing::{
-    self as routing, PresenceRouting,
-};
+use crate::plugins::home_assistant_routing::{self as routing, PresenceRouting};
 use crate::plugins::ironclaw_chat::ChatState;
 use crate::plugins::shared_runtime::SharedTokio;
 use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
@@ -658,7 +656,11 @@ fn device_grid_cameras(
                 }
                 ui.label(&c.label);
                 ui.monospace(id);
-                ui.label(if c.area.is_empty() { "—" } else { c.area.as_str() });
+                ui.label(if c.area.is_empty() {
+                    "—"
+                } else {
+                    c.area.as_str()
+                });
                 let st = c.state.as_deref().unwrap_or("—");
                 ui.colored_label(ha_state_color(c.state.as_deref()), st);
                 ui.end_row();
@@ -699,7 +701,11 @@ fn device_grid_media(
                 }
                 ui.label(&m.label);
                 ui.monospace(&m.entity_id);
-                ui.label(if m.area.is_empty() { "—" } else { m.area.as_str() });
+                ui.label(if m.area.is_empty() {
+                    "—"
+                } else {
+                    m.area.as_str()
+                });
                 let st = m.state.as_deref().unwrap_or("—");
                 ui.colored_label(ha_state_color(m.state.as_deref()), st);
                 ui.end_row();
@@ -739,7 +745,11 @@ fn device_grid_detection(
                 }
                 ui.label(&s.label);
                 ui.monospace(&s.entity_id);
-                ui.label(if s.area.is_empty() { "—" } else { s.area.as_str() });
+                ui.label(if s.area.is_empty() {
+                    "—"
+                } else {
+                    s.area.as_str()
+                });
                 let st = s.state.as_deref().unwrap_or("—");
                 ui.colored_label(ha_state_color(s.state.as_deref()), st);
                 ui.end_row();

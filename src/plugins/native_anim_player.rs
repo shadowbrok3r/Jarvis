@@ -74,12 +74,7 @@ impl ActiveNativeAnimation {
         self.last_applied_frame
     }
 
-    pub fn start(
-        &mut self,
-        animation: AnimationFile,
-        looping: bool,
-        hold_duration_secs: f32,
-    ) {
+    pub fn start(&mut self, animation: AnimationFile, looping: bool, hold_duration_secs: f32) {
         let fps = if animation.fps > 0.0 {
             animation.fps as f32
         } else {

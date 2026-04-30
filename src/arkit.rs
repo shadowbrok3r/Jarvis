@@ -23,93 +23,173 @@ pub struct MapRule {
 }
 
 /// Default ARKit blendshape → VRM expression table (mouth + eyes).
-pub static DEFAULT_BLENDSHAPE_MAP: LazyLock<HashMap<&'static str, Vec<MapRule>>> = LazyLock::new(|| {
-    let mut m: HashMap<&'static str, Vec<MapRule>> = HashMap::new();
-    m.insert(
-        "aa",
-        vec![
-            MapRule { src: "JawOpen", weight: 0.8 },
-            MapRule { src: "MouthLowerDownLeft", weight: 0.1 },
-            MapRule { src: "MouthLowerDownRight", weight: 0.1 },
-        ],
-    );
-    m.insert(
-        "oh",
-        vec![
-            MapRule { src: "MouthFunnel", weight: 0.6 },
-            MapRule { src: "JawOpen", weight: 0.3 },
-            MapRule { src: "MouthPucker", weight: 0.1 },
-        ],
-    );
-    m.insert(
-        "ou",
-        vec![
-            MapRule { src: "MouthPucker", weight: 0.7 },
-            MapRule { src: "MouthFunnel", weight: 0.3 },
-        ],
-    );
-    m.insert(
-        "ee",
-        vec![
-            MapRule { src: "MouthStretchLeft", weight: 0.3 },
-            MapRule { src: "MouthStretchRight", weight: 0.3 },
-            MapRule { src: "MouthSmileLeft", weight: 0.2 },
-            MapRule { src: "MouthSmileRight", weight: 0.2 },
-        ],
-    );
-    m.insert(
-        "ih",
-        vec![
-            MapRule { src: "MouthSmileLeft", weight: 0.4 },
-            MapRule { src: "MouthSmileRight", weight: 0.4 },
-            MapRule { src: "MouthUpperUpLeft", weight: 0.1 },
-            MapRule { src: "MouthUpperUpRight", weight: 0.1 },
-        ],
-    );
-    m.insert(
-        "blinkLeft",
-        vec![MapRule { src: "EyeBlinkLeft", weight: 1.0 }],
-    );
-    m.insert(
-        "blinkRight",
-        vec![MapRule { src: "EyeBlinkRight", weight: 1.0 }],
-    );
-    m
-});
+pub static DEFAULT_BLENDSHAPE_MAP: LazyLock<HashMap<&'static str, Vec<MapRule>>> =
+    LazyLock::new(|| {
+        let mut m: HashMap<&'static str, Vec<MapRule>> = HashMap::new();
+        m.insert(
+            "aa",
+            vec![
+                MapRule {
+                    src: "JawOpen",
+                    weight: 0.8,
+                },
+                MapRule {
+                    src: "MouthLowerDownLeft",
+                    weight: 0.1,
+                },
+                MapRule {
+                    src: "MouthLowerDownRight",
+                    weight: 0.1,
+                },
+            ],
+        );
+        m.insert(
+            "oh",
+            vec![
+                MapRule {
+                    src: "MouthFunnel",
+                    weight: 0.6,
+                },
+                MapRule {
+                    src: "JawOpen",
+                    weight: 0.3,
+                },
+                MapRule {
+                    src: "MouthPucker",
+                    weight: 0.1,
+                },
+            ],
+        );
+        m.insert(
+            "ou",
+            vec![
+                MapRule {
+                    src: "MouthPucker",
+                    weight: 0.7,
+                },
+                MapRule {
+                    src: "MouthFunnel",
+                    weight: 0.3,
+                },
+            ],
+        );
+        m.insert(
+            "ee",
+            vec![
+                MapRule {
+                    src: "MouthStretchLeft",
+                    weight: 0.3,
+                },
+                MapRule {
+                    src: "MouthStretchRight",
+                    weight: 0.3,
+                },
+                MapRule {
+                    src: "MouthSmileLeft",
+                    weight: 0.2,
+                },
+                MapRule {
+                    src: "MouthSmileRight",
+                    weight: 0.2,
+                },
+            ],
+        );
+        m.insert(
+            "ih",
+            vec![
+                MapRule {
+                    src: "MouthSmileLeft",
+                    weight: 0.4,
+                },
+                MapRule {
+                    src: "MouthSmileRight",
+                    weight: 0.4,
+                },
+                MapRule {
+                    src: "MouthUpperUpLeft",
+                    weight: 0.1,
+                },
+                MapRule {
+                    src: "MouthUpperUpRight",
+                    weight: 0.1,
+                },
+            ],
+        );
+        m.insert(
+            "blinkLeft",
+            vec![MapRule {
+                src: "EyeBlinkLeft",
+                weight: 1.0,
+            }],
+        );
+        m.insert(
+            "blinkRight",
+            vec![MapRule {
+                src: "EyeBlinkRight",
+                weight: 1.0,
+            }],
+        );
+        m
+    });
 
 /// Default A2F emotion → VRM emotion expression table.
-pub static DEFAULT_EMOTION_MAP: LazyLock<HashMap<&'static str, Vec<MapRule>>> = LazyLock::new(|| {
-    let mut m: HashMap<&'static str, Vec<MapRule>> = HashMap::new();
-    m.insert(
-        "happy",
-        vec![
-            MapRule { src: "joy", weight: 0.7 },
-            MapRule { src: "cheekiness", weight: 0.3 },
-        ],
-    );
-    m.insert(
-        "sad",
-        vec![
-            MapRule { src: "sadness", weight: 0.7 },
-            MapRule { src: "grief", weight: 0.3 },
-        ],
-    );
-    m.insert(
-        "angry",
-        vec![
-            MapRule { src: "anger", weight: 0.8 },
-            MapRule { src: "disgust", weight: 0.2 },
-        ],
-    );
-    m.insert(
-        "surprised",
-        vec![
-            MapRule { src: "amazement", weight: 0.8 },
-            MapRule { src: "fear", weight: 0.2 },
-        ],
-    );
-    m
-});
+pub static DEFAULT_EMOTION_MAP: LazyLock<HashMap<&'static str, Vec<MapRule>>> =
+    LazyLock::new(|| {
+        let mut m: HashMap<&'static str, Vec<MapRule>> = HashMap::new();
+        m.insert(
+            "happy",
+            vec![
+                MapRule {
+                    src: "joy",
+                    weight: 0.7,
+                },
+                MapRule {
+                    src: "cheekiness",
+                    weight: 0.3,
+                },
+            ],
+        );
+        m.insert(
+            "sad",
+            vec![
+                MapRule {
+                    src: "sadness",
+                    weight: 0.7,
+                },
+                MapRule {
+                    src: "grief",
+                    weight: 0.3,
+                },
+            ],
+        );
+        m.insert(
+            "angry",
+            vec![
+                MapRule {
+                    src: "anger",
+                    weight: 0.8,
+                },
+                MapRule {
+                    src: "disgust",
+                    weight: 0.2,
+                },
+            ],
+        );
+        m.insert(
+            "surprised",
+            vec![
+                MapRule {
+                    src: "amazement",
+                    weight: 0.8,
+                },
+                MapRule {
+                    src: "fear",
+                    weight: 0.2,
+                },
+            ],
+        );
+        m
+    });
 
 /// Fold one ARKit blendshape frame into a VRM expression frame, clamping `0..=1`.
 pub fn map_arkit_to_vrm(

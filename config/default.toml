@@ -19,9 +19,14 @@ request_timeout_ms = 15000
 history_limit = 50
 
 [tts]
-kokoro_url = "http://192.168.4.8:8880"
-voice = "af_heart"
+kokoro_url = "http://192.168.4.9:8880"
+voice = "af_aoede(1.0)+af_nicole(1.0)"
 enabled = true
+# Kokoro OpenAI speech: wav | pcm | mp3 | opus | flac | …  Default **pcm** matches A2F (s16le @ pcm_sample_rate); in-app playback wraps PCM → WAV for Bevy.
+response_format = "pcm"
+# Must be false for reliable one-shot WAV/PCM (Kokoro defaults stream=true otherwise).
+stream = false
+pcm_sample_rate = 24000
 
 [avatar]
 model_path = "models/airi.vrm"
@@ -110,8 +115,12 @@ session_keep_alive_sec = 86400
 [a2f]
 # NVIDIA Audio2Face-3D Docker endpoint.
 enabled = true
-endpoint = "localhost:52000"
-health_url = "http://localhost:8000/v1/health/ready"
+endpoint = "http://192.168.4.9:52000"
+health_url = "http://192.168.4.9:8000/v1/health/ready"
+# Set to the same UUID you pass to the A2F container as --function-id (Claire example below).
+function_id = "0961a6da-fb9e-4f2e-8491-247e5fd7bf8d"
+# After each Kokoro clip, call A2F on the same audio and play mapped VRM expression keyframes.
+apply_from_tts = true
 
 [kimodo]
 # Kimodo runs as an external Python service that connects to our channel hub;

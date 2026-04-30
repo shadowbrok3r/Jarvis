@@ -3,6 +3,7 @@
 **/*.rs.bk
 *.vrm
 *.json
+!examples/cursor-mcp-comfyui.json
 /assets/poses/
 /assets/animations/
 /config/user*

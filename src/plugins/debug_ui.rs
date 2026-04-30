@@ -23,7 +23,7 @@ pub mod services;
 mod widgets;
 
 pub use chat::ChatUiState;
-pub use pose_controller::{PoseControllerUiState, KimodoClientRes};
+pub use pose_controller::{KimodoClientRes, PoseControllerUiState};
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
@@ -32,6 +32,7 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use jarvis_avatar::act::Emotion;
 use jarvis_avatar::config::Settings;
 
+use crate::plugins::chat_pipeline_status::ChatPipelineStatus;
 use crate::plugins::traffic_log::TrafficChannel;
 
 pub struct DebugUiPlugin;
@@ -193,6 +194,7 @@ fn draw_menu_bar(
     mut settings: ResMut<Settings>,
     mut state: ResMut<DebugUiState>,
     mut exit: MessageWriter<AppExit>,
+    pipeline: Res<ChatPipelineStatus>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -205,7 +207,7 @@ fn draw_menu_bar(
                 let style = std::sync::Arc::new(theme);
                 ctx.set_style(style);
             }
-            Err(e) => error!("Error setting theme: {e:?}")
+            Err(e) => error!("Error setting theme: {e:?}"),
         };
     }
 
@@ -216,15 +218,20 @@ fn draw_menu_bar(
             test_menu(ui, &mut settings);
             help_menu(ui, &mut state);
 
-            // Right-aligned status/hint.
+            // Right-aligned: pipeline (ops), save hint, app id.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(msg) = &state.save_status {
-                    ui.colored_label(egui::Color32::from_rgb(150, 200, 150), msg);
-                }
                 ui.label(
                     egui::RichText::new("jarvis-avatar")
                         .color(egui::Color32::GRAY)
                         .small(),
+                );
+                if let Some(msg) = &state.save_status {
+                    ui.colored_label(egui::Color32::from_rgb(150, 200, 150), msg);
+                }
+                ui.label(
+                    egui::RichText::new(pipeline.menu_line())
+                        .small()
+                        .color(egui::Color32::from_rgb(200, 215, 255)),
                 );
             });
         });
@@ -240,7 +247,9 @@ fn file_menu(
     ui.menu_button("File", |ui| {
         if ui
             .button("Save settings")
-            .on_hover_text("Writes the current values to config/user.toml (default.toml is preserved)")
+            .on_hover_text(
+                "Writes the current values to config/user.toml (default.toml is preserved)",
+            )
             .clicked()
         {
             state.save_status = Some(match settings.save_user() {
@@ -347,7 +356,9 @@ fn draw_restore_defaults_modal(
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
-            ui.label("This deletes `config/user.toml` and reloads values from `config/default.toml`.");
+            ui.label(
+                "This deletes `config/user.toml` and reloads values from `config/default.toml`.",
+            );
             ui.label("Any unsaved changes in this session will be lost.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -355,7 +366,10 @@ fn draw_restore_defaults_modal(
                     state.confirm_restore = false;
                 }
                 if ui
-                    .add(egui::Button::new("Yes, restore").fill(egui::Color32::from_rgb(120, 60, 60)))
+                    .add(
+                        egui::Button::new("Yes, restore")
+                            .fill(egui::Color32::from_rgb(120, 60, 60)),
+                    )
                     .clicked()
                 {
                     state.save_status = Some(match Settings::restore_defaults() {

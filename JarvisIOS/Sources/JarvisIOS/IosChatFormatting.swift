@@ -106,4 +106,68 @@ enum IosChatFormatting {
         let full = NSRange(location: 0, length: ns.length)
         return regex.stringByReplacingMatches(in: s, options: [], range: full, withTemplate: template)
     }
+
+    private static let starEmphasisPattern = #"\*[^*\n]+\*"#
+
+    /// Desktop `strip_act_delay_for_tts`: ACT/DELAY strip + `*emphasis*` removal for Kokoro input.
+    static func stripForKokoro(_ raw: String) -> String {
+        let s = stripActDelay(raw)
+        let re = re(starEmphasisPattern)
+        let stripped = replaceAll(re, in: s, with: "")
+        return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Gateway inline images (markdown / data URLs)
+
+    /// Strips `![](data:image/...;base64,...)` and bare `data:image/...;base64,...`; returns cleaned text and `(mime, data)` pairs.
+    static func stripGatewayInlineImages(from text: String) -> (String, [(String, Data)]) {
+        var s = text
+        var collected: [(String, Data)] = []
+        let mdPattern = #"!\[[^\]]*\]\(\s*(data:image/(?:png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=]+))\s*\)"#
+        if let re = try? NSRegularExpression(pattern: mdPattern, options: []) {
+            while true {
+                let range = NSRange(location: 0, length: (s as NSString).length)
+                guard let m = re.firstMatch(in: s, options: [], range: range), m.numberOfRanges >= 3 else { break }
+                let ns = s as NSString
+                let full = m.range(at: 0)
+                let dataUrl = ns.substring(with: m.range(at: 1))
+                let b64 = ns.substring(with: m.range(at: 2))
+                if let sep = dataUrl.range(of: ";base64,") {
+                    let mimePart = String(dataUrl[..<sep.lowerBound])
+                    if mimePart.hasPrefix("data:image/"),
+                       let data = Data(base64Encoded: b64, options: [.ignoreUnknownCharacters])
+                    {
+                        let mime = String(mimePart.dropFirst("data:".count))
+                        collected.append((mime, data))
+                    }
+                }
+                let mut = NSMutableString(string: s)
+                mut.replaceCharacters(in: full, with: "")
+                s = mut as String
+            }
+        }
+        let barePattern = #"data:image/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+"#
+        if let re2 = try? NSRegularExpression(pattern: barePattern, options: []) {
+            while true {
+                let range = NSRange(location: 0, length: (s as NSString).length)
+                guard let m = re2.firstMatch(in: s, options: [], range: range) else { break }
+                let ns = s as NSString
+                let full = m.range(at: 0)
+                let span = ns.substring(with: full)
+                if let sep = span.range(of: ";base64,") {
+                    let mimePart = String(span[..<sep.lowerBound])
+                    if mimePart.hasPrefix("data:image/"),
+                       let data = Data(base64Encoded: String(span[sep.upperBound...]), options: [.ignoreUnknownCharacters])
+                    {
+                        let mime = String(mimePart.dropFirst("data:".count))
+                        collected.append((mime, data))
+                    }
+                }
+                let mut = NSMutableString(string: s)
+                mut.replaceCharacters(in: full, with: "")
+                s = mut as String
+            }
+        }
+        return (s.trimmingCharacters(in: .whitespacesAndNewlines), collected)
+    }
 }

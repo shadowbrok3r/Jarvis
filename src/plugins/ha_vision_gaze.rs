@@ -12,7 +12,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
-use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 use jarvis_avatar::config::HomeAssistantSettings;
 use reqwest::Client;
 use serde_json::Value;
@@ -30,8 +30,15 @@ const NX_EPS: f32 = 1.0e-4;
 
 #[derive(Debug)]
 enum VisionGazeJobResult {
-    Track { pos: Vec3, diag: String, nx: f32, ny: f32 },
-    NoPerson { diag: String },
+    Track {
+        pos: Vec3,
+        diag: String,
+        nx: f32,
+        ny: f32,
+    },
+    NoPerson {
+        diag: String,
+    },
     Error(String),
 }
 
@@ -148,7 +155,11 @@ fn build_lookat(nx: f32, ny: f32, ha: &HomeAssistantSettings) -> (Vec3, String) 
     // (`Vec3::new(0.0, 1.4, 1.0)`). Using `-d` places targets behind the head,
     // driving yaw toward ~180° and saturating eyes at full left/right.
     let z = d;
-    let flip = if ha.vision_gaze_flip_horizontal { " · flip_h" } else { "" };
+    let flip = if ha.vision_gaze_flip_horizontal {
+        " · flip_h"
+    } else {
+        ""
+    };
     let h_sens_s = if (h_sens - 1.0).abs() > 1.0e-3 {
         format!(" · h_sens={h_sens:.2}")
     } else {
@@ -173,15 +184,13 @@ fn build_lookat(nx: f32, ny: f32, ha: &HomeAssistantSettings) -> (Vec3, String) 
         ha.vision_gaze_offset_z,
     );
     let off_s = if off.length_squared() > 1e-8 {
-        format!(
-            " · off=({:.2},{:.2},{:.2})",
-            off.x, off.y, off.z
-        )
+        format!(" · off=({:.2},{:.2},{:.2})", off.x, off.y, off.z)
     } else {
         String::new()
     };
     let p = Vec3::new(x, y, z) + off;
-    let diag = format!(" · nx={nx:.3} ny={ny:.3} · depth={d:.2}{hpart}{h_sens_s}{flip}{d_center}{off_s}");
+    let diag =
+        format!(" · nx={nx:.3} ny={ny:.3} · depth={d:.2}{hpart}{h_sens_s}{flip}{d_center}{off_s}");
     (p, diag)
 }
 
@@ -362,7 +371,11 @@ impl Plugin for HaVisionGazePlugin {
             .init_resource::<HaVisionGazeRuntime>()
             .add_systems(
                 Update,
-                (vision_gaze_pump_results, ha_vision_gaze_interpolate, vision_gaze_schedule_polls)
+                (
+                    vision_gaze_pump_results,
+                    ha_vision_gaze_interpolate,
+                    vision_gaze_schedule_polls,
+                )
                     .chain(),
             );
     }

@@ -230,21 +230,15 @@ fn euler_quat_clamped(bone: &str, euler: &BoneEulerDeg) -> (Quat, Vec<String>) {
     let mut r = euler.roll_deg.unwrap_or(0.0);
     let (max_p, max_y, max_r) = euler_limit_deg(bone);
     if p.abs() > max_p {
-        warn.push(format!(
-            "{bone}: pitch_deg {p:.1} clamped to ±{max_p:.1}"
-        ));
+        warn.push(format!("{bone}: pitch_deg {p:.1} clamped to ±{max_p:.1}"));
         p = p.clamp(-max_p, max_p);
     }
     if y.abs() > max_y {
-        warn.push(format!(
-            "{bone}: yaw_deg {y:.1} clamped to ±{max_y:.1}"
-        ));
+        warn.push(format!("{bone}: yaw_deg {y:.1} clamped to ±{max_y:.1}"));
         y = y.clamp(-max_y, max_y);
     }
     if r.abs() > max_r {
-        warn.push(format!(
-            "{bone}: roll_deg {r:.1} clamped to ±{max_r:.1}"
-        ));
+        warn.push(format!("{bone}: roll_deg {r:.1} clamped to ±{max_r:.1}"));
         r = r.clamp(-max_r, max_r);
     }
     // Match Bones-tab sliders: display yaw + Helen per-digit offset for
@@ -285,10 +279,7 @@ fn relaxed_right_quats() -> HashMap<&'static str, Quat> {
             "rightThumbProximal",
             Quat::from_xyzw(0.0, -0.06, 0.0, 0.998),
         ),
-        (
-            "rightIndexProximal",
-            Quat::from_xyzw(0.0, 0.0, 0.1, 0.995),
-        ),
+        ("rightIndexProximal", Quat::from_xyzw(0.0, 0.0, 0.1, 0.995)),
         (
             "rightIndexIntermediate",
             Quat::from_xyzw(0.0, 0.0, 0.08, 0.997),
@@ -301,18 +292,12 @@ fn relaxed_right_quats() -> HashMap<&'static str, Quat> {
             "rightMiddleIntermediate",
             Quat::from_xyzw(0.0, 0.0, 0.1, 0.995),
         ),
-        (
-            "rightRingProximal",
-            Quat::from_xyzw(0.0, 0.0, 0.12, 0.993),
-        ),
+        ("rightRingProximal", Quat::from_xyzw(0.0, 0.0, 0.12, 0.993)),
         (
             "rightRingIntermediate",
             Quat::from_xyzw(0.0, 0.0, 0.1, 0.995),
         ),
-        (
-            "rightLittleProximal",
-            Quat::from_xyzw(0.0, 0.0, 0.1, 0.995),
-        ),
+        ("rightLittleProximal", Quat::from_xyzw(0.0, 0.0, 0.1, 0.995)),
         (
             "rightLittleIntermediate",
             Quat::from_xyzw(0.0, 0.0, 0.08, 0.997),
@@ -328,10 +313,7 @@ fn fist_right_quats() -> HashMap<&'static str, Quat> {
             "rightThumbProximal",
             Quat::from_xyzw(-0.21, -0.57, 0.40, 0.68),
         ),
-        (
-            "rightIndexProximal",
-            Quat::from_xyzw(0.0, 0.0, 0.42, 0.908),
-        ),
+        ("rightIndexProximal", Quat::from_xyzw(0.0, 0.0, 0.42, 0.908)),
         (
             "rightIndexIntermediate",
             Quat::from_xyzw(0.0, 0.0, 0.68, 0.733),
@@ -346,10 +328,7 @@ fn fist_right_quats() -> HashMap<&'static str, Quat> {
             Quat::from_xyzw(0.0, 0.0, 0.70, 0.714),
         ),
         ("rightMiddleDistal", Quat::from_xyzw(0.0, 0.0, 0.35, 0.937)),
-        (
-            "rightRingProximal",
-            Quat::from_xyzw(0.0, 0.0, 0.43, 0.903),
-        ),
+        ("rightRingProximal", Quat::from_xyzw(0.0, 0.0, 0.43, 0.903)),
         (
             "rightRingIntermediate",
             Quat::from_xyzw(0.0, 0.0, 0.68, 0.733),
@@ -363,10 +342,7 @@ fn fist_right_quats() -> HashMap<&'static str, Quat> {
             "rightLittleIntermediate",
             Quat::from_xyzw(0.0, 0.0, 0.70, 0.714),
         ),
-        (
-            "rightLittleDistal",
-            Quat::from_xyzw(0.0, 0.0, 0.42, 0.908),
-        ),
+        ("rightLittleDistal", Quat::from_xyzw(0.0, 0.0, 0.42, 0.908)),
     ]
     .into_iter()
     .collect()

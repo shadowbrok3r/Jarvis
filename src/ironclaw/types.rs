@@ -123,10 +123,7 @@ pub struct HistoryResponse {
 pub enum AppEvent {
     /// Turn complete — drives `ChatCompleteMessage` + TTS.
     #[serde(rename = "response")]
-    Response {
-        content: String,
-        thread_id: String,
-    },
+    Response { content: String, thread_id: String },
 
     /// "Thinking…" indicator in the debug UI.
     #[serde(rename = "thinking")]
@@ -179,6 +176,17 @@ pub enum AppEvent {
         thread_id: Option<String>,
     },
 
+    /// Emitted when a tool (e.g. image MCP) produced an image — matches IronClaw `AppEvent::ImageGenerated`.
+    #[serde(rename = "image_generated")]
+    ImageGenerated {
+        event_id: String,
+        data_url: String,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        thread_id: Option<String>,
+    },
+
     #[serde(rename = "error")]
     Error {
         message: String,
@@ -204,6 +212,7 @@ impl AppEvent {
             | AppEvent::ToolStarted { thread_id, .. }
             | AppEvent::ToolCompleted { thread_id, .. }
             | AppEvent::ToolResult { thread_id, .. }
+            | AppEvent::ImageGenerated { thread_id, .. }
             | AppEvent::Error { thread_id, .. } => thread_id.as_deref(),
             AppEvent::Other => None,
         }

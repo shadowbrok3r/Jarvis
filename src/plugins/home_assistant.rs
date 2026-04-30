@@ -1,7 +1,7 @@
 //! Home Assistant UI resources: discovery results + async completion pump.
 
 use bevy::prelude::*;
-use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::home_assistant::{self, DiscoverySnapshot};
@@ -74,7 +74,9 @@ fn ha_post_startup_discover(
                 return;
             }
         };
-        let res = home_assistant::discover(&client, &ha).await.map_err(|e| e.to_string());
+        let res = home_assistant::discover(&client, &ha)
+            .await
+            .map_err(|e| e.to_string());
         let _ = tx.send(res);
     });
 }

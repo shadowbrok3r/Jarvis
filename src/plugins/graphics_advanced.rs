@@ -6,20 +6,20 @@
 //! required for bloom / tonemapping to be perceptible, so the plugin
 //! respects `Settings::graphics.hdr` and simply no-ops when it's off.
 
-use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::post_process::{
-    auto_exposure::AutoExposure,
-    bloom::{Bloom, BloomCompositeMode, BloomPrefilter},
-};
 use bevy::anti_alias::{
     fxaa::Fxaa,
     smaa::{Smaa, SmaaPreset},
 };
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::EnvironmentMapLight;
 use bevy::pbr::{ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel};
+use bevy::post_process::{
+    auto_exposure::AutoExposure,
+    bloom::{Bloom, BloomCompositeMode, BloomPrefilter},
+};
 use bevy::prelude::*;
 
-use jarvis_avatar::config::{msaa_allows_ssao, GraphicsAdvancedSettings, Settings};
+use jarvis_avatar::config::{GraphicsAdvancedSettings, Settings, msaa_allows_ssao};
 
 pub struct GraphicsAdvancedPlugin;
 
@@ -84,7 +84,9 @@ fn apply_post_fx_to_entity(
     adv: &GraphicsAdvancedSettings,
     msaa_samples: u32,
 ) {
-    commands.entity(entity).insert(parse_tonemap(&adv.tonemapping));
+    commands
+        .entity(entity)
+        .insert(parse_tonemap(&adv.tonemapping));
 
     if adv.bloom.enabled {
         let mut b = Bloom::default();
@@ -129,7 +131,9 @@ fn apply_post_fx_to_entity(
             ..default()
         });
     } else {
-        commands.entity(entity).remove::<ScreenSpaceAmbientOcclusion>();
+        commands
+            .entity(entity)
+            .remove::<ScreenSpaceAmbientOcclusion>();
     }
 }
 
@@ -140,7 +144,9 @@ fn parse_tonemap(name: &str) -> Tonemapping {
         "ReinhardLuminance" => Tonemapping::ReinhardLuminance,
         "AcesFitted" | "ACES" | "Aces" => Tonemapping::AcesFitted,
         "AgX" | "AGX" => Tonemapping::AgX,
-        "SomewhatBoringDisplayTransform" | "Somewhat" => Tonemapping::SomewhatBoringDisplayTransform,
+        "SomewhatBoringDisplayTransform" | "Somewhat" => {
+            Tonemapping::SomewhatBoringDisplayTransform
+        }
         "BlenderFilmic" | "Blender" => Tonemapping::BlenderFilmic,
         _ => Tonemapping::TonyMcMapface,
     }

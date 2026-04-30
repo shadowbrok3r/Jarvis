@@ -40,10 +40,7 @@ pub mod a2f {
 
 pub mod animation_data {
     pub mod v1 {
-        include!(concat!(
-            env!("OUT_DIR"),
-            "/nvidia_ace.animation_data.v1.rs"
-        ));
+        include!(concat!(env!("OUT_DIR"), "/nvidia_ace.animation_data.v1.rs"));
     }
 }
 

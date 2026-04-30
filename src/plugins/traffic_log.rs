@@ -195,10 +195,7 @@ impl TrafficLogSink {
     }
 
     pub fn snapshot_channel(&self, ch: TrafficChannel) -> Vec<TrafficEntry> {
-        self.0
-            .lock()
-            .map(|g| g.entries(ch))
-            .unwrap_or_default()
+        self.0.lock().map(|g| g.entries(ch)).unwrap_or_default()
     }
 
     pub fn clear_all(&self) {

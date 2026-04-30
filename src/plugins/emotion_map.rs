@@ -8,7 +8,7 @@
 use bevy::prelude::*;
 
 use jarvis_avatar::config::Settings;
-use jarvis_avatar::emotions::{resolve_emotions_path, EmotionMap};
+use jarvis_avatar::emotions::{EmotionMap, resolve_emotions_path};
 
 pub struct EmotionMapPlugin;
 
@@ -31,10 +31,7 @@ impl EmotionMapRes {
     pub fn save(&mut self) {
         match self.inner.save() {
             Ok(()) => {
-                self.last_status = Some(format!(
-                    "saved → {}",
-                    self.inner.path.display()
-                ));
+                self.last_status = Some(format!("saved → {}", self.inner.path.display()));
             }
             Err(e) => {
                 self.last_status = Some(format!("save failed: {e}"));

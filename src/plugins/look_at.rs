@@ -130,9 +130,7 @@ fn attach_lookat_to_vrm(
         );
     } else {
         runtime.bevy_look_at_enabled = true;
-        commands
-            .entity(vrm_entity)
-            .insert(LookAt::Target(target));
+        commands.entity(vrm_entity).insert(LookAt::Target(target));
         info!(
             "look-at: attached target to VRM (idle_return_speed {:.1})",
             settings.look_at.idle_return_speed

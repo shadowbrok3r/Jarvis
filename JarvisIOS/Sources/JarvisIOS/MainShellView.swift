@@ -26,6 +26,8 @@ struct MainShellView: View {
     @AppStorage(HubProfileSync.Gateway.userDefaultsBaseURLKey) private var gatewayBaseURL: String = ""
     @AppStorage(HubProfileSync.Gateway.userDefaultsSecondaryBaseURLKey) private var gatewaySecondaryBaseURL: String = ""
     @AppStorage(HubProfileSync.Gateway.userDefaultsAuthTokenKey) private var gatewayAuthToken: String = ""
+    @AppStorage(HubProfileSync.Kokoro.userDefaultsBaseURLKey) private var kokoroBaseURL: String = ""
+    @AppStorage(HubProfileSync.Kokoro.userDefaultsVoiceKey) private var kokoroVoice: String = ""
     @State private var syncStatus: String = ""
     @State private var syncInFlight = false
     @State private var hubSyncProgress: Progress?
@@ -173,6 +175,20 @@ struct MainShellView: View {
                         .autocorrectionDisabled()
                     Text(
                         "Chat uses HTTP + SSE (tries primary URL, then fallback). The channel hub WebSocket uses the hub URLs and hub token below."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                Section("Kokoro TTS (chat voice)") {
+                    TextField("Kokoro base URL (http://host:8880)", text: $kokoroBaseURL)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                    TextField("Voice (e.g. af_heart or af_aoede(1.0)+af_nicole(1.0))", text: $kokoroVoice)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Text(
+                        "When set, each final assistant **response** on the Chat tab fetches `/v1/audio/speech` with `stream: false` and plays WAV — same contract as desktop. A2F is not on-device yet; use the desktop MCP `a2f_from_text` or wire gRPC separately."
                     )
                     .font(.caption2)
                     .foregroundStyle(.secondary)

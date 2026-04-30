@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
@@ -188,10 +188,7 @@ impl KimodoClient {
             // inside the streaming ring buffer. Kimodo is the only sane
             // source for streamed frames; we don't further filter here so
             // consumers don't need to thread a request_id through.
-            if request.stream
-                && env.message_type == "vrm:apply-pose"
-                && self.streaming.is_some()
-            {
+            if request.stream && env.message_type == "vrm:apply-pose" && self.streaming.is_some() {
                 if let Some(streaming) = self.streaming.as_ref() {
                     if let Some(frame) = parse_apply_pose_frame(&env) {
                         streaming.push_frame(frame);
@@ -225,7 +222,8 @@ impl KimodoClient {
                         fps = Some(f as f32);
                         // Sync streaming lane's fps so native playback matches.
                         if let Some(streaming) = self.streaming.as_ref() {
-                            if streaming.active_request_id().as_deref() == Some(request_id.as_str()) {
+                            if streaming.active_request_id().as_deref() == Some(request_id.as_str())
+                            {
                                 streaming.begin(request_id.clone(), f as f32);
                             }
                         }

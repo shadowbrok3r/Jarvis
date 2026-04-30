@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 use bevy_vrm1::prelude::{ColliderShape, SpringJointProps, SpringNodeRegistry, Vrm, VrmPath};
 
 use jarvis_avatar::config::Settings;
@@ -866,7 +866,9 @@ fn seed_bone_euler_from_snapshot(
     bone_euler: &mut HashMap<String, [f32; 3]>,
 ) {
     let Some(snap) = snapshot else {
-        bone_euler.entry(bone.to_string()).or_insert([0.0, 0.0, 0.0]);
+        bone_euler
+            .entry(bone.to_string())
+            .or_insert([0.0, 0.0, 0.0]);
         return;
     };
     let snap = snap.0.read();
@@ -883,7 +885,9 @@ fn seed_bone_euler_from_snapshot(
             [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()],
         );
     } else {
-        bone_euler.entry(bone.to_string()).or_insert([0.0, 0.0, 0.0]);
+        bone_euler
+            .entry(bone.to_string())
+            .or_insert([0.0, 0.0, 0.0]);
     }
 }
 
@@ -953,10 +957,7 @@ pub(crate) fn rig_editor_viewport_pick(
         if d > r {
             continue;
         }
-        let replace = best
-            .as_ref()
-            .map(|(bd, _)| d < *bd)
-            .unwrap_or(true);
+        let replace = best.as_ref().map(|(bd, _)| d < *bd).unwrap_or(true);
         if replace {
             best = Some((d, name.clone()));
         }

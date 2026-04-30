@@ -25,8 +25,9 @@ use reqwest_eventsource::Event as SseEvent;
 use serde_json::{Value, json};
 use tokio::runtime::Builder;
 
-use jarvis_avatar::act::strip_act_delay_for_tts;
+use jarvis_avatar::act::{should_skip_tts_for_error_like_response, strip_act_delay_for_tts};
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::ironclaw::chat_media;
 use jarvis_avatar::ironclaw::client::{GatewayClient, GatewayError};
 use jarvis_avatar::ironclaw::types::{
     AppEvent, ImageData, SendMessageRequest, ThreadInfo, TurnInfo, parse_app_event,
@@ -49,6 +50,7 @@ impl Plugin for IronclawChatPlugin {
             .add_message::<ThreadListMessage>()
             .add_message::<HistoryMessage>()
             .add_message::<ChatStatusMessage>()
+            .add_message::<AssistantInlineImagesMessage>()
             .add_message::<LocalUserEchoMessage>()
             // PostStartup so `HubBroadcast` (inserted by `ChannelHubPlugin` in
             // `Startup`) is already in the world when we spawn the gateway thread.
@@ -70,6 +72,13 @@ impl Plugin for IronclawChatPlugin {
 /// seconds." Without this, the user types → hits Send → their message
 /// vanishes until either the assistant replies (triggers history reload
 /// through the SSE `Response` path) or they click the thread again.
+/// Assistant turn images from gateway `image_generated` SSE (IronClaw tool pipeline).
+#[derive(Message, Debug, Clone)]
+pub struct AssistantInlineImagesMessage {
+    pub images: Vec<ImageData>,
+    pub caption: Option<String>,
+}
+
 #[derive(Message, Debug, Clone)]
 #[allow(dead_code)]
 pub struct LocalUserEchoMessage {
@@ -77,19 +86,8 @@ pub struct LocalUserEchoMessage {
     pub attachments: usize,
 }
 
-/// Heuristic check: does this look like a gateway-surfaced error we should
-/// NOT feed to TTS? We match the concrete failure modes observed:
-///   * `"Error: LLM error: Provider …"` — OpenRouter-style passthrough.
-///   * `"Provider <name> error: …"` — direct provider errors.
-///   * Anything starting with `"Error:"` or `"Gateway error:"`.
-fn is_error_like_response(text: &str) -> bool {
-    let head: String = text.trim().chars().take(80).collect();
-    let lowered = head.to_ascii_lowercase();
-    lowered.starts_with("error:")
-        || lowered.starts_with("error -")
-        || lowered.starts_with("gateway error")
-        || lowered.contains("llm error")
-        || (lowered.starts_with("provider ") && lowered.contains(" error"))
+fn truncate_detail(s: &str) -> String {
+    s.chars().take(56).collect()
 }
 
 // ---------- Bevy-facing types --------------------------------------------------
@@ -123,6 +121,8 @@ pub struct TranscriptLine {
     pub suggestions: Vec<String>,
     /// Pretty-printed `tool_calls` JSON from the same envelope, if any.
     pub tool_calls_json: Option<String>,
+    /// Inline images: markdown / data-URL text stripped into here, or `image_generated` SSE.
+    pub images: Vec<ImageData>,
 }
 
 /// Parsed from assistant text that contains a fenced ` ```json ` block with
@@ -237,12 +237,15 @@ impl TranscriptLine {
     /// [`Self::tool_calls_json`] and a reader-facing [`Self::text`] body.
     pub fn assistant_from_gateway_content(content: String, thinking: Option<String>) -> Self {
         let parsed = parse_gateway_assistant_content(&content);
+        let (text, images) =
+            chat_media::strip_inline_images_from_assistant_text(&parsed.display_text);
         Self {
             role: TranscriptRole::Assistant,
-            text: parsed.display_text,
+            text,
             thinking,
             suggestions: parsed.suggestions,
             tool_calls_json: parsed.tool_calls_json,
+            images,
         }
     }
 
@@ -439,7 +442,14 @@ fn spawn_gateway_thread(
                     return;
                 }
             };
-            rt.block_on(run_gateway(cfg, module_name, cmd_rx, in_tx, hub_tx, traffic));
+            rt.block_on(run_gateway(
+                cfg,
+                module_name,
+                cmd_rx,
+                in_tx,
+                hub_tx,
+                traffic,
+            ));
         })
         .expect("failed to spawn jarvis-gateway thread");
 }
@@ -460,7 +470,11 @@ async fn run_gateway(
     let traffic_log = traffic.clone();
     let active_thread = Arc::new(tokio::sync::RwLock::new({
         let s = cfg.default_thread_id.trim();
-        if s.is_empty() { None } else { Some(s.to_string()) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
     }));
 
     // Boot: list threads, materialize an active one if needed.
@@ -637,7 +651,10 @@ async fn bootstrap_threads(
     {
         let mut guard = active_thread.write().await;
         if guard.is_none() {
-            *guard = list.active_thread.clone().or_else(|| all.first().map(|t| t.id.clone()));
+            *guard = list
+                .active_thread
+                .clone()
+                .or_else(|| all.first().map(|t| t.id.clone()));
         }
         // If the configured default no longer exists, drop it.
         if let Some(id) = guard.clone() {
@@ -696,6 +713,7 @@ async fn load_history_inner(
                     thinking: None,
                     suggestions: vec![],
                     tool_calls_json: None,
+                    images: vec![],
                 });
                 if let Some(resp) = turn.response {
                     lines.push(TranscriptLine::assistant_from_gateway_content(
@@ -750,9 +768,9 @@ async fn run_event_stream(
                 }
                 Ok(SseEvent::Message(msg)) => {
                     if let Some(ref log) = traffic {
-                        let parsed: Value = serde_json::from_str(&msg.data).unwrap_or_else(|_| {
-                            json!({ "raw": msg.data.chars().take(4000).collect::<String>() })
-                        });
+                        let parsed: Value = serde_json::from_str(&msg.data).unwrap_or_else(
+                            |_| json!({ "raw": msg.data.chars().take(4000).collect::<String>() }),
+                        );
                         log.push(
                             TrafficChannel::IronclawGatewaySse,
                             TrafficDirection::Inbound,
@@ -780,7 +798,9 @@ async fn run_event_stream(
                             // is set (the gateway can broadcast events for
                             // threads we don't care about).
                             let active = active_thread.read().await.clone();
-                            if let (Some(active), Some(ev_thread)) = (active.as_deref(), ev.thread_id()) {
+                            if let (Some(active), Some(ev_thread)) =
+                                (active.as_deref(), ev.thread_id())
+                            {
                                 if active != ev_thread {
                                     continue;
                                 }
@@ -845,8 +865,10 @@ fn pump_gateway_into_bevy(
     mut history: MessageWriter<HistoryMessage>,
     mut status: MessageWriter<ChatStatusMessage>,
     mut chat_complete: MessageWriter<ChatCompleteMessage>,
+    mut assistant_inline: MessageWriter<AssistantInlineImagesMessage>,
     mut tts: MessageWriter<TtsSpeakMessage>,
     mut state: ResMut<ChatState>,
+    mut pipeline: ResMut<super::chat_pipeline_status::ChatPipelineStatus>,
 ) {
     let Some(inbound) = inbound else { return };
     while let Ok(ev) = inbound.rx.try_recv() {
@@ -858,7 +880,9 @@ fn pump_gateway_into_bevy(
                     &mut thinking,
                     &mut tools,
                     &mut chat_complete,
+                    &mut assistant_inline,
                     &mut tts,
+                    &mut pipeline,
                 );
             }
             GatewayInboundEvent::Threads(list) => {
@@ -898,16 +922,26 @@ fn handle_app_event(
     thinking: &mut MessageWriter<ThinkingStateMessage>,
     tools: &mut MessageWriter<ToolEventMessage>,
     chat_complete: &mut MessageWriter<ChatCompleteMessage>,
+    assistant_inline: &mut MessageWriter<AssistantInlineImagesMessage>,
     tts: &mut MessageWriter<TtsSpeakMessage>,
+    pipeline: &mut super::chat_pipeline_status::ChatPipelineStatus,
 ) {
     match ev {
         AppEvent::StreamChunk { content, thread_id } => {
+            pipeline.set(
+                super::chat_pipeline_status::ChatPipelineStage::AiStreaming,
+                format!("chunk +{} chars", content.len()),
+            );
             delta.write(AssistantDeltaMessage {
                 thread_id,
                 delta: content,
             });
         }
         AppEvent::Thinking { message, .. } => {
+            pipeline.set(
+                super::chat_pipeline_status::ChatPipelineStage::AiThinking,
+                truncate_detail(&message),
+            );
             thinking.write(ThinkingStateMessage {
                 active: true,
                 text: message,
@@ -927,16 +961,28 @@ fn handle_app_event(
             // Kokoro. Kokoro's Chinese-glyph fallback of a long "Error: LLM
             // error: Provider …" string produced a ~1MB WAV that bevy_audio
             // refused to decode, panicking the render loop.
-            let looks_like_error = is_error_like_response(&speak);
+            let looks_like_error = should_skip_tts_for_error_like_response(&speak);
             if looks_like_error {
                 warn!(
                     target: "ironclaw_chat",
                     "skipping TTS for error-like response ({} chars)",
                     speak.len()
                 );
-            }
-            if !speak.trim().is_empty() && !looks_like_error {
+                pipeline.set(
+                    super::chat_pipeline_status::ChatPipelineStage::Idle,
+                    "assistant message (error-like; TTS skipped)",
+                );
+            } else if !speak.trim().is_empty() {
+                pipeline.set(
+                    super::chat_pipeline_status::ChatPipelineStage::KokoroQueued,
+                    format!("TTS {} chars", speak.len()),
+                );
                 tts.write(TtsSpeakMessage { text: speak });
+            } else {
+                pipeline.set(
+                    super::chat_pipeline_status::ChatPipelineStage::Idle,
+                    "assistant message (empty after ACT strip)",
+                );
             }
             thinking.write(ThinkingStateMessage {
                 active: false,
@@ -957,6 +1003,10 @@ fn handle_app_event(
             detail,
             thread_id,
         } => {
+            pipeline.set(
+                super::chat_pipeline_status::ChatPipelineStage::ToolRunning,
+                format!("{name} {}", detail.as_deref().unwrap_or("")),
+            );
             tools.write(ToolEventMessage {
                 phase: ToolPhase::Started,
                 tool: name,
@@ -969,6 +1019,10 @@ fn handle_app_event(
             error,
             thread_id,
         } => {
+            pipeline.set(
+                super::chat_pipeline_status::ChatPipelineStage::Idle,
+                format!("tool {name} ok={success}"),
+            );
             tools.write(ToolEventMessage {
                 phase: ToolPhase::Completed,
                 tool: name,
@@ -986,7 +1040,19 @@ fn handle_app_event(
                 payload: json!({ "preview": preview, "thread_id": thread_id }),
             });
         }
+        AppEvent::ImageGenerated { data_url, path, .. } => {
+            if let Some(img) = chat_media::image_data_from_data_url(&data_url) {
+                assistant_inline.write(AssistantInlineImagesMessage {
+                    images: vec![img],
+                    caption: path,
+                });
+            }
+        }
         AppEvent::Error { message, .. } => {
+            pipeline.set(
+                super::chat_pipeline_status::ChatPipelineStage::Idle,
+                truncate_detail(&message),
+            );
             tools.write(ToolEventMessage {
                 phase: ToolPhase::Result,
                 tool: "error".into(),
@@ -1041,17 +1107,12 @@ fn update_chat_state_from_messages(
     mut deltas: MessageReader<AssistantDeltaMessage>,
     mut thinking: MessageReader<ThinkingStateMessage>,
     mut chat_complete: MessageReader<ChatCompleteMessage>,
+    mut assistant_inline: MessageReader<AssistantInlineImagesMessage>,
     mut hub_inputs: MessageReader<HubInputTextMessage>,
     mut local_echo: MessageReader<LocalUserEchoMessage>,
 ) {
     for ev in deltas.read() {
         state.streaming_buffer.push_str(&ev.delta);
-    }
-    for ev in chat_complete.read() {
-        let thinking = state.thinking_buffer.take();
-        let line = TranscriptLine::assistant_from_gateway_content(ev.content.clone(), thinking);
-        push_transcript(&mut state, line);
-        state.streaming_buffer.clear();
     }
     for ev in thinking.read() {
         if ev.active {
@@ -1061,6 +1122,30 @@ fn update_chat_state_from_messages(
             state.thinking = None;
             state.thinking_buffer = None;
         }
+    }
+    for ev in chat_complete.read() {
+        let thinking = state.thinking_buffer.take();
+        let line = TranscriptLine::assistant_from_gateway_content(ev.content.clone(), thinking);
+        push_transcript(&mut state, line);
+        state.streaming_buffer.clear();
+    }
+    for ev in assistant_inline.read() {
+        let text = ev
+            .caption
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Generated image".into());
+        push_transcript(
+            &mut state,
+            TranscriptLine {
+                role: TranscriptRole::Assistant,
+                text,
+                thinking: None,
+                suggestions: vec![],
+                tool_calls_json: None,
+                images: ev.images.clone(),
+            },
+        );
     }
     for ev in hub_inputs.read() {
         let text = ev.text.trim();
@@ -1080,13 +1165,13 @@ fn update_chat_state_from_messages(
                 thinking: None,
                 suggestions: vec![],
                 tool_calls_json: None,
+                images: vec![],
             },
         );
     }
     for ev in local_echo.read() {
-        // Attachments aren't rendered in-bubble (the transcript is text-only
-        // for now); surface the count so the user sees a confirmation line
-        // even when their "message" was images only.
+        // User attachments: surface count in the echo line; binary payloads
+        // are sent to the gateway separately.
         let text = if ev.text.is_empty() && ev.attachments > 0 {
             format!(
                 "[{} image{}]",
@@ -1114,6 +1199,7 @@ fn update_chat_state_from_messages(
                 thinking: None,
                 suggestions: vec![],
                 tool_calls_json: None,
+                images: vec![],
             },
         );
     }

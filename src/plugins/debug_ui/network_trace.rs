@@ -1,7 +1,7 @@
 //! Per-service traffic log with JSON tree inspection.
 
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 use egui_json_tree::JsonTree;
 
 use jarvis_avatar::config::Settings;
@@ -66,10 +66,7 @@ pub fn draw_network_trace_window(
                             dbg.network_trace_pick = None;
                         }
                         if ui
-                            .add_sized(
-                                [ui.available_width(), 28.0],
-                                egui::Button::new("Clear all"),
-                            )
+                            .add_sized([ui.available_width(), 28.0], egui::Button::new("Clear all"))
                             .clicked()
                         {
                             log.clear_all();
@@ -122,11 +119,8 @@ pub fn draw_network_trace_window(
                                     ui.monospace(&e.summary);
                                     ui.separator();
                                     if let Some(ref p) = e.payload {
-                                        JsonTree::new(
-                                            ui.make_persistent_id(("json_tree", i)),
-                                            p,
-                                        )
-                                        .show(ui);
+                                        JsonTree::new(ui.make_persistent_id(("json_tree", i)), p)
+                                            .show(ui);
                                     } else {
                                         ui.label("(no JSON payload)");
                                     }

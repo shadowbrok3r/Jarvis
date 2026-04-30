@@ -17,7 +17,9 @@ struct SavedAnimationsPlayView: View {
             Section {
                 Text(
                     "Plays Kimodo / MCP-style JSON clips on device (relative to hub sync asset root). " +
-                        "Use **Sync profile** on About to download `animations/*.json` from the desktop hub."
+                        "Use **Sync profile** on About to download `animations/*.json` from the desktop hub. " +
+                        "Open the **Avatar** tab to run the Metal frame loop — queued clips apply on the next tick there. " +
+                        "Bone rotations use the same **normalized humanoid** quaternion space as the desktop pose driver."
                 )
                 .font(.caption2)
                 .foregroundStyle(.secondary)

@@ -95,10 +95,7 @@ pub(crate) fn spawn_avatar_vrm(
 }
 
 /// Fires when the VRMA clip is ready; loops forever (see `bevy_vrm1` `examples/vrma.rs`).
-pub(crate) fn play_idle_when_vrma_loaded(
-    trigger: On<LoadedVrma>,
-    mut commands: Commands,
-) {
+pub(crate) fn play_idle_when_vrma_loaded(trigger: On<LoadedVrma>, mut commands: Commands) {
     commands.trigger(PlayVrma {
         repeat: RepeatAnimation::Forever,
         transition_duration: Duration::ZERO,

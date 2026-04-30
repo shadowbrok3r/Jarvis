@@ -6,7 +6,7 @@
 //! `sections.rs`.
 
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::config::Settings;
 
@@ -97,8 +97,7 @@ pub fn draw_services_window(
 }
 
 fn status_dot(ui: &mut egui::Ui, state: ServiceState) {
-    let (rect, _resp) =
-        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
     let painter = ui.painter();
     let center = rect.center();
     painter.circle_filled(center, 5.0, state.color());

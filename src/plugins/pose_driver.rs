@@ -30,7 +30,7 @@ use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use bevy_vrm1::prelude::*;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -102,10 +102,7 @@ pub fn def_toe_big_yaw_slider_extra_deg(bone: &str) -> f32 {
     let Some((digit, side)) = rest.split_once('.') else {
         return 0.0;
     };
-    if !matches!(
-        digit,
-        "big" | "index" | "middle" | "ring" | "little"
-    ) {
+    if !matches!(digit, "big" | "index" | "middle" | "ring" | "little") {
         return 0.0;
     }
     match side {
@@ -117,7 +114,7 @@ pub fn def_toe_big_yaw_slider_extra_deg(bone: &str) -> f32 {
 
 use jarvis_avatar::config::Settings;
 
-use crate::plugins::avatar::{spawn_avatar_vrm, AvatarVrmRoot};
+use crate::plugins::avatar::{AvatarVrmRoot, spawn_avatar_vrm};
 
 pub struct PoseDriverPlugin;
 
@@ -507,8 +504,6 @@ macro_rules! sync_bone_index_impl {
             // swap, not a length change.
             let changed = by_name != index.by_name;
             if changed {
-                let names: std::collections::HashSet<String> = by_name.keys().cloned().collect();
-                let entities: HashMap<String, Entity> = by_name.clone();
                 index.by_name = by_name;
                 if grew {
                     index.frames_since_growth = 0;
@@ -611,9 +606,18 @@ pub(crate) fn sync_bone_entity_index(world: &mut World) {
 
 /// Canonical list of supported VRM expression presets.
 pub const VRM_EXPRESSION_NAMES: &[&str] = &[
-    "happy", "angry", "sad", "relaxed", "surprised",
-    "aa", "ih", "ou", "ee", "oh",
-    "blinkLeft", "blinkRight",
+    "happy",
+    "angry",
+    "sad",
+    "relaxed",
+    "surprised",
+    "aa",
+    "ih",
+    "ou",
+    "ee",
+    "oh",
+    "blinkLeft",
+    "blinkRight",
 ];
 
 /// A command that wants to own the rig's pose this frame — we stop every
@@ -641,11 +645,7 @@ fn is_manual_pose_cmd(cmd: &PoseCommand) -> bool {
 /// Walk `ChildOf` parents up the tree for up to `max_depth` steps, returning
 /// the chain `[(entity, name)]` starting from `entity` itself. Stops when a
 /// step has no parent.
-fn ancestor_chain(
-    world: &World,
-    entity: Entity,
-    max_depth: usize,
-) -> Vec<(Entity, String)> {
+fn ancestor_chain(world: &World, entity: Entity, max_depth: usize) -> Vec<(Entity, String)> {
     let mut out = Vec::new();
     let mut cur = Some(entity);
     for _ in 0..max_depth {
@@ -675,14 +675,14 @@ fn dump_diagnostics(world: &mut World) {
         info!(target: "pose_driver", "dump_diagnostics: BoneEntityIndex empty or missing");
         return;
     }
-    let bones: Vec<(String, Entity)> = bone_map
-        .iter()
-        .map(|(n, &e)| (n.clone(), e))
-        .collect();
+    let bones: Vec<(String, Entity)> = bone_map.iter().map(|(n, &e)| (n.clone(), e)).collect();
     let total = bones.len();
 
     // Collect every SkinnedMesh and its joint entities so we can cross-check.
-    let (skins, inverse_lookup): (Vec<(Entity, Vec<Entity>)>, HashMap<Entity, Vec<(usize, Entity)>>) = {
+    let (skins, inverse_lookup): (
+        Vec<(Entity, Vec<Entity>)>,
+        HashMap<Entity, Vec<(usize, Entity)>>,
+    ) = {
         let mut q = world.query::<(Entity, &SkinnedMesh)>();
         let mut skins_vec: Vec<(Entity, Vec<Entity>)> = Vec::new();
         let mut lookup: HashMap<Entity, Vec<(usize, Entity)>> = HashMap::new();
@@ -729,10 +729,7 @@ fn dump_diagnostics(world: &mut World) {
         let parent_name = parent
             .and_then(|p| world.get::<Name>(p).map(|n| n.as_str().to_string()))
             .unwrap_or_else(|| "<none>".into());
-        let children_count = world
-            .get::<Children>(*entity)
-            .map(|c| c.len())
-            .unwrap_or(0);
+        let children_count = world.get::<Children>(*entity).map(|c| c.len()).unwrap_or(0);
         let local_rot = world
             .get::<Transform>(*entity)
             .map(|tf| tf.rotation)
@@ -950,7 +947,12 @@ pub(crate) fn tick_expression_animation(world: &mut World) {
 /// `pose_bones` / UI sliders round-trip with [`normalized_from_local`] in
 /// [`publish_bone_snapshot`] without a separate “delta quaternion” path for
 /// Rigify `DEF-*` joints (which previously broke Euler slider extraction).
-fn bone_target_local_rotation(world: &World, _bone_name: &str, entity: Entity, pose_q: Quat) -> Quat {
+fn bone_target_local_rotation(
+    world: &World,
+    _bone_name: &str,
+    entity: Entity,
+    pose_q: Quat,
+) -> Quat {
     let rest_local = world
         .get::<RestTransform>(entity)
         .map(|rt| rt.0.rotation)
@@ -1096,27 +1098,20 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                     continue;
                 }
                 let weight = blend_weight.unwrap_or(default_blend).clamp(0.0, 1.0);
-                let transition = transition_seconds
-                    .unwrap_or(default_transition)
-                    .max(0.0);
+                let transition = transition_seconds.unwrap_or(default_transition).max(0.0);
                 let blend_path = blends_enabled && (transition > 0.0 || weight < 1.0);
 
                 if !preserve_omitted_bones {
                     for (name, &e) in &bone_map {
-                        let target = bone_target_local_rotation(
-                            world,
-                            name.as_str(),
-                            e,
-                            Quat::IDENTITY,
-                        );
+                        let target =
+                            bone_target_local_rotation(world, name.as_str(), e, Quat::IDENTITY);
                         if let Some(mut tf) = world.get_mut::<Transform>(e) {
                             tf.rotation = target;
                         }
                     }
                     // Resetting omitted bones also clears any in-flight transitions for them.
                     if let Some(mut act) = world.get_resource_mut::<ActiveTransitions>() {
-                        act.bones
-                            .retain(|n, _| bones.contains_key(n));
+                        act.bones.retain(|n, _| bones.contains_key(n));
                     }
                 }
 
@@ -1152,8 +1147,8 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                             continue;
                         };
                         let current = tf.rotation;
-                        let pose_q = Quat::from_xyzw(q_arr[0], q_arr[1], q_arr[2], q_arr[3])
-                            .normalize();
+                        let pose_q =
+                            Quat::from_xyzw(q_arr[0], q_arr[1], q_arr[2], q_arr[3]).normalize();
                         let target_raw =
                             bone_target_local_rotation(world, name.as_str(), e, pose_q);
                         // Partial weight = slerp toward the target by `weight` up front.
@@ -1191,8 +1186,8 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                         let Some(&e) = bone_map.get(&name) else {
                             continue;
                         };
-                        let pose_q = Quat::from_xyzw(q_arr[0], q_arr[1], q_arr[2], q_arr[3])
-                            .normalize();
+                        let pose_q =
+                            Quat::from_xyzw(q_arr[0], q_arr[1], q_arr[2], q_arr[3]).normalize();
                         let final_q = bone_target_local_rotation(world, name.as_str(), e, pose_q);
                         if let Some(mut tf) = world.get_mut::<Transform>(e) {
                             tf.rotation = final_q;
@@ -1222,7 +1217,9 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                     .into_iter()
                     .map(|(k, v)| (VrmExpression::from(k.as_str()), v))
                     .collect();
-                world.commands().trigger(ModifyExpressions::from_iter(e, pairs));
+                world
+                    .commands()
+                    .trigger(ModifyExpressions::from_iter(e, pairs));
             }
             PoseCommand::SetExpression { weights } => {
                 clear_expression_animation_playback(world);
@@ -1233,7 +1230,9 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                     .into_iter()
                     .map(|(k, v)| (VrmExpression::from(k.as_str()), v))
                     .collect();
-                world.commands().trigger(SetExpressions::from_iter(e, pairs));
+                world
+                    .commands()
+                    .trigger(SetExpressions::from_iter(e, pairs));
             }
             PoseCommand::DumpDiagnostics => {
                 dump_diagnostics(world);
@@ -1337,7 +1336,9 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                 }
                 if let Some(e) = vrm_entity {
                     let empty: Vec<(VrmExpression, f32)> = Vec::new();
-                    world.commands().trigger(SetExpressions::from_iter(e, empty));
+                    world
+                        .commands()
+                        .trigger(SetExpressions::from_iter(e, empty));
                 }
             }
             PoseCommand::LoadVrm { .. } => {
@@ -1389,7 +1390,9 @@ fn publish_bone_snapshot(world: &mut World) {
     let mut snap = BoneSnapshot::default();
     // Humanoid keys: normalized-humanoid space (Airi / pose-controller).
     for (name, &e) in &index.by_name {
-        let Some(tf) = world.get::<Transform>(e) else { continue; };
+        let Some(tf) = world.get::<Transform>(e) else {
+            continue;
+        };
         let rest_local = world
             .get::<RestTransform>(e)
             .map(|rt| rt.0.rotation)
@@ -1409,7 +1412,9 @@ fn publish_bone_snapshot(world: &mut World) {
     // Extra skin joints: same normalized pose space as humanoid keys so MCP
     // `pose_bones` / `get_current_bone_state` / Pose Controller sliders agree.
     for (name, &e) in &index.extra_by_name {
-        let Some(tf) = world.get::<Transform>(e) else { continue; };
+        let Some(tf) = world.get::<Transform>(e) else {
+            continue;
+        };
         let rest_local = world
             .get::<RestTransform>(e)
             .map(|rt| rt.0.rotation)
@@ -1422,12 +1427,7 @@ fn publish_bone_snapshot(world: &mut World) {
         snap.bones.insert(
             name.clone(),
             BoneEntry {
-                rotation: [
-                    normalized.x,
-                    normalized.y,
-                    normalized.z,
-                    normalized.w,
-                ],
+                rotation: [normalized.x, normalized.y, normalized.z, normalized.w],
             },
         );
     }
