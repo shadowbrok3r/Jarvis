@@ -29,6 +29,20 @@ Per-bone degree limits are defined in `src/mcp/pose_authoring.rs` (`euler_limit_
 - **Knee (`*LowerLeg`)** — flexion is usually **negative pitch** relative to the thigh.
 - **Finger curl** — mostly **roll**; keep pitch/yaw near 0 unless you need a tiny spread. Right-hand curl tends toward **positive roll**; left-hand toward **negative roll** for the same visual curl direction.
 
+### Upper arm: lateral “arms out” vs arms-behind (**yaw vs roll**)
+
+- **Symptom (front view):** elbows aim **aft**, forearms tuck **behind** the torso, or the silhouette matches **arms-behind** when you wanted a partial **T / soft fly**.
+- **Cause:** On `leftUpperArm` / `rightUpperArm`, **`yaw_deg` twists about local Y (bone length)** — it is **not** “reach sideways.” Large ±`yaw_deg` there corkscrews the humerus and often sends the forearm chain **posterior** (the same axis family that **intentional** arms-behind poses use on this rig).
+- **Fix:** Use **`roll_deg`** for the abduction / adduction–like spread (see the **roll** bullet in **Euler convention**). Add modest **`pitch_deg`** on the upper arm if you need a slight forward aim, and **negative `pitch_deg` on `*LowerArm`** for a soft elbow. Example correction: Comfy manifest **`c19_arms_out_soft`** was wrong while it used large **`yaw_deg`** on both upper arms; it should use **opposed `roll_deg`** instead.
+- **Verify:** `capture_pose_views` with **`front`**, **`back`**, **`back_left`**, and **`back_right`** so “behind the back” mistakes show immediately.
+
+### Crouch / squat / plié: avoid the “skyfall” (prone arch) silhouette
+
+- **Symptom:** The body reads **horizontal / prone** (freefall, skydiver arch): **hips + spine** pitched forward as one plank while legs do not carry enough of the fold.
+- **Cause:** Stacking **large `hips.pitch_deg`** with **large `spine` / `chest` / `upperChest` `pitch_deg`** rotates the root and column **together** forward. Knee-only tweaks do not fix the overall silhouette.
+- **Fix:** Keep **`hips.pitch_deg` modest** for grounded squats (often **≤ ~8°** unless you deliberately want a strong athletic lean). Put most flexion in **`leftUpperLeg` / `rightUpperLeg`** and **`leftLowerLeg` / `rightLowerLeg`**, then **`leftFoot` / `rightFoot`**. Add **spine → chest → upperChest** in smaller steps **after** side/back captures show the **legs** folding, not “diving.” Use **`assets/poses/sit.json`** as a **rotation-only** reference: the seated shape is mostly **thigh–shin** with **relatively small** pelvis change vs an over-hip-pitched torso plank.
+- **Comfy manifest:** **`c12_soft_plie`** and **`c24_mild_crouch`** were revised toward this split (see `captures/comfy_custom_pose_manifest.json` notes on each entry).
+
 ### Mirroring left and right
 
 Do **not** mirror by negating quaternion Y and Z — that is unreliable once rest poses are non-trivial. Instead: build the right side with `pose_bones`, then repeat with **opposite signs on yaw and roll** (and sometimes pitch) on the left, **or** call `make_fist` / tune one side and mirror using small `adjust_bone` steps while watching the viewport.
@@ -92,7 +106,9 @@ Other **`DEF-toe*`** joints use a **wider geodesic snap** (~34° from identity) 
 
 `pose_bones` only drives **bone rotations**. It does **not** move the VRM scene root. If the character’s **hips look floating** above the ground plane while the legs are folded, lower the avatar root: use the Avatar window controls or set `[avatar].world_position` in `config/default.toml` (see comments there and `src/plugins/avatar.rs`). `lock_root_y` / `lock_vrm_root_y` interact with vertical locking — adjust if the root keeps snapping back.
 
-**Knee direction (MMD-style rigs):** knee flex is usually **negative** `pitch_deg` on `*LowerLeg`. If the knee bends the wrong way, flip the sign (try **positive** `pitch_deg` on `*LowerLeg`) and keep `*UpperLeg` as the parent driver for the thigh fold.
+**Knee direction (MMD-style rigs):** knee flex is often documented as **negative** `pitch_deg` on `*LowerLeg` (shin relative to thigh). On **some** exports—including the repo’s default **`airi.vrm`** used for Comfy reference captures—that convention **hyperextends the knee backward** (the crease faces posterior while the shin should sit anterior). **Fix:** flip to **positive** `pitch_deg` on **both** `leftLowerLeg` and `rightLowerLeg`, and drive the thigh with **positive** `pitch_deg` on `*UpperLeg` for a shallow squat/plie before adding more knee. Tune in **±4–8°** steps and always **look at profile PNGs** after `capture_pose_views`.
+
+**How to verify (mandatory for leg-heavy poses):** use `capture_pose_views` with at least **`left`**, **`right`**, **`back`**, **`back_left`**, and **`back_right`** (see MCP tool; `rear` is an alias for `back`). A correct forward knee bend shows the patella region facing **forward** in the side views and the shins **in front of** the thigh line—not a concave “inverted” knee.
 
 **Torso vs head:** put most of the forward lean on **spine → chest → upperChest** (moderate positive pitch on each, parent-to-child). Keep **neck** and **head** closer to neutral (small angles) so the gaze stays forward instead of staring at the floor.
 
@@ -103,7 +119,7 @@ Other **`DEF-toe*`** joints use a **wider geodesic snap** (~34° from identity) 
 - **Symptom → fix (leg behind body):** If the raised leg extends **behind** the torso instead of **in front**, the primary lever is usually **`leftUpperLeg` / `rightUpperLeg`** — try **flipping the sign on `pitch_deg` first** (often +↔−), then adjust **`yaw_deg` in ±10–20°** steps. Do **not** only crank `*LowerLeg` when the thigh aim is wrong.
 - **Knee bend wrong way:** On MMD-style rigs, knee flex is usually **negative `pitch_deg` on `*LowerLeg`**; if the knee collapses backward, **flip the sign on `*LowerLeg` `pitch_deg`** before touching the foot.
 - **Order of operations:** (a) thigh aim forward, (b) slight `*LowerLeg` bend, (c) `*Foot` — toe forward, (d) `*Toes` then `DEF-toe_*` for fan — small steps; read MCP **`warnings`** for clamps.
-- **Verification:** `capture_pose_views` with **`framing_preset: "full_body"`** and at least **left** and **right** views to catch “leg behind” mistakes early. For the full multi-view **done** gate (front/sides, optional 3/4), see [**Self-corrective workflow (verify before “done”)**](#self-corrective-workflow-verify-before-done).
+- **Verification:** `capture_pose_views` with **`framing_preset: "full_body"`** and at least **left**, **right**, **back**, **back_left**, and **back_right** to catch “leg behind” and **backward-knee** mistakes early. For the full multi-view **done** gate (front/sides/back 3/4), see [**Self-corrective workflow (verify before “done”)**](#self-corrective-workflow-verify-before-done).
 - **Toe fan:** Set aggregate **`leftToes` / `rightToes`** first; add per-toe **`DEF-toe_*`** only if **`get_bone_reference`** lists them — prefer **yaw/roll** before **pitch** for fan.
 
 ## Bone hierarchy
@@ -203,6 +219,8 @@ The **`make_fist`** MCP tool internally blends between the relaxed template and 
 3. **Skipping the parent chain** — rotating `rightLowerArm` without placing `rightUpperArm` first usually looks wrong.
 4. **Huge finger values** — use **`make_fist`** instead of guessing quaternions.
 5. **Ignoring MCP warnings** — if the server clamped something, the pose is not what you typed.
+6. **Large `yaw_deg` on `*UpperArm` for “arms out”** — often reads **arms-behind**; use **`roll_deg`** for lateral spread (see **Upper arm: lateral “arms out” vs arms-behind (yaw vs roll)** above).
+7. **Deep squat from hips+spine pitch only** — reads **prone / skyfall**; fold **thigh–shin** first and cap **`hips.pitch_deg`** (see **Crouch / squat / plié: avoid the “skyfall” (prone arch) silhouette** above).
 
 ## VRM expressions
 
@@ -336,7 +354,7 @@ VRMA imports from the script above omit **`expressions`**; add them by editing J
 
 Applies to **all** body-part and face work: treat authoring as **closed-loop**—tool success alone is not sufficient.
 
-**After material body changes** — `pose_bones`, leg chains, `make_fist`, Kimodo apply, hub leg/pose applies, or similar — always run **`capture_pose_views`** with **`framing_preset: "full_body"`** and `views` including at least **`front`**, **`left`**, **`right`**. For shoulders, arms, and torso silhouette, add **`front_left`** and **`front_right`**.
+**After material body changes** — `pose_bones`, leg chains, `make_fist`, Kimodo apply, hub leg/pose applies, or similar — always run **`capture_pose_views`** with **`framing_preset: "full_body"`** and `views` including at least **`front`**, **`left`**, **`right`**, **`back`**, **`back_left`**, and **`back_right`**. For shoulders, arms, and torso silhouette, add **`front_left`** and **`front_right`**. **Arms:** if every shot reads as a rigid **T-pose**, add **moderate negative `pitch_deg` on `*LowerArm`** (and/or tune **`roll_deg`** on `*UpperArm` for lateral spread — **do not** use large **`yaw_deg`** on upper arms for “wingspan”; see **Upper arm: lateral “arms out” vs arms-behind (yaw vs roll)** above) before re-capturing.
 
 **Capture vs. main viewport:** offscreen capture cameras aim at the **loaded VRM root’s world position** (after transform propagation), not the orbit gameplay camera — you still get valid transparent PNGs if she is panned off-screen, as long as the model stays in the scene.
 
@@ -353,7 +371,7 @@ Concrete payloads and camera overrides: **Visual verification loop** below.
 1. Apply a coarse body pose with `pose_bones` (and `make_fist` if needed).
 2. Capture validation images with `capture_pose_views`:
    - `output_dir` required.
-   - Use explicit `views`: `["front","left","right","front_left","front_right"]`.
+   - Use explicit `views`: `["front","left","right","front_left","front_right","back","back_left","back_right"]`.
    - Use higher resolution while tuning (for example `width=1536`, `height=1536`).
    - Use a deterministic `capture_id` so files are easy to diff across passes.
    - `framing_preset: "full_body"` pulls camera framing back so lower legs + heels stay visible.

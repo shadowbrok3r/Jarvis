@@ -32,7 +32,9 @@ use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 
 use jarvis_avatar::a2f::{A2fClient, A2fConfig, A2fResult};
-use jarvis_avatar::arkit::{ArkitKeyframe, map_keyframes_to_vrm};
+use jarvis_avatar::arkit::{
+    ArkitKeyframe, map_keyframes_to_vrm, merge_a2f_emotion_hint_into_keyframes,
+};
 use jarvis_avatar::config::Settings;
 
 use super::chat_pipeline_status::{ChatPipelineStage, ChatPipelineStatus};
@@ -114,7 +116,9 @@ fn a2f_result_to_face_clip(result: &A2fResult) -> Option<(Vec<(f32, HashMap<Stri
             blend_shapes: k.blend_shapes.clone(),
         })
         .collect();
-    let vrm = map_keyframes_to_vrm(&arkit, None);
+    let mut vrm = map_keyframes_to_vrm(&arkit, None);
+    // Clip-level first-chunk emotion hints (A2F keys) → VRM; additive on non-viseme channels only.
+    merge_a2f_emotion_hint_into_keyframes(&mut vrm, &result.emotion_hints_applied, None);
     let mut frames: Vec<(f32, HashMap<String, f32>)> = vrm
         .iter()
         .map(|k| (k.time_code as f32, k.expressions.clone()))

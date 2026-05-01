@@ -1,14 +1,15 @@
 //! Offscreen multi-view avatar capture for MCP pose verification.
 //!
-//! Captures transparent PNGs from deterministic camera views (front/left/right
-//! and optional extras). The capture camera only renders entities on a dedicated
+//! Captures transparent PNGs from deterministic camera views (front/sides/diagonals/back)
+//! for MCP verification. The capture camera only renders entities on a dedicated
 //! render layer so outputs contain only the avatar + lights, not the ground/UI.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bevy::camera::visibility::RenderLayers;
-use bevy::camera::{ClearColorConfig, RenderTarget};
+use bevy::camera::{CameraUpdateSystems, ClearColorConfig, RenderTarget};
+use bevy::light::SimulationLightSystems;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
@@ -43,6 +44,13 @@ impl Plugin for PoseCapturePlugin {
             // images exist so `GpuImage` is present when Bevy's screenshot extract runs; otherwise
             // `prepare_screenshots` skips once, the entity stays `Capturing`, and observers never
             // fire (MCP `capture_pose_views` waits until timeout).
+            //
+            // Schedule **before** `SimulationLightSystems::UpdateDirectionalLightCascades` so
+            // `RenderLayers` on `DirectionalLight`s (and newly spawned capture `Camera`s from
+            // `drain_capture_requests`) are visible when `clear_directional_light_cascades` /
+            // `build_directional_light_cascades` run. Otherwise `Cascades` can miss a view key while
+            // the render pass still treats the light as shadowing that view → panics in
+            // `bevy_pbr::render::light::prepare_lights` (`unwrap` on missing cascades).
             .add_systems(
                 PostUpdate,
                 (
@@ -53,7 +61,9 @@ impl Plugin for PoseCapturePlugin {
                     advance_capture_pipeline_tick,
                 )
                     .chain()
-                    .after(TransformSystems::Propagate),
+                    .after(TransformSystems::Propagate)
+                    .after(CameraUpdateSystems)
+                    .before(SimulationLightSystems::UpdateDirectionalLightCascades),
             );
     }
 }
@@ -66,6 +76,12 @@ pub enum CaptureView {
     Right,
     FrontLeft,
     FrontRight,
+    /// Camera behind the avatar (same horizontal ring as front, opposite +Z).
+    Back,
+    /// Three-quarter from back-left.
+    BackLeft,
+    /// Three-quarter from back-right.
+    BackRight,
 }
 
 impl CaptureView {
@@ -76,6 +92,9 @@ impl CaptureView {
             Self::Right => "right",
             Self::FrontLeft => "front_left",
             Self::FrontRight => "front_right",
+            Self::Back => "back",
+            Self::BackLeft => "back_left",
+            Self::BackRight => "back_right",
         }
     }
 
@@ -86,6 +105,9 @@ impl CaptureView {
             Self::Right => Vec3::new(1.0, 0.0, 0.0),
             Self::FrontLeft => Vec3::new(-1.0, 0.0, 1.0).normalize(),
             Self::FrontRight => Vec3::new(1.0, 0.0, 1.0).normalize(),
+            Self::Back => Vec3::new(0.0, 0.0, -1.0),
+            Self::BackLeft => Vec3::new(-1.0, 0.0, -1.0).normalize(),
+            Self::BackRight => Vec3::new(1.0, 0.0, -1.0).normalize(),
         }
     }
 }
@@ -275,11 +297,27 @@ fn sync_avatar_capture_layers(
 
     // Ensure the main directional lights affect both the regular and capture
     // layers so the offscreen avatar renders with the same shading.
+    //
+    // Important: do **not** re-`insert` identical `RenderLayers` every frame. Bevy 0.18's
+    // directional shadow pipeline (`prepare_lights` / `specialize_shadows`) keys internal
+    // state off light entities; churning this component each tick can leave cascades /
+    // per-view visible-entity maps out of sync when capture cameras (extra 3D views) exist,
+    // which surfaces as `unwrap()` panics in `bevy_pbr::render::light`.
     for (entity, maybe_layers) in &mut layer_queries.p1() {
-        let layers = maybe_layers
-            .map(|l| l.clone().with(AVATAR_CAPTURE_LAYER))
-            .unwrap_or_else(|| RenderLayers::from_layers(&[0, AVATAR_CAPTURE_LAYER]));
-        commands.entity(entity).insert(layers);
+        let (desired, unchanged) = match maybe_layers {
+            Some(l) => {
+                let desired = l.clone().with(AVATAR_CAPTURE_LAYER);
+                let unchanged = l.clone() == desired;
+                (desired, unchanged)
+            }
+            None => (
+                RenderLayers::from_layers(&[0, AVATAR_CAPTURE_LAYER]),
+                false,
+            ),
+        };
+        if !unchanged {
+            commands.entity(entity).insert(desired);
+        }
     }
 }
 

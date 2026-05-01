@@ -35,7 +35,8 @@ pub struct A2fConfig {
     pub endpoint: String,
     /// HTTP health URL, e.g. `http://localhost:8000/v1/health/ready`.
     pub health_url: String,
-    /// Same UUID as the A2F service `--function-id` (e.g. Claire). For operators / MCP only.
+    /// Same UUID as the A2F service `--function-id` (avatar / function binding). Carried for config
+    /// snapshots and any future stream wiring; the controller `AudioStreamHeader` proto has no ID slot.
     pub function_id: String,
 }
 
@@ -62,12 +63,15 @@ pub struct A2fKeyframe {
 pub struct A2fResult {
     pub keyframes: Vec<A2fKeyframe>,
     pub blend_shape_names: Vec<String>,
+    /// Emotion dictionary actually sent on the first `AudioWithEmotion` chunk (A2F emotion keys:
+    /// `joy`, `anger`, …). The gRPC stream does not currently return per-frame emotion envelopes in
+    /// our parser; TTS uses this for [`crate::arkit::merge_a2f_emotion_hint_into_keyframes`].
+    #[serde(default)]
+    pub emotion_hints_applied: HashMap<String, f32>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum A2fError {
-    #[error("a2f disabled in config")]
-    Disabled,
     #[error("invalid endpoint: {0}")]
     Endpoint(String),
     #[error("gRPC transport: {0}")]
@@ -239,9 +243,6 @@ impl A2fClient {
         sample_rate: u32,
         emotion_hints: Option<HashMap<String, f32>>,
     ) -> Result<A2fResult, A2fError> {
-        if !self.cfg.enabled {
-            return Err(A2fError::Disabled);
-        }
         let ep = normalize_endpoint(&self.cfg.endpoint);
         let endpoint = Endpoint::from_shared(ep).map_err(|e| A2fError::Endpoint(e.to_string()))?;
         let channel = endpoint.connect().await?;
@@ -260,14 +261,14 @@ impl A2fClient {
             emotion_params: None,
         };
 
-        let emotion_hints = emotion_hints.unwrap_or_else(|| {
+        let emotion_hints_applied = emotion_hints.unwrap_or_else(|| {
             let mut m = HashMap::new();
             m.insert("joy".to_string(), 0.5);
             m
         });
         let emotions_first = vec![emo_pb::EmotionWithTimeCode {
             time_code: 0.0,
-            emotion: emotion_hints,
+            emotion: emotion_hints_applied.clone(),
         }];
 
         let bytes_per_second = (sample_rate as usize) * 2;
@@ -304,9 +305,7 @@ impl A2fClient {
         let mut keyframes: Vec<A2fKeyframe> = Vec::new();
 
         while let Some(msg) = inbound.message().await? {
-            let Some(part) = msg.stream_part else {
-                continue;
-            };
+            let Some(part) = msg.stream_part else { continue };
             match part {
                 ctrl_pb::animation_data_stream::StreamPart::AnimationDataStreamHeader(h) => {
                     if let Some(skel) = h.skel_animation_header {
@@ -314,9 +313,7 @@ impl A2fClient {
                     }
                 }
                 ctrl_pb::animation_data_stream::StreamPart::AnimationData(d) => {
-                    let Some(skel) = d.skel_animation else {
-                        continue;
-                    };
+                    let Some(skel) = d.skel_animation else { continue };
                     for frame in skel.blend_shape_weights {
                         let mut bs = HashMap::with_capacity(blend_shape_names.len());
                         for (i, name) in blend_shape_names.iter().enumerate() {
@@ -342,25 +339,9 @@ impl A2fClient {
         Ok(A2fResult {
             keyframes,
             blend_shape_names,
+            emotion_hints_applied,
         })
     }
-}
-
-/// CSV rows: `time_code,name,value` (for spot-checking / diffing A2F output). Caps output size.
-pub fn blendshape_keyframes_csv(result: &A2fResult, max_rows: usize) -> String {
-    let max_rows = max_rows.max(1);
-    let mut out = String::from("time_code,name,value\n");
-    let mut rows = 0usize;
-    'outer: for kf in &result.keyframes {
-        for (name, val) in &kf.blend_shapes {
-            out.push_str(&format!("{},{},{}\n", kf.time_code, name, val));
-            rows += 1;
-            if rows >= max_rows {
-                break 'outer;
-            }
-        }
-    }
-    out
 }
 
 fn normalize_endpoint(raw: &str) -> String {
@@ -368,27 +349,5 @@ fn normalize_endpoint(raw: &str) -> String {
         raw.to_string()
     } else {
         format!("http://{raw}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn blendshape_csv_respects_row_cap() {
-        let mut kf = A2fKeyframe {
-            time_code: 0.1,
-            blend_shapes: HashMap::new(),
-        };
-        kf.blend_shapes.insert("JawOpen".into(), 0.5);
-        kf.blend_shapes.insert("MouthSmileLeft".into(), 0.2);
-        let r = A2fResult {
-            keyframes: vec![kf],
-            blend_shape_names: vec![],
-        };
-        let csv = blendshape_keyframes_csv(&r, 1);
-        assert!(csv.starts_with("time_code,name,value\n"));
-        assert_eq!(csv.lines().count(), 2);
     }
 }
