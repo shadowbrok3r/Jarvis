@@ -14,15 +14,15 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
+use axum::Router;
 use bevy::prelude::*;
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Builder;
@@ -31,7 +31,7 @@ use jarvis_avatar::config::Settings;
 use jarvis_avatar::paths::expand_home;
 use jarvis_avatar::pose_library::PoseLibrary;
 
-use super::{JarvisMcpServer, KimodoDefaults, build_a2f_client};
+use super::{build_a2f_client, JarvisMcpServer, KimodoDefaults};
 use crate::plugins::channel_server::HubBroadcast;
 use crate::plugins::pose_capture::CaptureCommandSender;
 use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommandSender, PoseDriverPlugin};
@@ -101,12 +101,6 @@ fn start_mcp_server(
         steps: settings.kimodo.default_steps,
         timeout_sec: settings.kimodo.generate_timeout_sec,
     };
-    let tts_kokoro_url = settings.tts.kokoro_url.clone();
-    let tts_voice = settings.tts.voice.clone();
-    let tts_enabled = settings.tts.enabled;
-    let tts_response_format = settings.tts.response_format.clone();
-    let tts_stream = settings.tts.stream;
-    let tts_pcm_sample_rate = settings.tts.pcm_sample_rate;
 
     let hub_val = hub.clone();
     let pose_tx_val = pose_tx.clone();
@@ -142,12 +136,6 @@ fn start_mcp_server(
                     pose_guide_path,
                     library,
                     kimodo_defaults,
-                    tts_kokoro_url.clone(),
-                    tts_voice.clone(),
-                    tts_enabled,
-                    tts_response_format.clone(),
-                    tts_stream,
-                    tts_pcm_sample_rate,
                     traffic.clone(),
                 ),
                 traffic,
@@ -185,8 +173,9 @@ async fn run_mcp_server(
 ) {
     let server_factory = move || Ok::<_, std::io::Error>(server.clone());
 
-    let session_keep_alive =
-        (session_keep_alive_sec > 0).then(|| Duration::from_secs(session_keep_alive_sec));
+    let session_keep_alive = (session_keep_alive_sec > 0).then(|| {
+        Duration::from_secs(session_keep_alive_sec)
+    });
     let mut session_manager = LocalSessionManager::default();
     session_manager.session_config.keep_alive = session_keep_alive;
     let session_manager = std::sync::Arc::new(session_manager);
@@ -213,7 +202,10 @@ async fn run_mcp_server(
             require_bearer,
         ));
     }
-    app = app.layer(middleware::from_fn_with_state(traffic, mcp_http_trace));
+    app = app.layer(middleware::from_fn_with_state(
+        traffic,
+        mcp_http_trace,
+    ));
 
     let addr: SocketAddr = match bind.parse() {
         Ok(a) => a,
@@ -231,11 +223,7 @@ async fn run_mcp_server(
     };
     info!(
         "mcp: streamable-http listening on {bind}{path_prefix} (auth: {}; session_keep_alive_sec: {session_keep_alive_sec})",
-        if auth_token.is_empty() {
-            "none"
-        } else {
-            "bearer"
-        },
+        if auth_token.is_empty() { "none" } else { "bearer" },
     );
     if let Err(e) = axum::serve(listener, app).await {
         error!("mcp: axum serve exited: {e}");
@@ -271,3 +259,4 @@ async fn require_bearer(
         resp
     }
 }
+

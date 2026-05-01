@@ -20,40 +20,33 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::schemars::{self, JsonSchema};
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crossbeam_channel::RecvTimeoutError;
-use reqwest::Client;
 
-use jarvis_avatar::a2f::{A2fClient, A2fConfig, A2fResult, blendshape_keyframes_csv};
-use jarvis_avatar::kokoro_http::{
-    fetch_kokoro_speech, kokoro_pcm_bytes_to_a2f_input, wav_bytes_to_pcm16_mono,
-};
+use jarvis_avatar::a2f::{A2fClient, A2fConfig};
 use jarvis_avatar::model_catalog::{list_vrm_models, resolve_vrm_load_argument};
 use jarvis_avatar::paths::expand_home;
-use jarvis_avatar::pose_library::{BoneRotation, PoseFile, PoseLibrary, slugify};
+use jarvis_avatar::pose_library::{slugify, BoneRotation, PoseFile, PoseLibrary};
 
 use crate::kimodo::{GenerateRequest, KimodoClient};
 use crate::plugins::channel_server::HubBroadcast;
 use crate::plugins::pose_capture::{
-    CaptureCommandSender, CaptureFramingPreset, CaptureRequest, CaptureView,
+    CaptureCommandSender, CaptureRequest, CaptureView, CaptureFramingPreset,
 };
+use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
 use crate::plugins::pose_driver::{
     BoneSnapshot, BoneSnapshotHandle, PoseCommand, PoseCommandSender, VRM_BONE_NAMES,
     VRM_EXPRESSION_NAMES,
 };
-use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
 
-use pose_authoring::{
-    MakeFistArgs, PoseBonesArgs, bone_map_from_euler_deg, make_fist_bones, sanitize_bone_map,
-};
+use pose_authoring::{bone_map_from_euler_deg, make_fist_bones, sanitize_bone_map, MakeFistArgs, PoseBonesArgs};
 
 // ---------- server state ------------------------------------------------------
 
@@ -69,14 +62,6 @@ pub struct JarvisMcpServer {
     pub pose_guide_path: PathBuf,
     pub library: Arc<PoseLibrary>,
     pub kimodo_defaults: KimodoDefaults,
-    /// Kokoro base URL (`[tts].kokoro_url`) for `a2f_from_text`.
-    pub tts_kokoro_url: String,
-    pub tts_voice: String,
-    #[allow(dead_code)]
-    pub tts_enabled: bool,
-    pub tts_response_format: String,
-    pub tts_stream: bool,
-    pub tts_pcm_sample_rate: u32,
     /// Optional network trace sink (debug UI).
     pub traffic: Option<TrafficLogSink>,
     tool_router: ToolRouter<Self>,
@@ -100,12 +85,6 @@ impl JarvisMcpServer {
         pose_guide_path: PathBuf,
         library: PoseLibrary,
         kimodo_defaults: KimodoDefaults,
-        tts_kokoro_url: String,
-        tts_voice: String,
-        tts_enabled: bool,
-        tts_response_format: String,
-        tts_stream: bool,
-        tts_pcm_sample_rate: u32,
         traffic: Option<TrafficLogSink>,
     ) -> Self {
         Self::with_kimodo(
@@ -118,12 +97,6 @@ impl JarvisMcpServer {
             pose_guide_path,
             library,
             kimodo_defaults,
-            tts_kokoro_url,
-            tts_voice,
-            tts_enabled,
-            tts_response_format,
-            tts_stream,
-            tts_pcm_sample_rate,
             traffic,
         )
     }
@@ -142,12 +115,6 @@ impl JarvisMcpServer {
         pose_guide_path: PathBuf,
         library: PoseLibrary,
         kimodo_defaults: KimodoDefaults,
-        tts_kokoro_url: String,
-        tts_voice: String,
-        tts_enabled: bool,
-        tts_response_format: String,
-        tts_stream: bool,
-        tts_pcm_sample_rate: u32,
         traffic: Option<TrafficLogSink>,
     ) -> Self {
         Self {
@@ -160,12 +127,6 @@ impl JarvisMcpServer {
             pose_guide_path,
             library: Arc::new(library),
             kimodo_defaults,
-            tts_kokoro_url,
-            tts_voice,
-            tts_enabled,
-            tts_response_format,
-            tts_stream,
-            tts_pcm_sample_rate,
             traffic,
             tool_router: Self::tool_router(),
         }
@@ -339,35 +300,6 @@ pub struct A2fConfigureArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct A2fFromTextArgs {
-    /// Short phrase for a quick Kokoro + A2F round-trip (long text = slow).
-    pub text: String,
-    /// Emotion strengths at time 0 (same names as A2F docs: joy, anger, …).
-    #[serde(default)]
-    pub emotions: Option<HashMap<String, f32>>,
-    /// When set, overrides `[tts].voice` for this call only.
-    #[serde(default)]
-    pub voice: Option<String>,
-    /// When true, include `blendshapeCsv` (capped by `blendshape_csv_max_rows`).
-    #[serde(default)]
-    pub include_blendshape_csv: Option<bool>,
-    #[serde(default)]
-    pub blendshape_csv_max_rows: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct A2fProcessWavBase64Args {
-    /// Standard base64 of a WAV file (16-bit PCM or 32-bit float, mono or stereo).
-    pub wav_base64: String,
-    #[serde(default)]
-    pub emotions: Option<HashMap<String, f32>>,
-    #[serde(default)]
-    pub include_blendshape_csv: Option<bool>,
-    #[serde(default)]
-    pub blendshape_csv_max_rows: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListModelsArgs {
     /// Optional case-insensitive substring filter on the `.vrm` basename (e.g. `helen`).
     #[serde(default)]
@@ -394,7 +326,7 @@ pub struct CapturePoseViewsArgs {
     pub width: u32,
     #[serde(default = "default_capture_dim")]
     pub height: u32,
-    /// View slugs: `front`, `left`, `right`, `front_left`, `front_right`.
+    /// View slugs: `front`, `left`, `right`, `front_left`, `front_right`, `back`, `back_left`, `back_right`.
     pub views: Vec<String>,
     /// Optional: `full_body` or `face_closeup` (camera distance / head focus).
     #[serde(default)]
@@ -402,6 +334,9 @@ pub struct CapturePoseViewsArgs {
     /// Bevy capture pipeline timeout in seconds (default 180, min 5, max 600).
     #[serde(default)]
     pub timeout_sec: Option<u64>,
+    /// Async sleep before enqueueing capture so a prior `pose_bones` / `apply_pose` can apply in Bevy (default 120 ms; 0 disables).
+    #[serde(default)]
+    pub settle_before_capture_ms: Option<u32>,
 }
 
 fn parse_capture_view_slug(raw: &str) -> Result<CaptureView, String> {
@@ -416,8 +351,11 @@ fn parse_capture_view_slug(raw: &str) -> Result<CaptureView, String> {
         "right" => Ok(CaptureView::Right),
         "front_left" | "frontleft" | "front-left" => Ok(CaptureView::FrontLeft),
         "front_right" | "frontright" | "front-right" => Ok(CaptureView::FrontRight),
+        "back" | "rear" => Ok(CaptureView::Back),
+        "back_left" | "backleft" | "back-left" => Ok(CaptureView::BackLeft),
+        "back_right" | "backright" | "back-right" => Ok(CaptureView::BackRight),
         _ => Err(format!(
-            "unknown view {s:?} — use front, left, right, front_left, front_right"
+            "unknown view {s:?} — use front, left, right, front_left, front_right, back, back_left, back_right"
         )),
     }
 }
@@ -430,41 +368,6 @@ fn ok_text(body: impl Into<String>) -> CallToolResult {
 
 fn err_text(body: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![Content::text(body.into())])
-}
-
-fn a2f_pipeline_http_client() -> Result<Client, String> {
-    Client::builder()
-        .timeout(Duration::from_secs(90))
-        .build()
-        .map_err(|e| e.to_string())
-}
-
-fn json_a2f_pipeline_summary(
-    result: &A2fResult,
-    wav_bytes: usize,
-    sample_rate: u32,
-    function_id: &str,
-    include_csv: bool,
-    csv_max: usize,
-) -> Value {
-    let csv_max = csv_max.clamp(1, 50_000);
-    let mut v = json!({
-        "blendShapeNames": result.blend_shape_names,
-        "keyframeCount": result.keyframes.len(),
-        "wavBytes": wav_bytes,
-        "sampleRate": sample_rate,
-        "functionIdConfigured": !function_id.trim().is_empty(),
-        "hint": "A2F NIM must use --function-id matching [a2f].function_id (e.g. Claire 0961a6da-fb9e-4f2e-8491-247e5fd7bf8d).",
-    });
-    if include_csv {
-        if let Some(obj) = v.as_object_mut() {
-            obj.insert(
-                "blendshapeCsv".into(),
-                json!(blendshape_keyframes_csv(result, csv_max)),
-            );
-        }
-    }
-    v
 }
 
 /// MCP pose tools accept VRM humanoid keys plus any bone currently in the live snapshot
@@ -492,10 +395,11 @@ fn ok_json(v: &impl Serialize) -> CallToolResult {
 
 #[tool_router(router = tool_router)]
 impl JarvisMcpServer {
-    #[tool(
-        description = "List `.vrm` files under assets/models (sorted basenames + asset paths like models/foo.vrm for load_vrm). Optional filter: case-insensitive substring on basename. Read-only; cwd must be the crate root so assets/models resolves."
-    )]
-    async fn list_models(&self, Parameters(args): Parameters<ListModelsArgs>) -> CallToolResult {
+    #[tool(description = "List `.vrm` files under assets/models (sorted basenames + asset paths like models/foo.vrm for load_vrm). Optional filter: case-insensitive substring on basename. Read-only; cwd must be the crate root so assets/models resolves.")]
+    async fn list_models(
+        &self,
+        Parameters(args): Parameters<ListModelsArgs>,
+    ) -> CallToolResult {
         match list_vrm_models(args.filter.as_deref()) {
             Ok(entries) => ok_json(&json!({
                 "modelsDir": jarvis_avatar::model_catalog::models_dir().display().to_string(),
@@ -506,9 +410,7 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(
-        description = "Hot-swap the displayed VRM at runtime (no app restart). Path: models/name.vrm or basename name.vrm under assets/models. Clears bone snapshot / transitions / expression animation state; updates Settings.model_path; respawns idle VRMA from [avatar].idle_vrma_path when set. Spring/collider presets reload if auto_load_spring_preset is true when the new rig initializes."
-    )]
+    #[tool(description = "Hot-swap the displayed VRM at runtime (no app restart). Path: models/name.vrm or basename name.vrm under assets/models. Clears bone snapshot / transitions / expression animation state; updates Settings.model_path; respawns idle VRMA from [avatar].idle_vrma_path when set. Spring/collider presets reload if auto_load_spring_preset is true when the new rig initializes.")]
     async fn load_vrm(&self, Parameters(args): Parameters<LoadVrmArgs>) -> CallToolResult {
         match resolve_vrm_load_argument(&args.path) {
             Ok(asset_path) => {
@@ -525,9 +427,7 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(
-        description = "List every saved VRM pose (name, description, category, bone count). Use before apply_pose when you need a known baseline for motion or capture."
-    )]
+    #[tool(description = "List every saved VRM pose (name, description, category, bone count). Use before apply_pose when you need a known baseline for motion or capture.")]
     async fn list_poses(&self) -> CallToolResult {
         match self.library.load_all_poses() {
             Ok(poses) => {
@@ -571,7 +471,9 @@ impl JarvisMcpServer {
             bones,
             preserve_omitted_bones: true,
             blend_weight: args.blend_weight,
-            transition_seconds: args.transition_seconds.or(Some(pose.transition_duration)),
+            transition_seconds: args
+                .transition_seconds
+                .or(Some(pose.transition_duration)),
         });
         if !pose.expressions.is_empty() {
             self.pose_tx.send(PoseCommand::ApplyExpression {
@@ -587,9 +489,7 @@ impl JarvisMcpServer {
         ))
     }
 
-    #[tool(
-        description = "Set VRM expression blendshape weights (0..=1). Partial map: omitted keys stay as-is. Layer facial polish on top of Kimodo or pose_bones; combine small weights (e.g. happy+relaxed) for natural faces — see get_pose_guide table."
-    )]
+    #[tool(description = "Set VRM expression blendshape weights (0..=1). Partial map: omitted keys stay as-is. Layer facial polish on top of Kimodo or pose_bones; combine small weights (e.g. happy+relaxed) for natural faces — see get_pose_guide table.")]
     async fn set_expression(
         &self,
         Parameters(args): Parameters<SetExpressionArgs>,
@@ -602,9 +502,7 @@ impl JarvisMcpServer {
         ok_text(format!("set expressions: {}", names.join(", ")))
     }
 
-    #[tool(
-        description = "Play a short in-engine VRM expression curve (piecewise-linear keyframes). Stops idle VRMA like other manual pose commands. Omitted expression keys in a keyframe default to 0 when lerping into keys that list them. Cancels on reset_pose / set_expression / apply_pose with expressions. Layered in-app expression drivers (blink, etc.) still run first each frame; animated channels override last. After one-shot playback, last sampled weights remain until changed. Verify with capture_pose_views + framing_preset face_closeup."
-    )]
+    #[tool(description = "Play a short in-engine VRM expression curve (piecewise-linear keyframes). Stops idle VRMA like other manual pose commands. Omitted expression keys in a keyframe default to 0 when lerping into keys that list them. Cancels on reset_pose / set_expression / apply_pose with expressions. Layered in-app expression drivers (blink, etc.) still run first each frame; animated channels override last. After one-shot playback, last sampled weights remain until changed. Verify with capture_pose_views + framing_preset face_closeup.")]
     async fn animate_expressions(
         &self,
         Parameters(args): Parameters<AnimateExpressionsArgs>,
@@ -614,7 +512,9 @@ impl JarvisMcpServer {
             return err_text("keyframes must contain at least one entry".to_string());
         }
         if args.keyframes.len() > MAX_KEYFRAMES {
-            return err_text(format!("too many keyframes (max {MAX_KEYFRAMES})"));
+            return err_text(format!(
+                "too many keyframes (max {MAX_KEYFRAMES})"
+            ));
         }
         let mut frames: Vec<(f32, HashMap<String, f32>)> = args
             .keyframes
@@ -629,7 +529,10 @@ impl JarvisMcpServer {
             })
             .collect();
         frames.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        let max_t = frames.iter().map(|(t, _)| *t).fold(0.0f32, f32::max);
+        let max_t = frames
+            .iter()
+            .map(|(t, _)| *t)
+            .fold(0.0f32, f32::max);
         let mut duration = args.duration_seconds.unwrap_or(max_t).max(0.05).min(120.0);
         if duration + 1e-4 < max_t {
             duration = max_t.max(0.05);
@@ -650,9 +553,7 @@ impl JarvisMcpServer {
         }))
     }
 
-    #[tool(
-        description = "Directly set bone rotations as quaternions [x, y, z, w]. Keep components in [-0.3, 0.3] for natural motion."
-    )]
+    #[tool(description = "Directly set bone rotations as quaternions [x, y, z, w]. Keep components in [-0.3, 0.3] for natural motion.")]
     async fn set_bones(&self, Parameters(args): Parameters<SetBonesArgs>) -> CallToolResult {
         let snap = self.snapshot.0.read();
         for bone in args.bones.keys() {
@@ -678,9 +579,7 @@ impl JarvisMcpServer {
         ok_text(format!("set {count} bone(s)"))
     }
 
-    #[tool(
-        description = "Set many bones at once using intrinsic local Euler degrees per bone (pitch/yaw/roll). Safer than raw quaternions: angles are clamped per bone; response lists warnings. Helen/Rigify named toes DEF-toe_{big,index,middle,ring,little}.{L,R} share the same ±180° display-yaw rebasing as the Bones tab (see get_pose_guide). Prefer this for body posing; see get_pose_guide for knee/elbow sign conventions."
-    )]
+    #[tool(description = "Set many bones at once using intrinsic local Euler degrees per bone (pitch/yaw/roll). Safer than raw quaternions: angles are clamped per bone; response lists warnings. Helen/Rigify named toes DEF-toe_{big,index,middle,ring,little}.{L,R} share the same ±180° display-yaw rebasing as the Bones tab (see get_pose_guide). Prefer this for body posing; see get_pose_guide for knee/elbow sign conventions.")]
     async fn pose_bones(&self, Parameters(args): Parameters<PoseBonesArgs>) -> CallToolResult {
         let snap = self.snapshot.0.read();
         for bone in args.bones.keys() {
@@ -707,9 +606,7 @@ impl JarvisMcpServer {
         }))
     }
 
-    #[tool(
-        description = "Blend both hands toward a canned fist (amount 0..1). Fingers stay within safe curl templates — use for believable grips instead of hand-tuning many quaternions."
-    )]
+    #[tool(description = "Blend both hands toward a canned fist (amount 0..1). Fingers stay within safe curl templates — use for believable grips instead of hand-tuning many quaternions.")]
     async fn make_fist(&self, Parameters(args): Parameters<MakeFistArgs>) -> CallToolResult {
         let do_left = args.left.unwrap_or(true);
         let do_right = args.right.unwrap_or(true);
@@ -737,9 +634,7 @@ impl JarvisMcpServer {
         ok_text("reset pose and expressions")
     }
 
-    #[tool(
-        description = "Save a new pose to the library. CRITICAL: read get_pose_guide first, keep quaternion x/y/z in [-0.3, 0.3]."
-    )]
+    #[tool(description = "Save a new pose to the library. CRITICAL: read get_pose_guide first, keep quaternion x/y/z in [-0.3, 0.3].")]
     async fn create_pose(&self, Parameters(args): Parameters<CreatePoseArgs>) -> CallToolResult {
         let snap = self.snapshot.0.read();
         for bone in args.bones.keys() {
@@ -787,9 +682,7 @@ impl JarvisMcpServer {
         ))
     }
 
-    #[tool(
-        description = "Get the full list of VRM humanoid bone names, expression presets, and (when a VRM is loaded) extra skin joint names from the live rig."
-    )]
+    #[tool(description = "Get the full list of VRM humanoid bone names, expression presets, and (when a VRM is loaded) extra skin joint names from the live rig.")]
     async fn get_bone_reference(&self) -> CallToolResult {
         let snap = self.snapshot.0.read();
         let mut extra: Vec<String> = snap
@@ -807,9 +700,7 @@ impl JarvisMcpServer {
         }))
     }
 
-    #[tool(
-        description = "Get the comprehensive VRM pose authoring guide — bone hierarchy, quaternion cheatsheet, per-bone natural ranges. READ BEFORE creating poses."
-    )]
+    #[tool(description = "Get the comprehensive VRM pose authoring guide — bone hierarchy, quaternion cheatsheet, per-bone natural ranges. READ BEFORE creating poses.")]
     async fn get_pose_guide(&self) -> CallToolResult {
         match std::fs::read_to_string(&self.pose_guide_path) {
             Ok(s) => ok_text(s),
@@ -820,17 +711,13 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(
-        description = "Read the current normalized pose quaternion of every indexed bone (humanoid + extra skin joints) on the loaded VRM."
-    )]
+    #[tool(description = "Read the current normalized pose quaternion of every indexed bone (humanoid + extra skin joints) on the loaded VRM.")]
     async fn get_current_bone_state(&self) -> CallToolResult {
         let snap = self.snapshot.0.read().clone();
         ok_json(&snap.bones)
     }
 
-    #[tool(
-        description = "Tiny per-axis tweak: adds delta_x/delta_y/delta_z to the bone's current pose quaternion components, then renormalizes (NOT Euler degrees). Use very small steps (often ±0.02–0.05 on one axis) for micro-corrections after pose_bones or Kimodo playback."
-    )]
+    #[tool(description = "Tiny per-axis tweak: adds delta_x/delta_y/delta_z to the bone's current pose quaternion components, then renormalizes (NOT Euler degrees). Use very small steps (often ±0.02–0.05 on one axis) for micro-corrections after pose_bones or Kimodo playback.")]
     async fn adjust_bone(&self, Parameters(args): Parameters<AdjustBoneArgs>) -> CallToolResult {
         let snap = self.snapshot.0.read().clone();
         if !mcp_allows_pose_bone_key(&args.bone_name, &snap) {
@@ -892,18 +779,13 @@ impl JarvisMcpServer {
         &self,
         Parameters(args): Parameters<UpdatePoseCategoryArgs>,
     ) -> CallToolResult {
-        match self
-            .library
-            .update_pose_category(&args.name, &args.category)
-        {
+        match self.library.update_pose_category(&args.name, &args.category) {
             Ok(()) => ok_text(format!("updated {} → {}", args.name, args.category)),
             Err(e) => err_text(format!("{e}")),
         }
     }
 
-    #[tool(
-        description = "Full-body motion clip from a text prompt via Kimodo (hub peer must be online). Use clear phase-separated prompts for floor work (sit, extend legs, return to stand). Optional save_name writes JSON under pose_library.animations_dir — check librarySaveVerified in the response; if librarySaveMissing appears, align Kimodo JARVIS_ANIMATIONS_DIR with config (see docs/MCP_POSE_ANIMATION_GUIDE.md)."
-    )]
+    #[tool(description = "Full-body motion clip from a text prompt via Kimodo (hub peer must be online). Use clear phase-separated prompts for floor work (sit, extend legs, return to stand). Optional save_name writes JSON under pose_library.animations_dir — check librarySaveVerified in the response; if librarySaveMissing appears, align Kimodo JARVIS_ANIMATIONS_DIR with config (see docs/MCP_POSE_ANIMATION_GUIDE.md).")]
     async fn generate_motion(
         &self,
         Parameters(args): Parameters<GenerateMotionArgs>,
@@ -957,9 +839,7 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(
-        description = "List every saved motion animation on disk (name, prompt, fps, frameCount)."
-    )]
+    #[tool(description = "List every saved motion animation on disk (name, prompt, fps, frameCount).")]
     async fn list_generated_animations(&self) -> CallToolResult {
         match self.library.list_animations() {
             Ok(list) => ok_json(&list),
@@ -967,9 +847,7 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(
-        description = "Replay a saved animation by filename. Streams through Kimodo's local playback path."
-    )]
+    #[tool(description = "Replay a saved animation by filename. Streams through Kimodo's local playback path.")]
     async fn play_saved_animation(
         &self,
         Parameters(args): Parameters<PlaySavedAnimationArgs>,
@@ -1010,9 +888,7 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(
-        description = "Update category / looping / holdDuration on a saved .json animation from list_generated_animations. Use after generate_motion to tag clips for layering or replay rules."
-    )]
+    #[tool(description = "Update category / looping / holdDuration on a saved .json animation from list_generated_animations. Use after generate_motion to tag clips for layering or replay rules.")]
     async fn update_animation_metadata(
         &self,
         Parameters(args): Parameters<UpdateAnimationMetaArgs>,
@@ -1044,9 +920,7 @@ impl JarvisMcpServer {
         }))
     }
 
-    #[tool(
-        description = "Render transparent PNG snapshots of the avatar from one or more camera views (front / left / right / diagonals). Blocks until Bevy finishes all screenshots or timeout. Use framing_preset full_body or face_closeup to match validation docs."
-    )]
+    #[tool(description = "Render transparent PNG snapshots of the avatar from one or more camera views (front / sides / diagonals / back). Blocks until Bevy finishes all screenshots or timeout. Use framing_preset full_body or face_closeup to match validation docs. Waits settle_before_capture_ms (default 120) before enqueueing so prior pose_bones can commit — set 0 if you need instant capture.")]
     async fn capture_pose_views(
         &self,
         Parameters(args): Parameters<CapturePoseViewsArgs>,
@@ -1071,6 +945,10 @@ impl JarvisMcpServer {
                 ));
             }
         };
+        let settle_ms = args.settle_before_capture_ms.unwrap_or(120).min(5000);
+        if settle_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(u64::from(settle_ms))).await;
+        }
         let timeout = Duration::from_secs(args.timeout_sec.unwrap_or(180).clamp(5, 600));
         let output_dir = expand_home(Path::new(args.output_dir.trim()));
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -1101,9 +979,7 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(
-        description = "Check NVIDIA Audio2Face-3D Docker health and current client configuration."
-    )]
+    #[tool(description = "Check NVIDIA Audio2Face-3D Docker health and current client configuration.")]
     async fn a2f_status(&self) -> CallToolResult {
         let health = self.a2f.health().await;
         let cfg = self.a2f.config();
@@ -1132,107 +1008,7 @@ impl JarvisMcpServer {
         }))
     }
 
-    #[tool(
-        description = "Kokoro → NVIDIA A2F `ProcessAudioStream`: uses `[tts].response_format` + `[tts].stream` + `[tts].pcm_sample_rate` (set `response_format` to `pcm` and `stream` to false for raw s16le @ 24k — best for A2F; `wav` works if `stream` is false). Requires [tts].enabled + kokoro_url and [a2f].enabled. A2F NIM `--function-id` must match `[a2f].function_id` (Claire: 0961a6da-fb9e-4f2e-8491-247e5fd7bf8d)."
-    )]
-    async fn a2f_from_text(&self, Parameters(args): Parameters<A2fFromTextArgs>) -> CallToolResult {
-        if !self.a2f.config().enabled {
-            return err_text("[a2f].enabled is false — enable Audio2Face in config.".to_string());
-        }
-        if !self.tts_enabled {
-            return err_text("[tts].enabled is false — enable Kokoro for this tool.".to_string());
-        }
-        if self.tts_kokoro_url.trim().is_empty() {
-            return err_text("[tts].kokoro_url is empty.".to_string());
-        }
-        let http = match a2f_pipeline_http_client() {
-            Ok(c) => c,
-            Err(e) => return err_text(e),
-        };
-        let voice = args
-            .voice
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&self.tts_voice);
-        let raw = match fetch_kokoro_speech(
-            &http,
-            &self.tts_kokoro_url,
-            voice,
-            &args.text,
-            &self.tts_response_format,
-            self.tts_stream,
-        )
-        .await
-        {
-            Ok(b) => b,
-            Err(e) => return err_text(e),
-        };
-        let (pcm, rate) = if self.tts_response_format.eq_ignore_ascii_case("pcm") {
-            match kokoro_pcm_bytes_to_a2f_input(&raw, self.tts_pcm_sample_rate) {
-                Ok(x) => x,
-                Err(e) => return err_text(e),
-            }
-        } else {
-            match wav_bytes_to_pcm16_mono(&raw) {
-                Ok(x) => x,
-                Err(e) => return err_text(e),
-            }
-        };
-        match self.a2f.process_audio_pcm16(pcm, rate, args.emotions).await {
-            Ok(result) => {
-                let include = args.include_blendshape_csv.unwrap_or(false);
-                let csv_max = args.blendshape_csv_max_rows.unwrap_or(5000);
-                ok_json(&json_a2f_pipeline_summary(
-                    &result,
-                    raw.len(),
-                    rate,
-                    &self.a2f.config().function_id,
-                    include,
-                    csv_max,
-                ))
-            }
-            Err(e) => err_text(e.to_string()),
-        }
-    }
-
-    #[tool(
-        description = "Decode a base64 WAV → PCM16 mono → A2F `ProcessAudioStream`. Use for canned clips or non-Kokoro WAV; same emotion + CSV options as `a2f_from_text`."
-    )]
-    async fn a2f_process_wav_base64(
-        &self,
-        Parameters(args): Parameters<A2fProcessWavBase64Args>,
-    ) -> CallToolResult {
-        if !self.a2f.config().enabled {
-            return err_text("[a2f].enabled is false.".to_string());
-        }
-        let raw = match B64.decode(args.wav_base64.as_bytes()) {
-            Ok(b) => b,
-            Err(e) => return err_text(format!("base64: {e}")),
-        };
-        let (pcm, rate) = match wav_bytes_to_pcm16_mono(&raw) {
-            Ok(x) => x,
-            Err(e) => return err_text(e),
-        };
-        match self.a2f.process_audio_pcm16(pcm, rate, args.emotions).await {
-            Ok(result) => {
-                let include = args.include_blendshape_csv.unwrap_or(false);
-                let csv_max = args.blendshape_csv_max_rows.unwrap_or(5000);
-                ok_json(&json_a2f_pipeline_summary(
-                    &result,
-                    raw.len(),
-                    rate,
-                    &self.a2f.config().function_id,
-                    include,
-                    csv_max,
-                ))
-            }
-            Err(e) => err_text(e.to_string()),
-        }
-    }
-
-    #[tool(
-        description = "Live-update the A2F client configuration (enabled flag, endpoint, health URL). Change applies to future calls."
-    )]
+    #[tool(description = "Live-update the A2F client configuration (enabled flag, endpoint, health URL). Change applies to future calls.")]
     async fn a2f_configure(
         &self,
         Parameters(args): Parameters<A2fConfigureArgs>,
@@ -1261,8 +1037,7 @@ impl ServerHandler for JarvisMcpServer {
 Workflow: baseline apply_pose or reset_pose → pose_bones (degrees, clamped) and/or make_fist for hands → generate_motion for clips (check librarySaveVerified) → set_expression or animate_expressions (time-varying face) → tiny adjust_bone quaternion deltas only → capture_pose_views to verify. \
 Use list_models then load_vrm to swap the on-screen `.vrm` at runtime (expressions / bone snapshot reset; idle VRMA follows config). \
 Kimodo writes animations to the same folder as [pose_library].animations_dir (see kimodo-motion-service env JARVIS_ANIMATIONS_DIR). \
-Multi-clip animation layering (stacked playback) is configured in the in-app debug UI / anim_layer_sets.json — not separate MCP tools yet. \
-Audio2Face: `a2f_status` for health; `a2f_from_text` (Kokoro→A2F) or `a2f_process_wav_base64` to validate the lip-sync pipeline — align `[a2f].function_id` with the A2F container `--function-id`.",
+Multi-clip animation layering (stacked playback) is configured in the in-app debug UI / anim_layer_sets.json — not separate MCP tools yet.",
             )
     }
 }

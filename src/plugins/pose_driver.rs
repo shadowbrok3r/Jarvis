@@ -23,8 +23,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
-use bevy::animation::AnimationTargetId;
+use bevy::animation::{AnimationTargetId, RepeatAnimation};
 use bevy::app::AnimationSystems;
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
@@ -850,11 +851,26 @@ pub(crate) struct RunningExpressionClip {
     pub looping: bool,
     pub elapsed: f32,
     pub vrm_entity: Entity,
+    /// True when this clip was started in a frame where `apply_pose_commands` stopped every
+    /// `AnimationPlayer` for manual pose ownership — we should replay idle VRMA when the clip
+    /// ends or is cleared (same as Pose Controller "Resume idle VRMA").
+    pub resume_idle_vrma_after: bool,
 }
 
-fn clear_expression_animation_playback(world: &mut World) {
+/// Clears in-flight expression sampling. When `resume_idle_if_stopped_for_clip` is true and the
+/// cleared clip had [`RunningExpressionClip::resume_idle_vrma_after`], replays idle VRMA.
+fn clear_expression_animation_playback(world: &mut World, resume_idle_if_stopped_for_clip: bool) {
+    let should_resume = resume_idle_if_stopped_for_clip
+        && world
+            .resource::<ExpressionAnimationPlayback>()
+            .active
+            .as_ref()
+            .is_some_and(|c| c.resume_idle_vrma_after);
     if let Some(mut p) = world.get_resource_mut::<ExpressionAnimationPlayback>() {
         p.active = None;
+    }
+    if should_resume {
+        resume_idle_vrma_if_configured(world);
     }
 }
 
@@ -904,8 +920,12 @@ pub(crate) fn tick_expression_animation(world: &mut World) {
         return;
     };
     if world.get_entity(clip.vrm_entity).is_err() {
+        let resume = clip.resume_idle_vrma_after;
         if let Some(mut p) = world.get_resource_mut::<ExpressionAnimationPlayback>() {
             p.active = None;
+        }
+        if resume {
+            resume_idle_vrma_if_configured(world);
         }
         return;
     }
@@ -926,6 +946,7 @@ pub(crate) fn tick_expression_animation(world: &mut World) {
             .commands()
             .trigger(ModifyExpressions::from_iter(vrm_e, pairs));
     }
+    let resume_after = clip.resume_idle_vrma_after;
     clip.elapsed += dt;
     let done = !clip.looping && clip.elapsed >= clip.duration;
     if let Some(mut p) = world.get_resource_mut::<ExpressionAnimationPlayback>() {
@@ -934,6 +955,36 @@ pub(crate) fn tick_expression_animation(world: &mut World) {
         } else {
             p.active = Some(clip);
         }
+    }
+    if done && resume_after {
+        resume_idle_vrma_if_configured(world);
+    }
+}
+
+/// Replay configured idle VRMA(s) (startup / Pose Controller "Resume idle VRMA" path).
+/// Callers gate on [`RunningExpressionClip::resume_idle_vrma_after`] so we do not restart when
+/// auto-stop never ran for this clip.
+fn resume_idle_vrma_if_configured(world: &mut World) {
+    let Some(settings) = world.get_resource::<Settings>() else {
+        return;
+    };
+    if settings.avatar.idle_vrma_path.trim().is_empty() {
+        return;
+    }
+    let vrma_entities: Vec<Entity> = world
+        .query_filtered::<Entity, With<Vrma>>()
+        .iter(world)
+        .collect();
+    if vrma_entities.is_empty() {
+        return;
+    }
+    for vrma in vrma_entities {
+        world.commands().trigger(PlayVrma {
+            vrma,
+            repeat: RepeatAnimation::Forever,
+            transition_duration: Duration::from_millis(300),
+            reset_spring_bones: true,
+        });
     }
 }
 
@@ -989,7 +1040,7 @@ fn execute_avatar_vrm_hot_swap(world: &mut World, asset_path: &str) {
     if let Some(mut at) = world.get_resource_mut::<ActiveTransitions>() {
         at.bones.clear();
     }
-    clear_expression_animation_playback(world);
+    clear_expression_animation_playback(world, false);
     *world.resource::<BoneSnapshotHandle>().0.write() = BoneSnapshot::default();
 
     info!(target: "pose_driver", "hot-swapped VRM to {asset_path}");
@@ -1054,17 +1105,19 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
 
     // Snapshot config so we can close over a `Settings` read without holding
     // the borrow across `world.get_mut::<Transform>` below.
-    let (blends_enabled, default_blend, default_transition, auto_stop_vrma) = world
-        .get_resource::<Settings>()
-        .map(|s| {
-            (
-                s.pose_controller.blend_transitions_enabled,
-                s.pose_controller.default_blend_weight,
-                s.pose_controller.default_transition_seconds,
-                s.pose_controller.auto_stop_idle_vrma,
-            )
-        })
-        .unwrap_or((false, 1.0, 0.0, true));
+    let (blends_enabled, default_blend, default_transition, auto_stop_vrma, idle_vrma_configured) =
+        world
+            .get_resource::<Settings>()
+            .map(|s| {
+                (
+                    s.pose_controller.blend_transitions_enabled,
+                    s.pose_controller.default_blend_weight,
+                    s.pose_controller.default_transition_seconds,
+                    s.pose_controller.auto_stop_idle_vrma,
+                    !s.avatar.idle_vrma_path.trim().is_empty(),
+                )
+            })
+            .unwrap_or((false, 1.0, 0.0, true, false));
 
     // A manual pose / expression / animation frame landed. The idle VRMA is
     // still running its `AnimationPlayer` and will overwrite whatever we write
@@ -1208,7 +1261,7 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                 cancel_expression_animation,
             } => {
                 if cancel_expression_animation {
-                    clear_expression_animation_playback(world);
+                    clear_expression_animation_playback(world, true);
                 }
                 let Some(e) = vrm_entity else {
                     continue;
@@ -1222,7 +1275,7 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                     .trigger(ModifyExpressions::from_iter(e, pairs));
             }
             PoseCommand::SetExpression { weights } => {
-                clear_expression_animation_playback(world);
+                clear_expression_animation_playback(world, true);
                 let Some(e) = vrm_entity else {
                     continue;
                 };
@@ -1275,10 +1328,11 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                     continue;
                 };
                 if keyframes.is_empty() {
-                    clear_expression_animation_playback(world);
+                    clear_expression_animation_playback(world, true);
                     continue;
                 }
                 let duration = duration_seconds.max(1e-3);
+                let resume_idle_vrma_after = auto_stop_vrma && idle_vrma_configured;
                 if let Some(mut p) = world.get_resource_mut::<ExpressionAnimationPlayback>() {
                     p.active = Some(RunningExpressionClip {
                         keyframes,
@@ -1286,11 +1340,12 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                         looping,
                         elapsed: 0.0,
                         vrm_entity: e,
+                        resume_idle_vrma_after,
                     });
                 }
             }
             PoseCommand::ResetPose => {
-                clear_expression_animation_playback(world);
+                clear_expression_animation_playback(world, true);
                 if index_ready {
                     let vrma_roots: HashSet<Entity> = world
                         .query_filtered::<Entity, With<Vrma>>()
