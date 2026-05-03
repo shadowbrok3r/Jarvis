@@ -9,6 +9,9 @@
 //!     Kimodo-peer) / loop toggle / hold-duration editor / rename / delete.
 //!   * **AI Gen** — prompt → Kimodo generate, streaming into the native player.
 //!   * **Idle** — random-pick idle loop driven by `Settings::pose_controller`.
+//!   * **Expressions** — one slider per VRM expression preset on the loaded
+//!     model (from `BoneSnapshot::expression_presets`); drives
+//!     [`PoseCommand::SetExpression`].
 //!
 //! Everything reads / writes [`PoseLibraryAssets`] (the cached wrapper around
 //! [`jarvis_avatar::pose_library::PoseLibrary`]); disk mutations bubble the
@@ -239,6 +242,11 @@ pub struct PoseControllerUiState {
     pub bone_euler: HashMap<String, [f32; 3]>,
     /// Filter string for the **Bones** tab only (library/animations use [`Self::search`]).
     pub bone_search: String,
+    /// Last `expression_presets` list from the live VRM; when it changes, [`Self::expression_sliders`]
+    /// is rebuilt (weights preserved for names that still exist).
+    pub expr_tracked_presets: Vec<String>,
+    /// 0..=1 weights for the **Expressions** tab; keys are VRMC_vrm preset names.
+    pub expression_sliders: HashMap<String, f32>,
 }
 
 impl Default for PoseControllerUiState {
@@ -263,6 +271,8 @@ impl Default for PoseControllerUiState {
             default_playback_mode: PlaybackMode::Native,
             bone_euler: HashMap::new(),
             bone_search: String::new(),
+            expr_tracked_presets: Vec::new(),
+            expression_sliders: HashMap::new(),
         }
     }
 }
@@ -274,6 +284,7 @@ pub enum PoseControllerTab {
     Animations,
     AiGen,
     Idle,
+    Expressions,
     Bones,
 }
 
@@ -355,6 +366,13 @@ pub fn draw_pose_controller_window(
                     tokio_rt.as_deref(),
                 ),
                 PoseControllerTab::Idle => idle_tab(ui, pc, &mut settings.pose_controller),
+                PoseControllerTab::Expressions => expressions_tab(
+                    ui,
+                    pc,
+                    sender.as_deref(),
+                    snapshot.as_deref(),
+                    &settings.pose_controller,
+                ),
                 PoseControllerTab::Bones => bones_tab(
                     ui,
                     pc,
@@ -412,6 +430,13 @@ fn tab_bar(ui: &mut egui::Ui, state: &mut PoseControllerUiState) {
         tab_btn(ui, &mut state.tab, PoseControllerTab::AiGen, "AI Gen");
         ui.separator();
         tab_btn(ui, &mut state.tab, PoseControllerTab::Idle, "Idle");
+        ui.separator();
+        tab_btn(
+            ui,
+            &mut state.tab,
+            PoseControllerTab::Expressions,
+            "Expressions",
+        );
         ui.separator();
         tab_btn(ui, &mut state.tab, PoseControllerTab::Bones, "Bones");
     });
@@ -969,6 +994,117 @@ fn idle_tab(
         );
         ui.label("Default weight");
         ui.add(egui::Slider::new(&mut settings.default_blend_weight, 0.0..=1.0).step_by(0.05));
+    });
+}
+
+// ---------- Expressions tab ----------------------------------------------------
+
+fn send_expression_set(
+    sender: Option<&PoseCommandSender>,
+    presets: &[String],
+    weights: &HashMap<String, f32>,
+) {
+    let Some(s) = sender else {
+        return;
+    };
+    let mut m = HashMap::with_capacity(presets.len());
+    for p in presets {
+        m.insert(
+            p.clone(),
+            weights.get(p).copied().unwrap_or(0.0).clamp(0.0, 1.0),
+        );
+    }
+    s.send(PoseCommand::SetExpression { weights: m });
+}
+
+fn expressions_tab(
+    ui: &mut egui::Ui,
+    state: &mut PoseControllerUiState,
+    sender: Option<&PoseCommandSender>,
+    snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
+    pose_settings: &jarvis_avatar::config::PoseControllerSettings,
+) {
+    ui.label(egui::RichText::new("VRM expression presets (VRMC_vrm)").strong());
+    ui.label(format!(
+        "Each slider is 0..=1. Every change sends `SetExpression` with **all** listed presets so the \
+         face matches this panel. Idle VRMA can overwrite morphs unless **Auto-stop idle VRMA on pose apply** \
+         is on in the Actions tab (currently {}).",
+        if pose_settings.auto_stop_idle_vrma {
+            "on"
+        } else {
+            "off — enable there if sliders seem to do nothing"
+        }
+    ));
+
+    let presets: Vec<String> = snapshot
+        .map(|h| h.0.read().expression_presets.clone())
+        .unwrap_or_default();
+
+    if state.expr_tracked_presets != presets {
+        state.expr_tracked_presets = presets.clone();
+        let old = std::mem::take(&mut state.expression_sliders);
+        state.expression_sliders = presets
+            .iter()
+            .map(|p| (p.clone(), old.get(p).copied().unwrap_or(0.0)))
+            .collect();
+    }
+
+    ui.horizontal(|ui| {
+        if ui
+            .button("Zero all")
+            .on_hover_text("Set every weight to 0 and apply")
+            .clicked()
+        {
+            for w in state.expression_sliders.values_mut() {
+                *w = 0.0;
+            }
+            send_expression_set(sender, &state.expr_tracked_presets, &state.expression_sliders);
+            state.status = Some("expressions: all zero".into());
+        }
+        if ui
+            .button("Neutral @ 1")
+            .on_hover_text("Zero all, then set `neutral` to 1.0 when this VRM defines that preset")
+            .clicked()
+        {
+            for w in state.expression_sliders.values_mut() {
+                *w = 0.0;
+            }
+            if let Some(w) = state.expression_sliders.get_mut("neutral") {
+                *w = 1.0;
+            }
+            send_expression_set(sender, &state.expr_tracked_presets, &state.expression_sliders);
+            state.status = Some("expressions: neutral".into());
+        }
+    });
+
+    if presets.is_empty() {
+        ui.add_space(6.0);
+        ui.label(
+            "No expression presets on the snapshot yet — wait for the VRM to finish loading, \
+             or export VRMC_vrm expressions from Blender.",
+        );
+        return;
+    }
+
+    ui.add_space(4.0);
+    ui.label(format!("{} preset(s).", presets.len()));
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for name in &presets {
+            let w = state
+                .expression_sliders
+                .entry(name.clone())
+                .or_insert(0.0);
+            let response = ui.add(
+                egui::Slider::new(w, 0.0..=1.0)
+                    .text(name.as_str())
+                    .step_by(0.01),
+            );
+            if response.changed() {
+                *w = (*w).clamp(0.0, 1.0);
+                send_expression_set(sender, &state.expr_tracked_presets, &state.expression_sliders);
+                state.status = Some(format!("expression `{name}`"));
+            }
+        }
     });
 }
 

@@ -11,9 +11,10 @@
 //!    [`PoseCommand::AnimateExpressions`], then [`tick_expression_animation`]
 //!    samples keyframes each frame after the queue drains (after layered
 //!    `ApplyExpression` from `anim_layers`).
-//! 2. Publishes the current per-bone world rotation to a `BoneSnapshot` behind
-//!    an `Arc<RwLock<_>>` so `get_current_bone_state` and `adjust_bone` read
-//!    fresh data without stalling the ECS loop.
+//! 2. Publishes the current per-bone world rotation and **VRM expression preset
+//!    names** (from [`ExpressionEntityMap`]) to a `BoneSnapshot` behind an
+//!    `Arc<RwLock<_>>` so `get_current_bone_state` / `adjust_bone` / MCP discovery
+//!    read fresh data without stalling the ECS loop.
 //!
 //! The canonical camelCase bone names (`"leftUpperArm"`, `"rightHand"`, …) are
 //! the identifiers used for **humanoid** bones across the MCP boundary.
@@ -262,6 +263,10 @@ pub struct BoneSnapshotHandle(pub Arc<RwLock<BoneSnapshot>>);
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BoneSnapshot {
     pub bones: HashMap<String, BoneEntry>,
+    /// VRMC_vrm expression preset names on the loaded avatar (sorted), from
+    /// `bevy_vrm1::ExpressionEntityMap`. Empty until the rig finishes expression init.
+    #[serde(default)]
+    pub expression_presets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -608,22 +613,6 @@ pub(crate) fn sync_bone_entity_index(world: &mut World) {
     sync_extra_skin_bones(world);
     refresh_indexed_bones_merged(world);
 }
-
-/// Canonical list of supported VRM expression presets.
-pub const VRM_EXPRESSION_NAMES: &[&str] = &[
-    "happy",
-    "angry",
-    "sad",
-    "relaxed",
-    "surprised",
-    "aa",
-    "ih",
-    "ou",
-    "ee",
-    "oh",
-    "blinkLeft",
-    "blinkRight",
-];
 
 /// A command that wants to own the rig's pose this frame — we stop every
 /// `AnimationPlayer` so the write actually sticks instead of being overwritten
@@ -1490,5 +1479,15 @@ fn publish_bone_snapshot(world: &mut World) {
             },
         );
     }
+
+    let mut q = world.query_filtered::<&ExpressionEntityMap, With<Vrm>>();
+    let mut preset_names: Vec<String> = q
+        .iter(world)
+        .flat_map(|map| map.keys().map(|k| k.0.clone()))
+        .collect();
+    preset_names.sort_by(|a, b| a.cmp(b));
+    preset_names.dedup();
+    snap.expression_presets = preset_names;
+
     *handle.0.write() = snap;
 }
