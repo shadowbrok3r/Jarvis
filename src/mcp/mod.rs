@@ -44,7 +44,6 @@ use crate::plugins::pose_capture::{
 use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
 use crate::plugins::pose_driver::{
     BoneSnapshot, BoneSnapshotHandle, PoseCommand, PoseCommandSender, VRM_BONE_NAMES,
-    VRM_EXPRESSION_NAMES,
 };
 
 use anim_layer_mcp::{
@@ -172,7 +171,7 @@ pub struct ApplyPoseArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetExpressionArgs {
-    /// Map of expression name → 0..=1 intensity. Valid keys: see `get_bone_reference`.
+    /// Map of expression name → 0..=1 intensity. Keys must match `expressionPresets` / `expressions` from `get_bone_reference` for the loaded VRM.
     pub expressions: HashMap<String, f32>,
     /// Transition duration in seconds. Default 0.3.
     #[serde(default)]
@@ -722,7 +721,7 @@ impl JarvisMcpServer {
         ))
     }
 
-    #[tool(description = "Get the full list of VRM humanoid bone names, expression presets, and (when a VRM is loaded) extra skin joint names from the live rig.")]
+    #[tool(description = "Get the full list of VRM humanoid bone names, expression presets discovered from the loaded VRM (VRMC_vrm; includes custom presets like kitagawa), and extra skin joint names from the live rig.")]
     async fn get_bone_reference(&self) -> CallToolResult {
         let snap = self.snapshot.0.read();
         let mut extra: Vec<String> = snap
@@ -732,11 +731,13 @@ impl JarvisMcpServer {
             .cloned()
             .collect();
         extra.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+        let expression_presets = snap.expression_presets.clone();
         ok_json(&json!({
             "bones": VRM_BONE_NAMES,
             "extraBones": extra,
-            "expressions": VRM_EXPRESSION_NAMES,
-            "note": "Rotations are quaternions [x, y, z, w] in normalized pose space (identity = bind). Expression values are 0..=1. Keep x/y/z in [-0.3, 0.3]. `extraBones` lists Rigify-style joints (e.g. DEF-toe*) present on the loaded avatar; `pose_bones` also accepts DEF-toe* / DEF-ero* by prefix before the first snapshot.",
+            "expressionPresets": expression_presets.clone(),
+            "expressions": expression_presets,
+            "note": "Rotations are quaternions [x, y, z, w] in normalized pose space (identity = bind). Expression values are 0..=1. Keep x/y/z in [-0.3, 0.3]. `expressionPresets` / `expressions` list preset names baked into the current VRM (empty until the rig initializes). `extraBones` lists Rigify-style joints (e.g. DEF-toe*) present on the loaded avatar; `pose_bones` also accepts DEF-toe* / DEF-ero* by prefix before the first snapshot.",
         }))
     }
 

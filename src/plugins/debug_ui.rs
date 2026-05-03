@@ -1,6 +1,6 @@
 //! `bevy_egui` overlay: persistent menu bar plus optional windows (Chat, Avatar,
 //! Camera, Graphics, Services, Channel hub, Gateway, TTS, Look-at, MCP, Pose
-//! Controller, Rig editor, Graphics Advanced, Animation Layers, Emotion
+//! Controller (incl. per-VRM Expressions tab), Rig editor, Graphics Advanced, Animation Layers, Emotion
 //! Mappings, Home Assistant, Network trace, Live/Test). Open/closed flags live
 //! in [`Settings::ui`] and persist in `config/user.toml`.
 //!
