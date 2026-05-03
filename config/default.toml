@@ -134,6 +134,11 @@ default_steps = 100
 poses_dir = "~/.config/@proj-airi/stage-tamagotchi/plugins/v1/CustomPlugins/poses"
 animations_dir = "~/.config/@proj-airi/stage-tamagotchi/plugins/v1/CustomPlugins/animations"
 
+[anim_layers]
+# On first run (empty layer stack), install the default procedural stack and turn composing on.
+auto_install_procedural = true
+master_enabled_default = true
+
 [graphics.advanced]
 tonemapping = "TonyMcMapface"
 smaa_preset = "Medium"

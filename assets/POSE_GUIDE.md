@@ -2,6 +2,10 @@
 
 Reference for MCP callers and humans. Poses live in **normalized pose space**: each bone’s value is a **unit quaternion** `pose_q = [x, y, z, w]` applied by `pose_driver` (see repo) so that `pose_q = [0,0,0,1]` leaves that bone at its VRM rest. This is **not** world space and **not** Euler angles unless you use the MCP tools below.
 
+> **Always work through MCP tools, never around them.** If `CallMcpTool` fails ("Not connected" after a server restart, an unexpected schema mismatch, etc.), **stop and ask the user to refresh `user-pose-controller` in the Cursor MCP panel** — don't fall back to `curl` / Python / direct HTTP. Workarounds let real tooling gaps fester. Whenever you find yourself wishing for a "snapshot the live state and save it" or "build N layers in one call" helper, that's a missing tool — file it (e.g. `save_current_pose`, `set_layer_stack`) and use the new tool from the next session forward.
+
+> **Capture is ground truth — describe what the camera shows, not what you intended.** Every `capture_pose_views` PNG must be read as evidence: enumerate concrete observations of the silhouette (`"hand near hip, elbow twisted outward, eyes closed"`) **before** comparing to the intent. If the silhouette does not match the intended shape, the pose is wrong regardless of how reasonable the recipe looked — **iterate and re-capture before presenting the pose for the user's review**. A self-critique that flags a structural problem ("scarecrow arms," "doesn't read as sofa") and then forwards the pose to the user anyway is a process failure: you should have fixed those before showing it. The user's role is taste and nuance, not "your right elbow is twisted." See [Self-corrective workflow (verify before "done")](#self-corrective-workflow-verify-before-done) for the full multi-view gate.
+
 ## MCP tools (use this order)
 
 1. **`pose_bones`** — Preferred for **body and limbs**. You send **degrees** per bone: `pitch_deg`, `yaw_deg`, `roll_deg` (each optional; missing = 0). MCP argument **`bones` is a JSON object (map)** from bone name → `{ "pitch_deg"?, "yaw_deg"?, "roll_deg"? }` — **not** an array; a list shape will fail deserialization. The server converts with **intrinsic local Euler order XYZ** (pitch around local X, then Y, then Z), **clamps** each angle to safe per-bone limits, **normalizes** the quaternion, then optionally clamps xyz again. The tool response lists **warnings** whenever something was clamped or normalized.
@@ -9,6 +13,7 @@ Reference for MCP callers and humans. Poses live in **normalized pose space**: e
 3. **`adjust_bone`** — **Not Euler degrees.** This tool adds `delta_x`, `delta_y`, `delta_z` to the bone’s **current pose quaternion x/y/z components**, then **renormalizes** the quaternion to unit length (the `w` component is scaled with the vector part so length stays 1). It does **not** multiply `current_pose_q * delta_q`. Use **very small** deltas on **one axis at a time** (often **±0.02 to ±0.05**) for tiny viewport fixes after `pose_bones` or after Kimodo playback. For anything larger than a micro-nudge, use **`pose_bones`** with `pitch_deg` / `yaw_deg` / `roll_deg` instead.
 4. **`get_current_bone_state` → `set_bones`** — Round-trip path: `set_bones` accepts the same quaternions the snapshot returns. The server still **normalizes** and **clamps** xyz so broken pasted values do not explode the rig.
 5. **`create_pose`** — Saves quaternions to disk; unknown bone keys are dropped; each quaternion is sanitized like `set_bones`.
+6. **`save_current_pose`** — Snapshot the **live** rig directly into a saved pose; eliminates the `get_current_bone_state` → reconstruct `bones` map → `create_pose` round-trip. Pass `bones: ["leftShoulder", ..., "rightHand"]` to capture only an upper-body chain (foundation poses for layered idle).
 6. **`list_models`** / **`load_vrm`** — `list_models` scans `assets/models/*.vrm` from the process cwd (sorted basenames + `models/…` paths). `load_vrm` enqueues a runtime swap: the previous avatar root is despawned, `[avatar].model_path` in live `Settings` updates, bone index / snapshot / blend transitions / expression-animation state reset, then the new file loads with the same `[avatar].idle_vrma_path` child as at startup (empty string = no idle). Expressions and face overrides clear; spring/collider preset auto-apply runs again only if `[avatar].auto_load_spring_preset` is true when the new rig hits `Initialized`. `pose_bones` / `get_bone_reference` may return empty or stale until the new rig indexes — wait a frame or two after `load_vrm` before driving bones. The same scan + hot-swap queue is available in-app under **View → Avatar** (filter, list, **Load selected**, or double-click a row).
 
 Do **not** “design” combined rotations by independently picking x, y, z quaternion components. Quaternion composition is **multiplication**, not addition. For any multi-degree pose on one bone, use **`pose_bones`**. Reserve **`adjust_bone`** for **micro** quaternion-component tweaks only.
@@ -46,6 +51,118 @@ Per-bone degree limits are defined in `src/mcp/pose_authoring.rs` (`euler_limit_
 ### Mirroring left and right
 
 Do **not** mirror by negating quaternion Y and Z — that is unreliable once rest poses are non-trivial. Instead: build the right side with `pose_bones`, then repeat with **opposite signs on yaw and roll** (and sometimes pitch) on the left, **or** call `make_fist` / tune one side and mirror using small `adjust_bone` steps while watching the viewport.
+
+### Building a custom arms-down rest pose (per VRM)
+
+Different VRM exports ship in different bind poses (T-pose, A-pose, slight A-stance). For the layer-stack `pose_hold` foundation to look right, every VRM needs its own arms-down rest pose. The convention that works on **`airi.vrm`** (and most "T-pose" exports of the same family):
+
+| Bone | `roll_deg` | `pitch_deg` | `yaw_deg` |
+|------|------------|-------------|-----------|
+| `leftUpperArm` | **−62** (max clamp) | +4–8 (slight forward) | +4 (slight inward) |
+| `rightUpperArm` | **+62** (max clamp, mirror) | +4–8 | −4 |
+| `leftLowerArm` | — | −8 to −10 (soft elbow flex) | −5 to −8 (hand bias inward) |
+| `rightLowerArm` | — | −8 to −10 | +5 to +8 |
+| `leftShoulder` / `rightShoulder` | ±3 to ±8 (small drop) | +2 (slight forward) | — |
+| `leftHand` / `rightHand` | — | −3 (relaxed wrist) | — |
+
+**Critical sign convention:** `*UpperArm.roll_deg` is **mirror-asymmetric** — `left = −62, right = +62` drops both arms; matching signs sends one up. The MCP server clamps `*UpperArm.roll_deg` to **±62°**, so you cannot drop arms further with roll alone — combine with shoulder roll and slight upper-arm pitch to tighten the silhouette against the body.
+
+**Authoring loop (use the MCP tools, not Python):**
+
+1. **`load_vrm`** → wait one frame → **`reset_pose`**. Confirm the rig is at its bind T-pose via `capture_pose_views(front)`.
+2. **`pose_bones`** with the table above.
+3. **`capture_pose_views`** with `front`, `front_left`, `left`. Read **MCP warnings** for clamps; if `*UpperArm.roll_deg` was clamped to ±62, that is expected.
+4. Iterate small adjustments (1–4° at a time) on lower-arm pitch/yaw and shoulder roll until the side profile reads natural — arms hang beside the thigh line with a soft elbow.
+5. **`save_current_pose`** `{ name: "<vrm_short>_natural_rest", category: "idle", bones: ["leftShoulder", "rightShoulder", "leftUpperArm", "rightUpperArm", "leftLowerArm", "rightLowerArm", "leftHand", "rightHand"] }`. Restricting `bones` to the upper-body chain means the foundation `pose_hold` layer won't freeze the legs / hips when overlaid in the layer stack.
+6. Reference the saved pose from a `pose_hold` layer (see `LAYER_AUTHORING_GUIDE.md → Pose-hold layer foundation`).
+
+**Anti-patterns (caught this session — don't repeat):**
+- `leftUpperArm.roll_deg = +62, rightUpperArm.roll_deg = −62` — both arms go **up**, not down. Mirror sign matters.
+- Asking for `roll_deg = −90`/`+90` and ignoring the clamp warning; the rig caps at ±62, the rest of the rotation silently disappears.
+- Using `yaw_deg` on `*UpperArm` to "spread" arms — this **twists** the humerus around its length and often sends the forearm chain behind the body. Use `roll_deg` for lateral spread (see [Upper arm: lateral "arms out" vs arms-behind](#upper-arm-lateral-arms-out-vs-arms-behind-yaw-vs-roll)).
+
+### Reclined / sitting / lying poses — `hips` rotates the whole body
+
+**Critical lever for any reclined or sitting pose: `hips.pitch_deg` rotates the entire upper body around the pelvis.** Don't try to recline by pitching `spine` / `chest` / `upperChest` — that just bends the torso forward at the waist while the pelvis stays vertical (i.e. she still reads as "standing while bent over"). The pelvis must rotate first, then the spine compensates.
+
+**Pattern that works (validated on `Belka1-mtoon.vrm`, generalizes to other MMD-style exports):**
+
+| Bone | Value | Effect |
+|------|-------|--------|
+| `hips` | `pitch_deg: -20` | Entire upper body tilts BACKWARD (recline) |
+| `spine` | `pitch_deg: +12` | Compensate forward so the head doesn't fall back too far |
+| `chest` | `pitch_deg: +5` | Small additional forward bend, chin up but not skyward |
+| `leftUpperLeg` / `rightUpperLeg` | `pitch_deg: +75` | Forward hip flexion — knees come up to chest level (the "sitting" lever) |
+| `leftLowerLeg.roll_deg: +48` / `rightLowerLeg.roll_deg: -48` | (mirror signs) | Knee flex with calves dropping vertically |
+
+Sign of `hips.pitch_deg`:
+- **Negative** = body leans backward (recline)
+- **Positive** = body leans forward (looking down, slumping, prayer pose)
+
+**Anti-patterns caught (don't repeat):**
+
+- **"Recline by pitching spine negative"** — bends torso back at waist while pelvis stays vertical. Reads as "standing with arched back," not "reclining." Use `hips.pitch_deg` instead.
+- **"Sit by abducting one leg laterally with the other planted"** — reads as "standing with one leg out" because one foot is still anchored. To look seated, BOTH legs must be lifted forward (both `*UpperLeg.pitch_deg` strongly positive).
+- **"Reclined sit with arms at chest"** — the "stretching / yawning / display" silhouette of an actual reclined lounge usually has both arms ABOVE the head, not at chest. If the user describes a "lounged" or "sprawled" pose, default both `*UpperArm.roll_deg` to mirror-±55–60 (overhead Y pose) before chest-level positions.
+
+**Verification:** the right-side `capture_pose_views` tells you immediately whether the body is actually leaning back or just bending at the waist. If the spine line + the standing-leg line is still straight-vertical from hip to head, you're not reclining — you're bending. Re-pitch the hips, not the spine.
+
+### Per-rig axis discovery (MMD/Japanese-bone exports differ from airi)
+
+Different VRM exports rotate the bone-local axes differently relative to the world. The "elbow is `*LowerArm.pitch_deg`" / "knee is `*LowerLeg.pitch_deg`" conventions in this guide were calibrated against `airi.vrm`. Other rigs — particularly **MMD-style exports** with Japanese bone names (腕 = arm, ひじ = elbow, 足 = leg, ひざ = knee, often visible inside `extraBones` / parent chain) — bake those axes differently. **Don't assume; probe.**
+
+**Fast probe protocol (do this once when you load a new VRM):**
+
+1. `reset_pose`, then `pose_bones` with **one bone, one axis, one extreme value** (e.g. `rightLowerArm: { roll_deg: -55 }`).
+2. `capture_pose_views(front, right)` and read what moved. Note which world-space motion that single rotation produced.
+3. Repeat for the other two axes on the same bone, and for the other side.
+4. Tabulate the result; reuse it for the rest of the session.
+
+**Concrete example — the green-haired bat-winged "Biyoca Phantom Dreams" / Girls' Frontline 2-style rig in this workspace** (probed 2026-05-02; differs from `airi.vrm`):
+
+| Bone | Axis | Effect on this rig |
+|------|------|-------------------|
+| `rightUpperArm` | `pitch_deg` | TWIST around humerus length (NOT forward sweep) |
+| `rightUpperArm` | `yaw_deg` | Forward swing around vertical (positive = arm forward across body) |
+| `rightUpperArm` | `roll_deg` | Drop arm from T toward forward-down (positive = down/forward) |
+| `rightLowerArm` | `roll_deg` | Elbow flexion (negative = forearm rotates up/toward face) |
+| `rightLowerArm` | `pitch_deg` | Mostly twist; weak flex contribution |
+| `rightUpperLeg` | `roll_deg` | Lateral hip abduction (positive = thigh out to her right) |
+| `rightUpperLeg` | `pitch_deg` | Hip flexion (positive = thigh forward/up) |
+| `rightUpperLeg` | `yaw_deg` | Couples with twist + small forward/back; not clean abduction |
+| `rightLowerLeg` | `roll_deg` | Knee flex such that **calf hangs DOWN** when thigh is laterally abducted (negative ≈ -50 = calf drops naturally below knee) |
+| `rightLowerLeg` | `pitch_deg` | Knee flex such that **calf folds UP** toward thigh (positive = calf back up toward hip) |
+
+Mirror-side bones use opposite signs on `roll_deg` and (often) `yaw_deg`; verify with the same probe protocol.
+
+**Lessons baked into this:**
+
+- The airi.vrm "elbow = `*LowerArm.pitch_deg`" rule is **NOT universal**. On MMD-style exports the elbow flex axis is often `roll_deg`. If `pitch_deg ±85` on the lower arm produces a barely-visible bend, switch to `roll_deg`.
+- "Knee bends down vs up" depends on which axis you use on `*LowerLeg`. If your laterally-abducted thigh produces a calf that folds back up onto the thigh (foot above knee), flip from `pitch_deg` to `roll_deg` (or vice versa) for the knee — they bend in different planes after the upper-leg's lateral roll.
+- For lateral hip abduction on this rig family, `roll_deg` on `*UpperLeg` is the right axis. `yaw_deg` on `*UpperLeg` couples with hip flexion in a confusing way (sign depends on `pitch_deg`); avoid it for clean abduction.
+- Build a mental table from the probe captures **before** trying to compose a complex pose. Two minutes of probing saves 20 minutes of trial-and-error.
+
+### Lounging / reclined arms — there is no "behind head"
+
+**The rig will not let you put a hand behind the head.** `*UpperArm.pitch_deg` is **clamped at ±90°** (warning: `pitch_deg 95.0 clamped to ±90.0`). Combined with the `*UpperArm.roll_deg ±62°` clamp and the `*LowerArm` xyz cap (~0.68, ≈ ±85° elbow flex), the practical reachable envelope for a hand peaks **at shoulder height**, not above it. Stop fighting the rig and design lounging poses where the arms are at or below shoulder height.
+
+**Recipes that read as "lounged" without overhead reach (validated on `airi.vrm`):**
+
+| Intent | UpperArm | LowerArm | Hand |
+|--------|----------|----------|------|
+| **Forward-and-down soft drape** (right arm) | `pitch_deg +55, roll_deg +25, yaw_deg 0` | `pitch_deg −65, yaw_deg 0, roll_deg −8` | `pitch_deg −15, roll_deg −8` |
+| **Side-and-down lazy reach** (left arm, mirrored) | `pitch_deg +25, roll_deg −45, yaw_deg 0` | `pitch_deg −55, yaw_deg 0, roll_deg +8` | `pitch_deg −10, roll_deg +12` |
+| **"Hand near temple" pseudo-overhead** (closest you can get) | `pitch_deg +88, roll_deg +35, yaw_deg 0` | `pitch_deg −85, yaw_deg 0, roll_deg 0` | `pitch_deg −8, roll_deg −4` |
+
+The third row is the maximum overhead reach the rig allows — the elbow ends up roughly at shoulder height with the forearm angled across, hand near the cheek. There is **no recipe** that reads as "hand cradling the back of the head."
+
+**Forearm direction lever:** With `*UpperArm.yaw_deg` locked at `0` (don't twist the humerus), the only way to bias the forearm direction after elbow flex is `*UpperArm.pitch_deg` (lifts forward) and `*UpperArm.roll_deg` (sweeps lateral). Once the elbow flexes via negative `*LowerArm.pitch_deg`, the forearm trails along the same plane the upper arm is rotated in. Plan the hand landing zone by aiming the upper arm there with pitch+roll, then flex the elbow.
+
+### Capture framing for non-standing poses
+
+`framing_preset: "face_closeup"` assumes the avatar's face is **near where it would be in a standing T-pose** (centered, upright, ~head-height). For a reclined / sitting / floor pose, the head is in a totally different world position and `face_closeup` shoots **empty space** (you'll get a blank PNG and a wasted round-trip).
+
+**Workaround:** Use `framing_preset: "full_body"` with a square `width: 768, height: 768` and read the resulting image — the head will be visible inside it. Alternatively, capture full_body at 1024×1024 for both pose and face verification in one shot. There is no head-tracking framing preset today; consider adding one (`face_closeup_dynamic` that reads the head bone's world transform) when this becomes a frequent need.
 
 ## Extra Rigify / skin bones (`DEF-toe*`, `DEF-ero*`, …)
 
@@ -221,6 +338,9 @@ The **`make_fist`** MCP tool internally blends between the relaxed template and 
 5. **Ignoring MCP warnings** — if the server clamped something, the pose is not what you typed.
 6. **Large `yaw_deg` on `*UpperArm` for “arms out”** — often reads **arms-behind**; use **`roll_deg`** for lateral spread (see **Upper arm: lateral “arms out” vs arms-behind (yaw vs roll)** above).
 7. **Deep squat from hips+spine pitch only** — reads **prone / skyfall**; fold **thigh–shin** first and cap **`hips.pitch_deg`** (see **Crouch / squat / plié: avoid the “skyfall” (prone arch) silhouette** above).
+8. **Matching `roll_deg` signs on `*UpperArm` for arms-down** — drops one arm and lifts the other. Mirror the sign: `leftUpperArm.roll_deg = -62`, `rightUpperArm.roll_deg = +62`. See [**Building a custom arms-down rest pose (per VRM)**](#building-a-custom-arms-down-rest-pose-per-vrm).
+9. **Reusing a saved pose from one VRM as the foundation for another** — `hands_on_hips` authored on `Belka1-mtoon.vrm` may leave `airi.vrm` arms in T-pose because the rigs' bind orientations differ. Author per-VRM rest poses (`<vrm_short>_natural_rest`) and reference those.
+10. **Falling back to Python / curl when an MCP call fails.** That's a tooling-gap signal — fix the missing batch tool (e.g. `save_current_pose` instead of `get_current_bone_state` + `create_pose`) and ask the user to refresh the MCP server connection before retrying.
 
 ## VRM expressions
 
@@ -324,6 +444,8 @@ Defaults write under **`assets/animations/imported_vrma/`** in this repo (git-tr
 
 **Converter limitations:** ignores **root translation** (hips position) — same rotation-only contract as Kimodo clips; **no VRMC expression** tracks; assumes **aligned** glTF sampler times across bones. Per-frame **`durationMs`** is preserved in JSON for tooling; **native playback and layer clip sampling** still advance by uniform `fps` (they do not yet integrate variable per-frame spacing).
 
+**Bind rebase (was the cause of "VRMA clip lays the avatar flat" bugs):** VRMA channel rotations are **absolute** glTF node rotations in the VRMA file's own bind frame; per glTF spec they REPLACE `node.rotation` rather than multiplying it. Many VRMA exporters (e.g. the `vrm-studio` collection-1 pack) bake non-identity bind rotations into humanoid nodes — the `VRMA_07_Squat.vrma` hip node has bind ≈ 120° around (1,1,1) (a coordinate-axis cycle) and `*UpperLeg` bind ≈ 180°. The loaded VRM expects the **normalized humanoid pose quaternion** (delta from bind), so the converter must do `bind_q.inverse() * channel_q` per frame for every humanoid bone — without that rebase, frame 0 gets a ~113° hip rotation and the avatar lies horizontal at clip start. The current converter does the rebase; if you regenerate JSON with an older copy of the script, expect the "lying on the floor" symptom and re-run the latest. The same rebase keeps fingers from corkscrewing — finger nodes often have small non-identity bind rotations (≈10–15° per knuckle) that, if not removed, stack with the channel data and look like jitter.
+
 ### Per-frame expressions inside `AnimationFile`
 
 Each **`frames[]`** entry may include an **`expressions`** object: VRM expression name → weight in **0..1** (same names as `get_bone_reference` / `set_expression`).
@@ -362,7 +484,14 @@ Applies to **all** body-part and face work: treat authoring as **closed-loop**�
 
 **Iteration:** adjust only what **failed** the last captures — small **`adjust_bone`** (quaternion deltas) or **targeted** `pose_bones` / `set_expression` on those bones or weights — then **re-capture** with the same framing and view set. Repeat until acceptable or you hit diminishing returns (avoid re-driving unrelated bones).
 
-**Completion gate:** do **not** declare the task finished until captures are **reviewed** (humans: open the PNGs; **agents: read the image files** at paths returned in the MCP response). Skipping review is an incomplete run.
+**Read the captures as evidence (mandatory two-step):**
+
+1. **Describe what's actually in the picture** — limb directions, joint angles, eye/face state, body orientation, contact with imagined surfaces — using language that does **not** reference the recipe you typed. Example: `"front view: both arms extend horizontally outward parallel to the floor; eyes appear closed; right leg points up and to camera-left; no contact with imagined chair surface"`.
+2. **Then** compare that description against the intent. If anything is structurally wrong — limb in the wrong direction, eyes wrong, body floating instead of sitting, twisted joint — that is a **real defect** the user can see at a glance, **not** a nuance for them to direct. Iterate (`pose_bones` adjustment + re-capture) **before** presenting the pose for review.
+
+The single most common authoring failure is **recipe-anchoring**: trusting that the silhouette matches what the recipe says, instead of trusting the picture. Cover the recipe in your head and ask "would a stranger looking only at this PNG describe it the way I'd describe my intent?" If no, fix it before showing it.
+
+**Completion gate:** do **not** declare the task finished until captures are **reviewed** (humans: open the PNGs; **agents: read the image files** at paths returned in the MCP response). Skipping review is an incomplete run; reviewing without describing-then-comparing is incomplete review.
 
 Concrete payloads and camera overrides: **Visual verification loop** below.
 
@@ -435,3 +564,7 @@ Use this while dialing eyes, brows, mouth, and expression blend:
 - **Feet / heel contact:** tune `*LowerLeg` before `*Foot`. Use `*Foot.pitch_deg` to seat heel contact and `*Foot.yaw_deg` for slight outward toe angle. Use small opposite left/right yaw signs for symmetry.
 - **Safe step sizes:** start around ±3° to ±5° for torso/upper limbs and ±2° to ±4° for wrists/feet; only push toward ±8° when a view confirms the previous delta was too small.
 - **Bone-name casing:** always use canonical names from `get_bone_reference` (for example `leftLowerLeg`, not lowercase aliases) before bulk edits.
+
+## Animation layer stack (layered motion)
+
+For **stacked** motion — procedural idle polish (breathing, blink, fidgets) **plus** optional library **`clip`** or **`pose_hold`** layers with bone masks — read **`assets/LAYER_AUTHORING_GUIDE.md`** or call MCP **`get_layer_authoring_guide`**. Workflow tools include **`list_layers`**, **`add_layer`**, **`install_default_layers`**, **`set_master_enabled`**, **`save_layer_set`** / **`load_layer_set`**, then **`capture_pose_views`** to verify.

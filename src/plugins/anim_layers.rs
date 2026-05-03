@@ -68,11 +68,12 @@ use bevy_vrm1::prelude::*;
 use parking_lot::RwLock;
 use rand::RngExt;
 
+use jarvis_avatar::config::Settings;
 use jarvis_avatar::pose_library::{AnimationFile, PoseFile};
 
 use crate::plugins::pose_driver::{
     IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES, apply_pose_commands,
-    normalized_from_local, sync_bone_entity_index,
+    local_from_normalized, normalized_from_local, sync_bone_entity_index,
 };
 
 pub struct AnimLayersPlugin;
@@ -81,6 +82,7 @@ impl Plugin for AnimLayersPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(LayerStackHandle::default())
             .insert_resource(RestPoseSnapshot::default())
+            .add_systems(Startup, maybe_auto_install_default_layers)
             // PostUpdate chain (see `pose_driver`): VRMA / `AnimationSystems` first, then
             // `sync_bone_entity_index` fills `IndexedBones`, we refresh rest locals, layers
             // enqueue `PoseCommand`s, `apply_pose_commands` writes transforms. All of this stays
@@ -101,6 +103,20 @@ impl Plugin for AnimLayersPlugin {
                 ),
             );
     }
+}
+
+fn maybe_auto_install_default_layers(settings: Res<Settings>, stack: Res<LayerStackHandle>) {
+    if !settings.anim_layers.auto_install_procedural {
+        return;
+    }
+    let master = settings.anim_layers.master_enabled_default;
+    stack.with_write(|s| {
+        if !s.layers.is_empty() {
+            return;
+        }
+        s.install_default_procedural_layers();
+        s.master_enabled = master;
+    });
 }
 
 // ============================================================================
@@ -625,7 +641,7 @@ fn advance_and_apply_layers(
                 }
             }
 
-            let sample = sample_driver(&mut layer.driver, layer.time, dt, &snap.rest);
+            let sample = sample_driver(&mut layer.driver, layer.time, dt, &snap);
 
             let weight = layer.weight.clamp(0.0, 1.0);
 
@@ -711,11 +727,12 @@ fn sample_driver(
     driver: &mut DriverKind,
     t: f32,
     dt: f32,
-    rest: &HashMap<String, Quat>,
+    snap: &RestPoseSnapshot,
 ) -> DriverSample {
+    let rest = &snap.rest;
     match driver {
-        DriverKind::Clip { animation } => sample_clip(animation, t),
-        DriverKind::PoseHold { pose } => sample_pose_hold(pose),
+        DriverKind::Clip { animation } => sample_clip(animation, t, snap),
+        DriverKind::PoseHold { pose } => sample_pose_hold(pose, snap),
         DriverKind::Breathing {
             rate_hz,
             pitch_deg,
@@ -753,17 +770,36 @@ fn sample_driver(
     }
 }
 
-fn sample_pose_hold(pose: &PoseFile) -> DriverSample {
+/// Saved poses and animation clips are recorded by `pose_driver` in the same
+/// normalized humanoid space as `getNormalizedBoneNode().quaternion` in
+/// three-vrm. The layer accumulator however blends in **raw bone-local
+/// space** (so it can mix with rest-relative procedural deltas like breathing
+/// and finger-fidget). Convert each stored quaternion to its raw-local form
+/// using the cached rest snapshot before handing it back to the accumulator.
+/// Without this conversion the compose step would mix two different bases and
+/// every pose-hold / clip layer would silently land on the rig's bind pose.
+fn convert_normalized_to_local(
+    name: &str,
+    pose_q: Quat,
+    snap: &RestPoseSnapshot,
+) -> Quat {
+    let rest_local = snap.rest.get(name).copied().unwrap_or(Quat::IDENTITY);
+    let rest_world = snap.rest_world.get(name).copied().unwrap_or(Quat::IDENTITY);
+    local_from_normalized(rest_local, rest_world, pose_q)
+}
+
+fn sample_pose_hold(pose: &PoseFile, snap: &RestPoseSnapshot) -> DriverSample {
     let mut bones = HashMap::with_capacity(pose.bones.len());
     for (name, r) in &pose.bones {
         let [x, y, z, w] = r.rotation;
-        bones.insert(name.clone(), Quat::from_xyzw(x, y, z, w));
+        let normalized = Quat::from_xyzw(x, y, z, w);
+        bones.insert(name.clone(), convert_normalized_to_local(name, normalized, snap));
     }
     let expressions = pose.expressions.clone();
     DriverSample { bones, expressions }
 }
 
-fn sample_clip(animation: &AnimationFile, t: f32) -> DriverSample {
+fn sample_clip(animation: &AnimationFile, t: f32, snap: &RestPoseSnapshot) -> DriverSample {
     if animation.frames.is_empty() {
         return DriverSample::default();
     }
@@ -774,7 +810,8 @@ fn sample_clip(animation: &AnimationFile, t: f32) -> DriverSample {
     let mut bones = HashMap::with_capacity(frame.bones.len());
     for (name, r) in &frame.bones {
         let [x, y, z, w] = r.rotation;
-        bones.insert(name.clone(), Quat::from_xyzw(x, y, z, w));
+        let normalized = Quat::from_xyzw(x, y, z, w);
+        bones.insert(name.clone(), convert_normalized_to_local(name, normalized, snap));
     }
     let expressions = frame.expressions.clone();
     DriverSample { bones, expressions }

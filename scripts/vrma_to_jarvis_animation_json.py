@@ -6,6 +6,16 @@ Output shape matches `AnimationFile` / `AnimationFrame` in `src/pose_library.rs`
 
 Dependencies: Python 3.10+ stdlib only.
 
+Coordinate-space note (important — this is the difference between a working clip and a "lying on the
+floor" clip): VRMA channel rotations are **absolute** glTF node rotations in the VRMA file's own bind
+frame; they REPLACE `node.rotation` per the glTF spec, not multiply it. Many VRMA exporters bake
+non-identity bind rotations into the humanoid nodes (the "VRMA_07_Squat.vrma" pack has hips at a 120°
+(1,1,1) cyclic permutation and `*UpperLeg` at 180° flips). To produce the **normalized humanoid pose
+quaternion** that the loaded VRM expects (which is the "delta from bind"), each channel value must be
+rebased by `bind_rotation.inverse() * channel_value`. Without this rebase the avatar lies horizontal at
+frame 0 because the bind rotation gets re-applied as if it were a pose. The jarvis engine's
+`local_from_normalized` then maps the normalized delta into the loaded rig's raw-local space.
+
 Limitations:
 - Reads **humanoid rotation** channels only (same bone names as VRM humanoid: hips, leftUpperArm, …).
 - **Root translation** (e.g. hips translation) is ignored — jarvis pose JSON is rotation-only; vertical drift
@@ -107,6 +117,30 @@ def _quat_identity(q: tuple[float, ...], eps: float = 1e-3) -> bool:
     return min(d0, d1) <= eps * eps
 
 
+def _quat_inverse(q: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """Conjugate / inverse for unit quaternions (xyzw). Falls back to true inverse if non-unit."""
+    x, y, z, w = q
+    n2 = x * x + y * y + z * z + w * w
+    if n2 == 0.0:
+        return (0.0, 0.0, 0.0, 1.0)
+    return (-x / n2, -y / n2, -z / n2, w / n2)
+
+
+def _quat_mul(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    """Hamilton product (xyzw)."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    )
+
+
 def convert_vrma_to_animation_dict(
     path: Path,
     *,
@@ -127,6 +161,28 @@ def convert_vrma_to_animation_dict(
     if not anims:
         raise ValueError(f"no animations[] in glTF: {path}")
     anim0 = anims[0]
+
+    # Capture each humanoid node's bind rotation so we can rebase channel values
+    # to the standardized normalized humanoid frame (`bind.inverse() * channel`).
+    # See module docstring for why this is required — without it the avatar lies
+    # horizontal at frame 0 because the bind rotation gets re-applied as a pose.
+    bind_by_node: dict[int, tuple[float, float, float, float]] = {}
+    for spec in human_bones.values():
+        try:
+            ni = int(spec["node"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        node = gltf["nodes"][ni]
+        rest = node.get("rotation")
+        if rest is None or len(rest) != 4:
+            bind_by_node[ni] = (0.0, 0.0, 0.0, 1.0)
+        else:
+            bind_by_node[ni] = (
+                float(rest[0]),
+                float(rest[1]),
+                float(rest[2]),
+                float(rest[3]),
+            )
 
     rot_by_node: dict[int, tuple[list[float], list[tuple]]] = {}
     master_times: list[float] | None = None
@@ -167,9 +223,13 @@ def convert_vrma_to_animation_dict(
             if ni not in rot_by_node:
                 continue
             _, rots = rot_by_node[ni]
-            q = tuple(float(x) for x in rots[i])
-            if len(q) != 4:
+            channel_q = tuple(float(x) for x in rots[i])
+            if len(channel_q) != 4:
                 continue
+            # Rebase: VRMA channel values are absolute glTF node rotations; the
+            # loaded VRM expects the normalized humanoid delta from bind.
+            bind_q = bind_by_node.get(ni, (0.0, 0.0, 0.0, 1.0))
+            q = _quat_mul(_quat_inverse(bind_q), channel_q)
             if skip_identity and _quat_identity(q, identity_eps):
                 continue
             bones[str(bone_name)] = {"rotation": [q[0], q[1], q[2], q[3]]}

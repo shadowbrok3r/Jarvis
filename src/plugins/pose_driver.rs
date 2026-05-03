@@ -69,7 +69,11 @@ use serde::{Deserialize, Serialize};
 /// / shoulders / fingers / toes whose rest world rotations are non-trivial.
 ///
 /// See [`normalized_from_local`] for the inverse used by the snapshot.
-fn local_from_normalized(rest_local: Quat, rest_world: Quat, pose_q: Quat) -> Quat {
+///
+/// Public so the animation-layer pipeline ([`crate::plugins::anim_layers`])
+/// can pre-convert saved-pose / clip frames (stored in normalized humanoid
+/// space) into the raw-local space the layer accumulator blends against.
+pub fn local_from_normalized(rest_local: Quat, rest_world: Quat, pose_q: Quat) -> Quat {
     rest_local * rest_world.inverse() * pose_q * rest_world
 }
 

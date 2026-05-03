@@ -58,6 +58,10 @@ pub struct Settings {
     /// `config/anim_layer_sets.json`.
     #[serde(default)]
     pub anim_layer_sets: AnimLayerSetsSettings,
+    /// Defaults for the in-engine animation layer stack (breathing / blink / fidgets).
+    /// See `[anim_layers]` in `config/default.toml`.
+    #[serde(default)]
+    pub anim_layers: AnimLayersSettings,
 }
 
 /// Persistable debug-UI state: which dedicated windows are open. Everything else
@@ -293,6 +297,28 @@ impl Default for AnimLayerSetsSettings {
 
 fn default_anim_layer_sets_path() -> String {
     "config/anim_layer_sets.json".to_string()
+}
+
+/// Boot-time behaviour for the binary crate’s animation layer stack (`anim_layers` plugin).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnimLayersSettings {
+    /// When true and the stack has no layers yet, install breathing + blink +
+    /// weight-shift + finger/toe fidgets and apply `master_enabled_default`.
+    #[serde(default = "default_true")]
+    pub auto_install_procedural: bool,
+    /// Initial value for `LayerStack.master_enabled` after auto-install (or when
+    /// the stack is still empty has no effect until layers exist).
+    #[serde(default = "default_true")]
+    pub master_enabled_default: bool,
+}
+
+impl Default for AnimLayersSettings {
+    fn default() -> Self {
+        Self {
+            auto_install_procedural: true,
+            master_enabled_default: true,
+        }
+    }
 }
 
 /// RMCP (Model Context Protocol) streamable-HTTP server that exposes

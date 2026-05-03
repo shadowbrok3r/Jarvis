@@ -4,6 +4,7 @@ mod kimodo;
 mod mcp;
 mod plugins;
 
+use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowResolution};
 use bevy_vrm1::prelude::*;
@@ -32,9 +33,26 @@ fn main() {
         }
     }
 
+    let asset_path = resolve_asset_path();
+    info!("assets resolved to: {asset_path}");
+    if let Some(parent) = std::path::Path::new(&asset_path).parent() {
+        // Bevy's file `AssetReader` joins `AssetPlugin.file_path` ("assets" by
+        // default) onto `get_base_path()`, which prefers `BEVY_ASSET_ROOT`,
+        // then `CARGO_MANIFEST_DIR`, then the executable's parent. Setting
+        // `BEVY_ASSET_ROOT` lets the binary find `assets/` regardless of cwd
+        // or where the binary was launched from.
+        // SAFETY: single-threaded process startup, before `App::new`.
+        unsafe {
+            std::env::set_var("BEVY_ASSET_ROOT", parent);
+        }
+    }
+
     App::new()
         .insert_resource(settings)
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(AssetPlugin {
+            file_path: asset_path,
+            ..default()
+        }))
         .add_plugins((
             plugins::traffic_log::TrafficLogPlugin,
             plugins::home_assistant::HomeAssistantPlugin,
@@ -100,6 +118,68 @@ fn inject_kimodo_client(
         let client = kimodo::KimodoClient::new(hub.clone()).with_streaming(streaming.clone());
         commands.insert_resource(plugins::debug_ui::KimodoClientRes(client));
     }
+}
+
+/// Find the `assets/` directory at runtime.
+///
+/// Bevy's default `AssetPlugin` resolves assets relative to the binary's
+/// parent directory, which works for `cargo run` (binary lives next to the
+/// project root) but breaks when launching `target/debug/jarvis-avatar`
+/// directly. We instead probe a small set of well-known candidates so the
+/// dev binary, an installed binary, and a `cargo run` invocation all behave
+/// the same.
+///
+/// Search order:
+///   1. `JARVIS_ASSETS_DIR` env var (explicit override)
+///   2. `<cwd>/assets` (typical for `cargo run` from crate root)
+///   3. `<exe_dir>/assets` (installed/portable layout)
+///   4. `<exe_dir>/../assets`, `../../assets`, `../../../assets`
+///      (covers `target/{debug,release}/jarvis-avatar` and similar)
+///   5. Compile-time `CARGO_MANIFEST_DIR/assets` (last-resort dev fallback)
+fn resolve_asset_path() -> String {
+    use std::path::PathBuf;
+
+    if let Ok(p) = std::env::var("JARVIS_ASSETS_DIR") {
+        if !p.is_empty() && PathBuf::from(&p).is_dir() {
+            return p;
+        }
+    }
+
+    let cwd_assets = PathBuf::from("assets");
+    if cwd_assets.is_dir() {
+        return "assets".to_string();
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        let exe_dir = exe.parent().map(PathBuf::from);
+        for candidate in [
+            exe_dir.clone(),
+            exe_dir.as_ref().and_then(|d| d.parent().map(PathBuf::from)),
+            exe_dir
+                .as_ref()
+                .and_then(|d| d.parent().and_then(|p| p.parent()).map(PathBuf::from)),
+            exe_dir.as_ref().and_then(|d| {
+                d.parent()
+                    .and_then(|p| p.parent().and_then(|q| q.parent()))
+                    .map(PathBuf::from)
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let assets = candidate.join("assets");
+            if assets.is_dir() {
+                return assets.to_string_lossy().into_owned();
+            }
+        }
+    }
+
+    let manifest_assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");
+    if manifest_assets.is_dir() {
+        return manifest_assets.to_string_lossy().into_owned();
+    }
+
+    "assets".to_string()
 }
 
 fn configure_primary_window(

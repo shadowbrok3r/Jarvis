@@ -13,6 +13,7 @@
 //! `Authorization: Bearer <token>`.
 
 pub mod plugin;
+mod anim_layer_mcp;
 mod pose_authoring;
 
 use std::collections::HashMap;
@@ -46,7 +47,14 @@ use crate::plugins::pose_driver::{
     VRM_EXPRESSION_NAMES,
 };
 
+use anim_layer_mcp::{
+    AddLayerArgs, DeleteLayerSetArgs, InstallDefaultLayersArgs, LoadLayerSetArgs, RemoveLayerArgs,
+    SaveLayerSetArgs, SetLayerStackArgs, SetMasterEnabledArgs, UpdateLayerArgs,
+};
 use pose_authoring::{bone_map_from_euler_deg, make_fist_bones, sanitize_bone_map, MakeFistArgs, PoseBonesArgs};
+
+use crate::plugins::anim_layer_sets::LayerSetsStore;
+use crate::plugins::anim_layers::LayerStackHandle;
 
 // ---------- server state ------------------------------------------------------
 
@@ -60,10 +68,13 @@ pub struct JarvisMcpServer {
     pub kimodo: KimodoClient,
     pub a2f: A2fClient,
     pub pose_guide_path: PathBuf,
+    pub layer_guide_path: PathBuf,
     pub library: Arc<PoseLibrary>,
     pub kimodo_defaults: KimodoDefaults,
     /// Optional network trace sink (debug UI).
     pub traffic: Option<TrafficLogSink>,
+    pub layer_stack: LayerStackHandle,
+    pub layer_sets: LayerSetsStore,
     tool_router: ToolRouter<Self>,
 }
 
@@ -83,9 +94,12 @@ impl JarvisMcpServer {
         hub: HubBroadcast,
         a2f: A2fClient,
         pose_guide_path: PathBuf,
+        layer_guide_path: PathBuf,
         library: PoseLibrary,
         kimodo_defaults: KimodoDefaults,
         traffic: Option<TrafficLogSink>,
+        layer_stack: LayerStackHandle,
+        layer_sets: LayerSetsStore,
     ) -> Self {
         Self::with_kimodo(
             pose_tx,
@@ -95,9 +109,12 @@ impl JarvisMcpServer {
             KimodoClient::new(hub),
             a2f,
             pose_guide_path,
+            layer_guide_path,
             library,
             kimodo_defaults,
             traffic,
+            layer_stack,
+            layer_sets,
         )
     }
 
@@ -113,9 +130,12 @@ impl JarvisMcpServer {
         kimodo: KimodoClient,
         a2f: A2fClient,
         pose_guide_path: PathBuf,
+        layer_guide_path: PathBuf,
         library: PoseLibrary,
         kimodo_defaults: KimodoDefaults,
         traffic: Option<TrafficLogSink>,
+        layer_stack: LayerStackHandle,
+        layer_sets: LayerSetsStore,
     ) -> Self {
         Self {
             pose_tx,
@@ -125,9 +145,12 @@ impl JarvisMcpServer {
             kimodo,
             a2f,
             pose_guide_path,
+            layer_guide_path,
             library: Arc::new(library),
             kimodo_defaults,
             traffic,
+            layer_stack,
+            layer_sets,
             tool_router: Self::tool_router(),
         }
     }
@@ -208,6 +231,23 @@ pub struct CreatePoseArgs {
     /// If `false`, just save — don't apply. Default `true`.
     #[serde(default)]
     pub apply_immediately: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SaveCurrentPoseArgs {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Restrict the snapshot to a subset of bones (humanoid + extra skin
+    /// joints). Empty / omitted = save **every** indexed bone. Use this to
+    /// build foundation poses that only override an upper-body chain (e.g.
+    /// arms-down rest) without freezing the legs / hips.
+    #[serde(default)]
+    pub bones: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_expressions: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -717,6 +757,65 @@ impl JarvisMcpServer {
         ok_json(&snap.bones)
     }
 
+    #[tool(description = "Snapshot the LIVE rig into a saved pose without round-tripping through get_current_bone_state + create_pose. After you sculpt with pose_bones / make_fist / adjust_bone and verify with capture_pose_views, call this to persist exactly what's on screen. `bones` (optional) restricts the snapshot to a subset of bone names — leave empty to capture every indexed bone, or pass an upper-body chain (e.g. shoulders + arms + hands) to author a foundation pose that doesn't freeze the legs. Returns the saved bone count.")]
+    async fn save_current_pose(
+        &self,
+        Parameters(args): Parameters<SaveCurrentPoseArgs>,
+    ) -> CallToolResult {
+        let snap = self.snapshot.0.read().clone();
+        if snap.bones.is_empty() {
+            return err_text(
+                "no bones indexed yet — load a VRM (load_vrm) and wait for the rig to settle"
+                    .to_string(),
+            );
+        }
+        let filter: Option<std::collections::HashSet<String>> = args.bones.as_ref().map(|v| {
+            v.iter()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+                .collect()
+        });
+        let mut bones: HashMap<String, BoneRotation> = HashMap::new();
+        for (name, entry) in &snap.bones {
+            if let Some(allow) = filter.as_ref() {
+                if !allow.contains(name) {
+                    continue;
+                }
+            }
+            bones.insert(
+                name.clone(),
+                BoneRotation {
+                    rotation: entry.rotation,
+                },
+            );
+        }
+        if bones.is_empty() {
+            return err_text(
+                "no bones matched — pass bone names from get_bone_reference or omit `bones`"
+                    .to_string(),
+            );
+        }
+        let _include_expressions = args.include_expressions.unwrap_or(false);
+        let pose = PoseFile {
+            name: args.name.clone(),
+            description: args.description.unwrap_or_default(),
+            category: args.category.unwrap_or_else(|| "general".into()),
+            bones,
+            // BoneSnapshot does not currently track expression state; reserve
+            // the API surface so a future snapshot upgrade can fill this in.
+            expressions: HashMap::new(),
+            transition_duration: 0.4,
+        };
+        if let Err(e) = self.library.save_pose(&pose) {
+            return err_text(format!("save failed: {e}"));
+        }
+        ok_json(&json!({
+            "saved": pose.name,
+            "boneCount": pose.bones.len(),
+            "expressionCount": pose.expressions.len(),
+        }))
+    }
+
     #[tool(description = "Tiny per-axis tweak: adds delta_x/delta_y/delta_z to the bone's current pose quaternion components, then renormalizes (NOT Euler degrees). Use very small steps (often ±0.02–0.05 on one axis) for micro-corrections after pose_bones or Kimodo playback.")]
     async fn adjust_bone(&self, Parameters(args): Parameters<AdjustBoneArgs>) -> CallToolResult {
         let snap = self.snapshot.0.read().clone();
@@ -920,6 +1019,204 @@ impl JarvisMcpServer {
         }))
     }
 
+    #[tool(description = "JSON snapshot of the animation layer stack: masterEnabled, per-layer id/slug, driver kind+params, blendMode (`override` = absolute local rotations, `additive` = rest-relative deltas), bone masks, weights, playback flags. Use list_generated_animations / list_poses before add_layer for clip / pose_hold filenames.")]
+    async fn list_layers(&self) -> CallToolResult {
+        let v = self
+            .layer_stack
+            .with_read(anim_layer_mcp::stack_snapshot_json);
+        ok_json(&v)
+    }
+
+    #[tool(description = "List saved layer-set names from `config/anim_layer_sets.json` (see save_layer_set / load_layer_set / delete_layer_set).")]
+    async fn list_layer_sets(&self) -> CallToolResult {
+        let names = anim_layer_mcp::list_layer_set_names(&self.layer_sets);
+        ok_json(&json!({ "sets": names, "count": names.len() }))
+    }
+
+    #[tool(description = "Return the full layer authoring guide (assets/LAYER_AUTHORING_GUIDE.md): driver kinds, blend modes, mask recipes, workflow with capture_pose_views. Read alongside get_pose_guide.")]
+    async fn get_layer_authoring_guide(&self) -> CallToolResult {
+        match anim_layer_mcp::read_layer_guide(&self.layer_guide_path) {
+            Ok(s) => ok_text(s),
+            Err(e) => err_text(e),
+        }
+    }
+
+    #[tool(description = "Turn the layer stack master switch on or off. When off, the stack emits no ApplyBones/ApplyExpression and the rig follows VRMA / idle_tick / MCP pose commands only.")]
+    async fn set_master_enabled(
+        &self,
+        Parameters(args): Parameters<SetMasterEnabledArgs>,
+    ) -> CallToolResult {
+        self.layer_stack
+            .with_write(|s| s.master_enabled = args.enabled);
+        ok_json(&json!({ "masterEnabled": args.enabled }))
+    }
+
+    #[tool(description = "Append one layer. `driver` is a tagged union: kind `clip` { filename } (use list_generated_animations), `pose_hold` { pose_ref } (list_poses), or procedural kinds `breathing` | `blink` | `weight_shift` | `finger_fidget` | `toe_fidget` with optional numeric fields. Default blend_mode is override; use `additive` for rest-relative procedural deltas on top of earlier layers. Returns layerId.")]
+    async fn add_layer(
+        &self,
+        Parameters(args): Parameters<AddLayerArgs>,
+    ) -> CallToolResult {
+        let slug = args.slug.clone();
+        let layer = match anim_layer_mcp::build_layer(self.library.as_ref(), &args) {
+            Ok(l) => l,
+            Err(e) => return err_text(e),
+        };
+        let id = self.layer_stack.with_write(|s| s.add_layer(layer));
+        ok_json(&json!({ "layerId": id, "slug": slug }))
+    }
+
+    #[tool(description = "Patch a layer by numeric id (from list_layers) or unique slug/label. Optional driver_params for procedural drivers only — clip/pose_hold cannot change; use remove_layer + add_layer. blend_mode: `override` or `additive`/`rest_relative`.")]
+    async fn update_layer(
+        &self,
+        Parameters(args): Parameters<UpdateLayerArgs>,
+    ) -> CallToolResult {
+        let label = args.id_or_slug.clone();
+        let res: Result<(), String> = self.layer_stack.with_write(|stack| {
+            let id = anim_layer_mcp::resolve_layer_id(stack, &args.id_or_slug)?;
+            let layer = stack
+                .layers
+                .iter_mut()
+                .find(|l| l.id == id)
+                .ok_or_else(|| format!("layer id {id} not found"))?;
+            anim_layer_mcp::apply_layer_row_patch(layer, &args)
+        });
+        match res {
+            Ok(()) => ok_text(format!("updated layer {label}")),
+            Err(e) => err_text(e),
+        }
+    }
+
+    #[tool(description = "Remove a layer by id or slug/label (see list_layers).")]
+    async fn remove_layer(
+        &self,
+        Parameters(args): Parameters<RemoveLayerArgs>,
+    ) -> CallToolResult {
+        let label = args.id_or_slug.clone();
+        let res: Result<(), String> = self.layer_stack.with_write(|stack| {
+            let id = anim_layer_mcp::resolve_layer_id(stack, &args.id_or_slug)?;
+            if stack.remove_layer(id) {
+                Ok(())
+            } else {
+                Err(format!("remove_layer failed for id {id}"))
+            }
+        });
+        match res {
+            Ok(()) => ok_text(format!("removed layer {label}")),
+            Err(e) => err_text(e),
+        }
+    }
+
+    #[tool(description = "Remove every layer from the stack (does not change masterEnabled). Use before install_default_layers for a clean procedural baseline.")]
+    async fn clear_layers(&self) -> CallToolResult {
+        self.layer_stack.with_write(|s| s.layers.clear());
+        ok_text("cleared all layers")
+    }
+
+    #[tool(description = "Atomically replace the entire layer stack with the supplied list (clear + N×add_layer in one call). Use this whenever you would otherwise chain clear_layers + many add_layer calls (preset authoring, mood switches). Optional master_enabled toggles composing on/off; optional save_as + persist write the resulting stack to a named layer-set in the same call. Returns the rebuilt stack snapshot.")]
+    async fn set_layer_stack(
+        &self,
+        Parameters(args): Parameters<SetLayerStackArgs>,
+    ) -> CallToolResult {
+        let mut built: Vec<crate::plugins::anim_layers::Layer> =
+            Vec::with_capacity(args.layers.len());
+        for spec in &args.layers {
+            match anim_layer_mcp::build_layer(self.library.as_ref(), spec) {
+                Ok(layer) => built.push(layer),
+                Err(e) => {
+                    return err_text(format!("layer {:?}: {e}", spec.slug));
+                }
+            }
+        }
+        self.layer_stack.with_write(|s| {
+            s.layers.clear();
+            for layer in built {
+                s.add_layer(layer);
+            }
+            if let Some(en) = args.master_enabled {
+                s.master_enabled = en;
+            }
+        });
+        if let Some(name) = args.save_as.as_deref() {
+            self.layer_stack.with_read(|stack| {
+                anim_layer_mcp::save_layer_set_current(
+                    &self.layer_sets,
+                    stack,
+                    name,
+                    args.persist.unwrap_or(true),
+                );
+            });
+        }
+        let v = self
+            .layer_stack
+            .with_read(anim_layer_mcp::stack_snapshot_json);
+        ok_json(&v)
+    }
+
+    #[tool(description = "Replace the stack with the five default procedural layers (breathing, auto-blink, weight-shift, finger-fidget, toe-fidget) and set masterEnabled (default true if master_enabled omitted). Idempotent baseline for `idle_v1` style motion.")]
+    async fn install_default_layers(
+        &self,
+        Parameters(args): Parameters<InstallDefaultLayersArgs>,
+    ) -> CallToolResult {
+        self.layer_stack.with_write(|s| {
+            anim_layer_mcp::install_default_layers_stack(s, args.master_enabled);
+        });
+        let v = self
+            .layer_stack
+            .with_read(anim_layer_mcp::stack_snapshot_json);
+        ok_json(&v)
+    }
+
+    #[tool(description = "Snapshot the current stack to a named layer set in memory; when persist=true (default), write `config/anim_layer_sets.json`.")]
+    async fn save_layer_set(
+        &self,
+        Parameters(args): Parameters<SaveLayerSetArgs>,
+    ) -> CallToolResult {
+        self.layer_stack.with_read(|stack| {
+            anim_layer_mcp::save_layer_set_current(
+                &self.layer_sets,
+                stack,
+                &args.name,
+                args.persist,
+            );
+        });
+        ok_json(&json!({
+            "saved": args.name,
+            "persisted": args.persist,
+        }))
+    }
+
+    #[tool(description = "Replace the live stack with a named set from `config/anim_layer_sets.json` (rehydrates clip/pose layers from disk via pose_library paths).")]
+    async fn load_layer_set(
+        &self,
+        Parameters(args): Parameters<LoadLayerSetArgs>,
+    ) -> CallToolResult {
+        let set_name = args.name.clone();
+        let res: Result<usize, String> = self.layer_stack.with_write(|stack| {
+            anim_layer_mcp::load_layer_set_named(
+                &self.layer_sets,
+                stack,
+                self.library.as_ref(),
+                &set_name,
+            )
+        });
+        match res {
+            Ok(count) => ok_json(&json!({
+                "loaded": set_name,
+                "layerCount": count,
+            })),
+            Err(e) => err_text(e),
+        }
+    }
+
+    #[tool(description = "Delete a named layer set from the in-memory map; when persist=true (default), rewrite `config/anim_layer_sets.json`.")]
+    async fn delete_layer_set(
+        &self,
+        Parameters(args): Parameters<DeleteLayerSetArgs>,
+    ) -> CallToolResult {
+        anim_layer_mcp::delete_layer_set_named(&self.layer_sets, &args.name, args.persist);
+        ok_json(&json!({ "deleted": args.name, "persisted": args.persist }))
+    }
+
     #[tool(description = "Render transparent PNG snapshots of the avatar from one or more camera views (front / sides / diagonals / back). Blocks until Bevy finishes all screenshots or timeout. Use framing_preset full_body or face_closeup to match validation docs. Waits settle_before_capture_ms (default 120) before enqueueing so prior pose_bones can commit — set 0 if you need instant capture.")]
     async fn capture_pose_views(
         &self,
@@ -1033,11 +1330,11 @@ impl ServerHandler for JarvisMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "jarvis-avatar pose MCP (VRM): Always call get_pose_guide first — it is the full authoring manual (Euler vs quaternion, knee/elbow signs, capture loop). \
-Workflow: baseline apply_pose or reset_pose → pose_bones (degrees, clamped) and/or make_fist for hands → generate_motion for clips (check librarySaveVerified) → set_expression or animate_expressions (time-varying face) → tiny adjust_bone quaternion deltas only → capture_pose_views to verify. \
-Use list_models then load_vrm to swap the on-screen `.vrm` at runtime (expressions / bone snapshot reset; idle VRMA follows config). \
-Kimodo writes animations to the same folder as [pose_library].animations_dir (see kimodo-motion-service env JARVIS_ANIMATIONS_DIR). \
-Multi-clip animation layering (stacked playback) is configured in the in-app debug UI / anim_layer_sets.json — not separate MCP tools yet.",
+                "jarvis-avatar pose MCP (VRM): Call get_pose_guide for bone/Euler work; get_layer_authoring_guide for the animation layer stack (blend modes, drivers, masks, save/load layer sets). \
+Layer workflow: list_layers → add_layer (clip from list_generated_animations, or procedural kinds) with override vs additive blend and optional mask_include for arms/face → capture_pose_views to verify → save_layer_set to persist. \
+install_default_layers restores the five procedural layers; set_master_enabled turns the whole stack on/off. \
+Base pose workflow: apply_pose or reset_pose → pose_bones / make_fist → generate_motion (librarySaveVerified) → set_expression or animate_expressions → capture_pose_views. \
+list_models / load_vrm for hot-swap. Kimodo output lives under [pose_library].animations_dir (JARVIS_ANIMATIONS_DIR).",
             )
     }
 }
