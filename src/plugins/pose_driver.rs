@@ -938,6 +938,9 @@ pub(crate) fn tick_expression_animation(world: &mut World) {
         world
             .commands()
             .trigger(ModifyExpressions::from_iter(vrm_e, pairs));
+        // Same ordering contract as `apply_pose_commands`: expression triggers must flush before
+        // `bind_expressions` in this PostUpdate pass.
+        world.flush();
     }
     let resume_after = clip.resume_idle_vrma_after;
     clip.elapsed += dt;
@@ -1394,6 +1397,11 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
             }
         }
     }
+    // `Commands::trigger(SetExpressions|ModifyExpressions|…)` only queues work until the world
+    // command queue flushes. `bevy_vrm1::bind_expressions` runs later in this same PostUpdate
+    // (`VrmSystemSets::Expressions`); without an explicit flush here, morph weights are sampled
+    // **before** `ExpressionOverride` inserts land — manual expression UI / MCP appear inert.
+    world.flush();
 }
 
 fn tick_active_transitions(
@@ -1427,15 +1435,34 @@ fn tick_active_transitions(
     }
 }
 
+/// VRMC_vrm expression preset names (preset + custom) once `ExpressionEntityMap` exists.
+fn collect_expression_preset_names(world: &mut World) -> Vec<String> {
+    let mut q = world.query_filtered::<&ExpressionEntityMap, With<Vrm>>();
+    let mut names: Vec<String> = q
+        .iter(world)
+        .flat_map(|map| map.keys().map(|k| k.0.clone()))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn publish_bone_snapshot(world: &mut World) {
+    let handle = world.resource::<BoneSnapshotHandle>().clone();
+    let preset_names = collect_expression_preset_names(world);
+    {
+        let mut w = handle.0.write();
+        w.expression_presets.clone_from(&preset_names);
+    }
+
     let Some(index) = world.get_resource::<BoneEntityIndex>() else {
         return;
     };
     if !index.is_usable() {
         return;
     }
-    let handle = world.resource::<BoneSnapshotHandle>().clone();
     let mut snap = BoneSnapshot::default();
+    snap.expression_presets = preset_names;
     // Humanoid keys: normalized-humanoid space (Airi / pose-controller).
     for (name, &e) in &index.by_name {
         let Some(tf) = world.get::<Transform>(e) else {
@@ -1479,15 +1506,6 @@ fn publish_bone_snapshot(world: &mut World) {
             },
         );
     }
-
-    let mut q = world.query_filtered::<&ExpressionEntityMap, With<Vrm>>();
-    let mut preset_names: Vec<String> = q
-        .iter(world)
-        .flat_map(|map| map.keys().map(|k| k.0.clone()))
-        .collect();
-    preset_names.sort_by(|a, b| a.cmp(b));
-    preset_names.dedup();
-    snap.expression_presets = preset_names;
 
     *handle.0.write() = snap;
 }

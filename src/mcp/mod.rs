@@ -16,7 +16,7 @@ pub mod plugin;
 mod anim_layer_mcp;
 mod pose_authoring;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -171,11 +171,17 @@ pub struct ApplyPoseArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetExpressionArgs {
-    /// Map of expression name → 0..=1 intensity. Keys must match `expressionPresets` / `expressions` from `get_bone_reference` for the loaded VRM.
+    /// Map of expression name → 0..=1 intensity. **Partial merge** (`ModifyExpressions`): omitted presets keep current overrides / VRMA. Keys must exist on the loaded VRM when `list_expressions` is non-empty. For a full-face replace (all presets at once, unnamed → 0), use `set_expressions_full`.
     pub expressions: HashMap<String, f32>,
     /// Transition duration in seconds. Default 0.3.
     #[serde(default)]
     pub transition_seconds: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetExpressionsFullArgs {
+    /// Weights 0..=1 for any subset of presets; **every** known preset on the VRM not listed here is set to 0 for this apply (`SetExpressions` / full replace). Keys must exist on the loaded VRM when `list_expressions` is non-empty.
+    pub expressions: HashMap<String, f32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -423,6 +429,30 @@ fn mcp_allows_pose_bone_key(name: &str, snap: &BoneSnapshot) -> bool {
     n.starts_with("def-toe") || n.starts_with("def-ero")
 }
 
+/// When the live VRM has reported expression names, MCP must not invent keys.
+fn mcp_validate_expression_keys(
+    expr: &HashMap<String, f32>,
+    snap: &BoneSnapshot,
+) -> Result<(), String> {
+    if snap.expression_presets.is_empty() {
+        return Ok(());
+    }
+    let allowed: HashSet<&str> = snap.expression_presets.iter().map(String::as_str).collect();
+    let bad: Vec<&str> = expr
+        .keys()
+        .filter(|k| !allowed.contains(k.as_str()))
+        .map(String::as_str)
+        .collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "unknown expression preset(s): {:?} — use list_expressions for valid names",
+            bad
+        ))
+    }
+}
+
 fn ok_json(v: &impl Serialize) -> CallToolResult {
     match serde_json::to_string_pretty(v) {
         Ok(s) => ok_text(s),
@@ -501,6 +531,14 @@ impl JarvisMcpServer {
             Err(e) => return err_text(format!("lookup failed: {e}")),
         };
 
+        let snap = self.snapshot.0.read();
+        if !pose.expressions.is_empty() {
+            if let Err(e) = mcp_validate_expression_keys(&pose.expressions, &snap) {
+                return err_text(e);
+            }
+        }
+        drop(snap);
+
         let bones: HashMap<String, [f32; 4]> = pose
             .bones
             .iter()
@@ -528,20 +566,80 @@ impl JarvisMcpServer {
         ))
     }
 
-    #[tool(description = "Set VRM expression blendshape weights (0..=1). Partial map: omitted keys stay as-is. Layer facial polish on top of Kimodo or pose_bones; combine small weights (e.g. happy+relaxed) for natural faces — see get_pose_guide table.")]
+    #[tool(description = "Merge VRM expression weights (0..=1) via `ModifyExpressions`: only listed presets change; others keep current overrides or VRMA sampling. Keys: `list_expressions` / `get_bone_reference.expressionPresets`. Stops idle VRMA when auto-stop is on. For replacing the **entire** face in one call (every preset on the model, unmentioned → 0), use `set_expressions_full`.")]
     async fn set_expression(
         &self,
         Parameters(args): Parameters<SetExpressionArgs>,
     ) -> CallToolResult {
+        if args.expressions.is_empty() {
+            return err_text("expressions map is empty — pass at least one preset name → weight".to_string());
+        }
+        let snap = self.snapshot.0.read();
+        if let Err(e) = mcp_validate_expression_keys(&args.expressions, &snap) {
+            return err_text(e);
+        }
+        drop(snap);
         let names: Vec<String> = args.expressions.keys().cloned().collect();
         self.pose_tx.send(PoseCommand::ApplyExpression {
             weights: args.expressions,
             cancel_expression_animation: true,
         });
-        ok_text(format!("set expressions: {}", names.join(", ")))
+        ok_text(format!("merged expressions: {}", names.join(", ")))
     }
 
-    #[tool(description = "Play a short in-engine VRM expression curve (piecewise-linear keyframes). Stops idle VRMA like other manual pose commands. Omitted expression keys in a keyframe default to 0 when lerping into keys that list them. Cancels on reset_pose / set_expression / apply_pose with expressions. Layered in-app expression drivers (blink, etc.) still run first each frame; animated channels override last. After one-shot playback, last sampled weights remain until changed. Verify with capture_pose_views + framing_preset face_closeup.")]
+    #[tool(description = "Replace the **full** VRM expression override state in one shot (`SetExpressions`): builds a weight map over **every** preset on the loaded model (`list_expressions`), sets each listed key from `expressions`, forces all others to 0, then applies. Use after `list_expressions` so you know the key set. Stops idle VRMA when auto-stop is on. Prefer `set_expression` for small layered tweaks.")]
+    async fn set_expressions_full(
+        &self,
+        Parameters(args): Parameters<SetExpressionsFullArgs>,
+    ) -> CallToolResult {
+        let snap = self.snapshot.0.read();
+        if snap.expression_presets.is_empty() {
+            return err_text(
+                "no expression presets on snapshot — load a VRM (load_vrm) and wait until list_expressions is non-empty"
+                    .to_string(),
+            );
+        }
+        if let Err(e) = mcp_validate_expression_keys(&args.expressions, &snap) {
+            return err_text(e);
+        }
+        let presets = snap.expression_presets.clone();
+        drop(snap);
+        let mut weights: HashMap<String, f32> = HashMap::with_capacity(presets.len());
+        for p in &presets {
+            let v = args.expressions.get(p).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            weights.insert(p.clone(), v);
+        }
+        let non_zero: Vec<String> = weights
+            .iter()
+            .filter(|(_, w)| **w > 1e-4)
+            .map(|(k, _)| k.clone())
+            .collect();
+        self.pose_tx.send(PoseCommand::SetExpression { weights });
+        ok_json(&json!({
+            "applied": true,
+            "presetCount": presets.len(),
+            "nonZeroKeys": non_zero,
+            "note": "All presets on the VRM received a weight (omitted keys were set to 0).",
+        }))
+    }
+
+    #[tool(description = "List VRM expression preset names available on the **currently loaded** avatar (VRMC_vrm `preset` + `custom`: happy, kitagawa, …). Small JSON for agents — pair with `set_expression` (partial) or `set_expressions_full` (whole face). Same names as `get_bone_reference` → `expressionPresets`.")]
+    async fn list_expressions(&self) -> CallToolResult {
+        let snap = self.snapshot.0.read();
+        let names = snap.expression_presets.clone();
+        let count = names.len();
+        drop(snap);
+        ok_json(&json!({
+            "expressionPresets": names,
+            "count": count,
+            "partialMergeTool": "set_expression",
+            "fullReplaceTool": "set_expressions_full",
+            "keyframesTool": "animate_expressions",
+            "withBodyTool": "pose_bones (optional `expressions` field)",
+        }))
+    }
+
+    #[tool(description = "Play a short in-engine VRM expression curve (piecewise-linear keyframes). Preset names in each keyframe must exist on the loaded VRM (`list_expressions`) when that list is non-empty. Stops idle VRMA like other manual pose commands. Omitted expression keys in a keyframe default to 0 when lerping into keys that list them. Cancels on reset_pose / set_expression / apply_pose with expressions. Layered in-app expression drivers (blink, etc.) still run first each frame; animated channels override last. After one-shot playback, last sampled weights remain until changed. Verify with capture_pose_views + framing_preset face_closeup.")]
     async fn animate_expressions(
         &self,
         Parameters(args): Parameters<AnimateExpressionsArgs>,
@@ -555,6 +653,19 @@ impl JarvisMcpServer {
                 "too many keyframes (max {MAX_KEYFRAMES})"
             ));
         }
+        let snap = self.snapshot.0.read();
+        let mut union: HashMap<String, f32> = HashMap::new();
+        for kf in &args.keyframes {
+            for (k, v) in &kf.weights {
+                union.insert(k.clone(), *v);
+            }
+        }
+        if !union.is_empty() {
+            if let Err(e) = mcp_validate_expression_keys(&union, &snap) {
+                return err_text(e);
+            }
+        }
+        drop(snap);
         let mut frames: Vec<(f32, HashMap<String, f32>)> = args
             .keyframes
             .into_iter()
@@ -618,7 +729,7 @@ impl JarvisMcpServer {
         ok_text(format!("set {count} bone(s)"))
     }
 
-    #[tool(description = "Set many bones at once using intrinsic local Euler degrees per bone (pitch/yaw/roll). Safer than raw quaternions: angles are clamped per bone; response lists warnings. Helen/Rigify named toes DEF-toe_{big,index,middle,ring,little}.{L,R} share the same ±180° display-yaw rebasing as the Bones tab (see get_pose_guide). Prefer this for body posing; see get_pose_guide for knee/elbow sign conventions.")]
+    #[tool(description = "Set many bones at once using intrinsic local Euler degrees per bone (pitch/yaw/roll). Optional `expressions` applies VRM morph weights in the same call (after bones) via partial merge — keys from `list_expressions`. Safer than raw quaternions: angles are clamped per bone; response lists warnings. Helen/Rigify named toes DEF-toe_{big,index,middle,ring,little}.{L,R} share the same ±180° display-yaw rebasing as the Bones tab (see get_pose_guide). Prefer this for body posing; see get_pose_guide for knee/elbow sign conventions.")]
     async fn pose_bones(&self, Parameters(args): Parameters<PoseBonesArgs>) -> CallToolResult {
         let snap = self.snapshot.0.read();
         for bone in args.bones.keys() {
@@ -626,6 +737,11 @@ impl JarvisMcpServer {
                 return err_text(format!(
                     "invalid bone \"{bone}\" — use get_bone_reference (humanoid + extraBones)"
                 ));
+            }
+        }
+        if let Some(ref expr) = args.expressions {
+            if let Err(e) = mcp_validate_expression_keys(expr, &snap) {
+                return err_text(e);
             }
         }
         drop(snap);
@@ -639,8 +755,19 @@ impl JarvisMcpServer {
             blend_weight: None,
             transition_seconds: None,
         });
+        let mut expr_applied = 0usize;
+        if let Some(expr) = args.expressions {
+            if !expr.is_empty() {
+                expr_applied = expr.len();
+                self.pose_tx.send(PoseCommand::ApplyExpression {
+                    weights: expr,
+                    cancel_expression_animation: true,
+                });
+            }
+        }
         ok_json(&json!({
             "appliedBones": count,
+            "appliedExpressions": expr_applied,
             "warnings": warnings,
         }))
     }
@@ -683,6 +810,13 @@ impl JarvisMcpServer {
                 ));
             }
         }
+        if let Some(ref expr) = args.expressions {
+            if !expr.is_empty() {
+                if let Err(e) = mcp_validate_expression_keys(expr, &snap) {
+                    return err_text(e);
+                }
+            }
+        }
         drop(snap);
         let pose = PoseFile {
             name: args.name.clone(),
@@ -721,7 +855,7 @@ impl JarvisMcpServer {
         ))
     }
 
-    #[tool(description = "Get the full list of VRM humanoid bone names, expression presets discovered from the loaded VRM (VRMC_vrm; includes custom presets like kitagawa), and extra skin joint names from the live rig.")]
+    #[tool(description = "Get the full list of VRM humanoid bone names, expression presets discovered from the loaded VRM (VRMC_vrm preset + custom; e.g. kitagawa), and extra skin joint names from the live rig. For expression-only discovery in a small payload, prefer `list_expressions`.")]
     async fn get_bone_reference(&self) -> CallToolResult {
         let snap = self.snapshot.0.read();
         let mut extra: Vec<String> = snap
@@ -737,7 +871,7 @@ impl JarvisMcpServer {
             "extraBones": extra,
             "expressionPresets": expression_presets.clone(),
             "expressions": expression_presets,
-            "note": "Rotations are quaternions [x, y, z, w] in normalized pose space (identity = bind). Expression values are 0..=1. Keep x/y/z in [-0.3, 0.3]. `expressionPresets` / `expressions` list preset names baked into the current VRM (empty until the rig initializes). `extraBones` lists Rigify-style joints (e.g. DEF-toe*) present on the loaded avatar; `pose_bones` also accepts DEF-toe* / DEF-ero* by prefix before the first snapshot.",
+            "note": "Rotations are quaternions [x, y, z, w] in normalized pose space (identity = bind). Expression values are 0..=1. Keep x/y/z in [-0.3, 0.3]. `expressionPresets` / `expressions` list preset names baked into the current VRM (empty until the rig initializes). Drive them via `list_expressions`, `set_expression` (partial), `set_expressions_full` (whole face), `animate_expressions`, or `pose_bones.expressions`. `extraBones` lists Rigify-style joints (e.g. DEF-toe*) present on the loaded avatar; `pose_bones` also accepts DEF-toe* / DEF-ero* by prefix before the first snapshot.",
         }))
     }
 
@@ -1334,7 +1468,7 @@ impl ServerHandler for JarvisMcpServer {
                 "jarvis-avatar pose MCP (VRM): Call get_pose_guide for bone/Euler work; get_layer_authoring_guide for the animation layer stack (blend modes, drivers, masks, save/load layer sets). \
 Layer workflow: list_layers → add_layer (clip from list_generated_animations, or procedural kinds) with override vs additive blend and optional mask_include for arms/face → capture_pose_views to verify → save_layer_set to persist. \
 install_default_layers restores the five procedural layers; set_master_enabled turns the whole stack on/off. \
-Base pose workflow: apply_pose or reset_pose → pose_bones / make_fist → generate_motion (librarySaveVerified) → set_expression or animate_expressions → capture_pose_views. \
+Base pose workflow: apply_pose or reset_pose → pose_bones / make_fist → generate_motion (librarySaveVerified) → list_expressions → set_expression (partial) or set_expressions_full (whole face) or animate_expressions → capture_pose_views. \
 list_models / load_vrm for hot-swap. Kimodo output lives under [pose_library].animations_dir (JARVIS_ANIMATIONS_DIR).",
             )
     }

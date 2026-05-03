@@ -3,9 +3,9 @@
 //! Reads every [`ChatCompleteMessage`] the gateway plugin publishes,
 //! parses out ACT tokens (bracket + pipe syntax), and applies:
 //!
-//! * the matching VRM **expression preset(s)** (via `bevy_vrm1`'s
-//!   `SetExpressions` trigger — one preset or a blended map from
-//!   [`EmotionBinding::merged_expression_weights`]), and
+//! * the matching VRM **expression preset(s)** via [`PoseCommand::SetExpression`]
+//!   (same queue as MCP / Pose Controller so `world.flush()` runs before
+//!   `bind_expressions`), using [`EmotionBinding::merged_expression_weights`], and
 //! * the matching **animation clip** from the pose library (via
 //!   `ActiveNativeAnimation`).
 //!
@@ -18,10 +18,10 @@
 //! After `hold_seconds` elapses the face decays back to `neutral`, same
 //! as before.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
-use bevy_vrm1::prelude::{SetExpressions, Vrm, VrmExpression};
 
 use jarvis_avatar::act::{Emotion, emotion_from_act_json, emotion_labels};
 use jarvis_avatar::emotions::EmotionBinding;
@@ -31,6 +31,7 @@ use super::channel_server::ChatCompleteMessage;
 use super::chat_pipeline_status::{ChatPipelineStage, ChatPipelineStatus};
 use super::emotion_map::EmotionMapRes;
 use super::native_anim_player::ActiveNativeAnimation;
+use super::pose_driver::{PoseCommand, PoseCommandSender};
 use super::pose_library_assets::PoseLibraryAssets;
 
 pub struct ExpressionsPlugin;
@@ -60,9 +61,8 @@ impl Default for ExpressionState {
 }
 
 fn apply_chat_expressions(
-    mut commands: Commands,
     mut chat: MessageReader<ChatCompleteMessage>,
-    vrm_q: Query<Entity, With<Vrm>>,
+    pose_tx: Option<Res<PoseCommandSender>>,
     mut state: ResMut<ExpressionState>,
     emotion_map: Option<Res<EmotionMapRes>>,
     pose_lib: Option<Res<PoseLibraryAssets>>,
@@ -86,26 +86,32 @@ fn apply_chat_expressions(
 
         // -------- Expression -------------------------------------------------
         if binding.drives_expressions() {
-            if let Ok(vrm_entity) = vrm_q.single() {
+            if let Some(tx) = pose_tx.as_ref() {
                 let merged = binding.merged_expression_weights();
-                let pairs: Vec<(VrmExpression, f32)> = merged
+                let weights: HashMap<String, f32> = merged
                     .into_iter()
-                    .map(|(k, w)| (VrmExpression::from(k.as_str()), w.clamp(0.0, 1.0)))
+                    .map(|(k, w)| (k, w.clamp(0.0, 1.0)))
                     .collect();
-                commands.trigger(SetExpressions::from_iter(vrm_entity, pairs.clone()));
+                tx.send(PoseCommand::SetExpression {
+                    weights: weights.clone(),
+                });
                 let hold = if binding.hold_seconds > 0.0 {
                     Duration::from_secs_f32(binding.hold_seconds)
                 } else {
                     state.default_hold
                 };
                 state.active_until = Some(Instant::now() + hold);
-                let preview: Vec<String> =
-                    pairs.iter().map(|(k, w)| format!("{k}@{w:.2}")).collect();
+                let preview: Vec<String> = weights
+                    .iter()
+                    .map(|(k, w)| format!("{k}@{w:.2}"))
+                    .collect();
                 info!(
                     "emotion '{label}' → VRM expressions [{}] for {:.1}s",
                     preview.join(", "),
                     hold.as_secs_f32()
                 );
+            } else {
+                warn!("emotion '{label}': PoseCommandSender missing — face not driven");
             }
         }
 
@@ -163,8 +169,7 @@ fn resolve_binding(label: &str, map: Option<&EmotionMapRes>) -> EmotionBinding {
 }
 
 fn decay_expression_to_neutral(
-    mut commands: Commands,
-    vrm_q: Query<Entity, With<Vrm>>,
+    pose_tx: Option<Res<PoseCommandSender>>,
     mut state: ResMut<ExpressionState>,
 ) {
     let Some(until) = state.active_until else {
@@ -173,14 +178,10 @@ fn decay_expression_to_neutral(
     if Instant::now() < until {
         return;
     }
-    let Ok(vrm_entity) = vrm_q.single() else {
-        state.active_until = None;
-        return;
-    };
-    commands.trigger(SetExpressions::single(
-        vrm_entity,
-        Emotion::Neutral.vrm_expression_name(),
-        1.0,
-    ));
+    if let Some(tx) = pose_tx.as_ref() {
+        let mut weights = HashMap::new();
+        weights.insert(Emotion::Neutral.vrm_expression_name().to_string(), 1.0);
+        tx.send(PoseCommand::SetExpression { weights });
+    }
     state.active_until = None;
 }

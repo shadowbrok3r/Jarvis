@@ -198,6 +198,9 @@ pub struct PoseBonesArgs {
     pub bones: HashMap<String, BoneEulerDeg>,
     #[serde(default = "default_true")]
     pub preserve_omitted_bones: bool,
+    /// Optional VRM expression weights (0..=1) applied after bones via `ModifyExpressions` (same as `set_expression`). Keys must exist on the loaded VRM (`list_expressions` / `get_bone_reference` → `expressionPresets`) when that list is non-empty.
+    #[serde(default)]
+    pub expressions: Option<HashMap<String, f32>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
