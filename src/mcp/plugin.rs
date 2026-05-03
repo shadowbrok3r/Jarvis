@@ -32,6 +32,8 @@ use jarvis_avatar::paths::expand_home;
 use jarvis_avatar::pose_library::PoseLibrary;
 
 use super::{build_a2f_client, JarvisMcpServer, KimodoDefaults};
+use crate::plugins::anim_layer_sets::LayerSetsStore;
+use crate::plugins::anim_layers::LayerStackHandle;
 use crate::plugins::channel_server::HubBroadcast;
 use crate::plugins::pose_capture::CaptureCommandSender;
 use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommandSender, PoseDriverPlugin};
@@ -57,6 +59,8 @@ fn start_mcp_server(
     capture_tx: Option<Res<CaptureCommandSender>>,
     snapshot: Option<Res<BoneSnapshotHandle>>,
     traffic: Option<Res<TrafficLogSink>>,
+    layer_stack: Option<Res<LayerStackHandle>>,
+    layer_sets: Option<Res<LayerSetsStore>>,
 ) {
     if !settings.mcp.enabled {
         info!("mcp: disabled in config, not starting");
@@ -79,6 +83,14 @@ fn start_mcp_server(
         error!("mcp: CaptureCommandSender missing — PoseCapturePlugin must be loaded first");
         return;
     };
+    let Some(layer_stack) = layer_stack else {
+        error!("mcp: LayerStackHandle missing — AnimLayersPlugin must be loaded before MCP PostStartup");
+        return;
+    };
+    let Some(layer_sets) = layer_sets else {
+        error!("mcp: LayerSetsStore missing — AnimLayerSetsPlugin must be loaded before MCP PostStartup");
+        return;
+    };
 
     let bind = settings.mcp.bind_address.clone();
     let path = settings.mcp.path.clone();
@@ -90,6 +102,7 @@ fn start_mcp_server(
     let library = PoseLibrary::new(poses_dir, animations_dir);
 
     let pose_guide_path = PathBuf::from("assets/POSE_GUIDE.md");
+    let layer_guide_path = PathBuf::from("assets/LAYER_AUTHORING_GUIDE.md");
     let a2f = build_a2f_client(
         settings.a2f.enabled,
         settings.a2f.endpoint.clone(),
@@ -107,6 +120,8 @@ fn start_mcp_server(
     let capture_tx_val = capture_tx.clone();
     let snapshot_val = snapshot.clone();
     let traffic = traffic.map(|t| (*t).clone());
+    let layer_stack_val = layer_stack.clone();
+    let layer_sets_val = layer_sets.clone();
 
     thread::Builder::new()
         .name("jarvis-mcp".into())
@@ -134,9 +149,12 @@ fn start_mcp_server(
                     hub_val,
                     a2f,
                     pose_guide_path,
+                    layer_guide_path,
                     library,
                     kimodo_defaults,
                     traffic.clone(),
+                    layer_stack_val,
+                    layer_sets_val,
                 ),
                 traffic,
             ));
