@@ -1088,7 +1088,7 @@ fn expressions_tab(
 
     ui.add_space(4.0);
     ui.label(format!("{} preset(s).", presets.len()));
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         for name in &presets {
             let w = state
                 .expression_sliders

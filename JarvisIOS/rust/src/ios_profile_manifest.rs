@@ -54,19 +54,22 @@ pub struct IosSpringPresetToml(pub Option<String>);
 /// After reading the manifest, applies optional `JARVIS_IOS_MODEL_PATH` / `JARVIS_IOS_IDLE_VRMA_PATH`
 /// (relative paths under `JARVIS_ASSET_ROOT`, set from the iOS About screen) so the user can pick any
 /// `.vrm` synced into the hub cache without editing the JSON on the server.
-pub fn load_ios_hub_profile_bundle_from_env() -> (IosAvatarSettings, IosGraphicsSettings, Option<String>) {
-    let (avatar, graphics, spring) = load_ios_hub_profile_bundle_from_env_inner();
+///
+/// Returns `(avatar, graphics, spring_toml, mtoon_overrides_json)`.
+pub fn load_ios_hub_profile_bundle_from_env() -> (IosAvatarSettings, IosGraphicsSettings, Option<String>, Option<String>) {
+    let (avatar, graphics, spring, mtoon) = load_ios_hub_profile_bundle_from_env_inner();
     let avatar = apply_ios_env_model_overrides(avatar);
     let (avatar, graphics) = apply_ios_env_scene_env_overrides(avatar, graphics);
-    (avatar, graphics, spring)
+    (avatar, graphics, spring, mtoon)
 }
 
-fn load_ios_hub_profile_bundle_from_env_inner() -> (IosAvatarSettings, IosGraphicsSettings, Option<String>) {
+fn load_ios_hub_profile_bundle_from_env_inner() -> (IosAvatarSettings, IosGraphicsSettings, Option<String>, Option<String>) {
     let Some(path) = std::env::var("JARVIS_PROFILE_MANIFEST").ok() else {
         crate::jarvis_ios_line!("[JarvisIOS] profile bundle: JARVIS_PROFILE_MANIFEST unset → defaults");
         return (
             IosAvatarSettings::default(),
             IosGraphicsSettings::default(),
+            None,
             None,
         );
     };
@@ -77,6 +80,7 @@ fn load_ios_hub_profile_bundle_from_env_inner() -> (IosAvatarSettings, IosGraphi
             return (
                 IosAvatarSettings::default(),
                 IosGraphicsSettings::default(),
+                None,
                 None,
             );
         }
@@ -89,15 +93,17 @@ fn load_ios_hub_profile_bundle_from_env_inner() -> (IosAvatarSettings, IosGraphi
                 IosAvatarSettings::default(),
                 IosGraphicsSettings::default(),
                 None,
+                None,
             );
         }
     };
-    if let Some((avatar, graphics, spring)) = parse_profile_manifest_value(&v) {
-        (avatar, graphics, spring)
+    if let Some((avatar, graphics, spring, mtoon)) = parse_profile_manifest_value(&v) {
+        (avatar, graphics, spring, mtoon)
     } else {
         (
             IosAvatarSettings::default(),
             IosGraphicsSettings::default(),
+            None,
             None,
         )
     }
@@ -200,7 +206,7 @@ fn parse_linear_rgba_csv(s: &str) -> Option<Color> {
 
 fn parse_profile_manifest_value(
     v: &Value,
-) -> Option<(IosAvatarSettings, IosGraphicsSettings, Option<String>)> {
+) -> Option<(IosAvatarSettings, IosGraphicsSettings, Option<String>, Option<String>)> {
     let schema = match v.get("schema").and_then(|x| x.as_str()) {
         Some(s) => s,
         None => {
@@ -233,15 +239,20 @@ fn parse_profile_manifest_value(
     if !avatar.auto_load_spring_preset {
         spring = None;
     }
+    let mtoon_overrides_json = v
+        .get("mtoon_overrides_json")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_owned());
     crate::jarvis_ios_line!(
-        "[JarvisIOS] manifest: OK model_path={} idle_vrma_path={} msaa={} spring_toml={} auto_load_spring={}",
+        "[JarvisIOS] manifest: OK model_path={} idle_vrma_path={} msaa={} spring_toml={} auto_load_spring={} mtoon_overrides={}",
         avatar.model_path,
         avatar.idle_vrma_path,
         graphics.msaa_samples,
         if spring.is_some() { "yes" } else { "no" },
-        avatar.auto_load_spring_preset
+        avatar.auto_load_spring_preset,
+        if mtoon_overrides_json.is_some() { "yes" } else { "no" },
     );
-    Some((avatar, graphics, spring))
+    Some((avatar, graphics, spring, mtoon_overrides_json))
 }
 
 /// Pull iOS-relevant fields from the desktop `avatar` object without requiring a 1:1 struct match.

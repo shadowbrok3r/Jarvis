@@ -6,6 +6,40 @@
 use bevy::prelude::*;
 use bevy_egui::egui::{self, RichText};
 use bevy_egui::EguiContexts;
+use bevy_vrm1::prelude::{Initialized, SetExpressions, Vrm, VrmExpression};
+
+// ── Expression categorisation ────────────────────────────────────────────────
+// All lists are derived dynamically from the loaded VRM.
+// The only constant used is the VRM 1.0 spec preset set (18 names defined in
+// the VRMC_vrm specification — identical for every compliant VRM avatar), which
+// is used to distinguish spec presets from model-specific custom expressions.
+
+/// Derive a grouping prefix: everything before the first `_`, or the name
+/// with trailing digits stripped when there is no `_`.
+fn extract_expr_prefix(name: &str) -> &str {
+    if let Some(idx) = name.find('_') {
+        &name[..idx]
+    } else {
+        name.trim_end_matches(|c: char| c.is_ascii_digit())
+    }
+}
+
+/// Render one `egui::Slider` for `name`, mutate `weights`, and return whether
+/// it changed.
+fn expr_slider(
+    ui: &mut egui::Ui,
+    name: &str,
+    weights: &mut std::collections::HashMap<String, f32>,
+) -> bool {
+    let w = weights.entry(name.to_string()).or_insert(0.0);
+    let resp = ui.add(egui::Slider::new(w, 0.0..=1.0).text(name).step_by(0.01));
+    if resp.changed() {
+        *w = w.clamp(0.0, 1.0);
+        true
+    } else {
+        false
+    }
+}
 
 /// Which panels are open; toggles come from the menu bar **View** menu.
 #[derive(Resource)]
@@ -30,13 +64,15 @@ pub struct JarvisIosUiState {
     pub show_network_trace: bool,
     pub show_rig_editor: bool,
     pub show_graphics_advanced: bool,
+    /// Full expression preset sliders (mirrors desktop Pose Controller → Expressions tab).
+    pub show_expressions: bool,
 }
 
 impl Default for JarvisIosUiState {
     fn default() -> Self {
         Self {
             theme_applied: false,
-            show_scene_panel: true,
+            show_scene_panel: false,
             show_camera: false,
             show_graphics: false,
             show_about: false,
@@ -54,6 +90,7 @@ impl Default for JarvisIosUiState {
             show_network_trace: false,
             show_rig_editor: false,
             show_graphics_advanced: false,
+            show_expressions: false,
         }
     }
 }
@@ -92,6 +129,8 @@ fn view_menu_desktop_parity(ui: &mut egui::Ui, s: &mut JarvisIosUiState) {
     ui.checkbox(&mut s.show_network_trace, "Network trace");
     ui.checkbox(&mut s.show_rig_editor, "Rig editor");
     ui.checkbox(&mut s.show_graphics_advanced, "Graphics Advanced");
+    ui.separator();
+    ui.checkbox(&mut s.show_expressions, "Expressions");
 }
 
 pub fn jarvis_ios_egui_menu_bar(mut contexts: EguiContexts, mut ui_state: ResMut<JarvisIosUiState>) -> Result {
@@ -103,6 +142,7 @@ pub fn jarvis_ios_egui_menu_bar(mut contexts: EguiContexts, mut ui_state: ResMut
                 ui.checkbox(&mut s.show_scene_panel, "Scene / HUD (Jarvis)");
                 ui.checkbox(&mut s.show_camera, "Camera");
                 ui.checkbox(&mut s.show_graphics, "Graphics / lights");
+                ui.checkbox(&mut s.show_expressions, "Expressions");
                 ui.separator();
                 ui.menu_button("More windows…", |ui| {
                     egui::ScrollArea::vertical()
@@ -144,6 +184,9 @@ pub fn jarvis_ios_egui_windows(
     mut ui_state: ResMut<JarvisIosUiState>,
     avatar: Res<crate::ios_profile_manifest::IosAvatarSettings>,
     graphics: Res<crate::ios_graphics::IosGraphicsSettings>,
+    mut expr_state: ResMut<crate::ios_bevy::IosExpressionsState>,
+    vrm_q: Query<Entity, (With<Vrm>, With<Initialized>)>,
+    mut commands: Commands,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let mut close_about = false;
@@ -358,6 +401,181 @@ pub fn jarvis_ios_egui_windows(
                 ui.separator();
                 stub_footer(ui);
             });
+    }
+
+    // ── Expressions window ──────────────────────────────────────────────
+    if ui_state.show_expressions {
+        let vrm_entity = vrm_q.single().ok();
+        let mut expr_dirty = false;
+        let mut show_expressions = true;
+
+        // ── Pre-compute categorised lists ────────────────────────────────────
+        // All categories are derived from the runtime expression list; no
+        // hardcoded model-specific name lists.
+
+        // Spec presets (18 names from VRMC_vrm spec, same for all VRMs).
+        let mut spec_exprs: Vec<String> = expr_state
+            .presets
+            .iter()
+            .filter(|n| crate::ios_bevy::is_vrm1_spec_preset(n))
+            .cloned()
+            .collect();
+        spec_exprs.sort();
+
+        // Custom expressions: everything not in the spec preset list.
+        // Prefix-group those that share a common prefix (≥2 names); rest are standalone.
+        let mut custom_all: Vec<String> = expr_state
+            .presets
+            .iter()
+            .filter(|n| !crate::ios_bevy::is_vrm1_spec_preset(n))
+            .cloned()
+            .collect();
+        custom_all.sort();
+
+        let mut by_prefix: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for name in &custom_all {
+            by_prefix
+                .entry(extract_expr_prefix(name).to_string())
+                .or_default()
+                .push(name.clone());
+        }
+        let mut standalone_custom: Vec<String> = Vec::new();
+        let mut prefix_groups: Vec<(String, Vec<String>)> = Vec::new();
+        for (prefix, mut names) in by_prefix {
+            names.sort();
+            if names.len() >= 2 {
+                prefix_groups.push((prefix, names));
+            } else {
+                standalone_custom.extend(names);
+            }
+        }
+        prefix_groups.sort_by(|a, b| a.0.cmp(&b.0));
+        standalone_custom.sort();
+
+        let total = expr_state.presets.len();
+
+        egui::Window::new("Expressions")
+            .default_pos(egui::pos2(8.0, 60.0))
+            .default_size(egui::vec2(280.0, 480.0))
+            .collapsible(true)
+            .resizable(true)
+            .open(&mut show_expressions)
+            .show(ctx, |ui| {
+                // ── Action bar ───────────────────────────────────────────
+                ui.horizontal(|ui| {
+                    if ui.button("Zero all").clicked() {
+                        for w in expr_state.weights.values_mut() {
+                            *w = 0.0;
+                        }
+                        expr_dirty = true;
+                    }
+                    if ui
+                        .button("Neutral @ 1")
+                        .on_hover_text("Zero all then set `neutral` to 1.0")
+                        .clicked()
+                    {
+                        for w in expr_state.weights.values_mut() {
+                            *w = 0.0;
+                        }
+                        if let Some(w) = expr_state.weights.get_mut("neutral") {
+                            *w = 1.0;
+                        }
+                        expr_dirty = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{total} total")).weak().small(),
+                        );
+                    });
+                });
+                ui.separator();
+
+                if total == 0 {
+                    ui.label(
+                        RichText::new(
+                            "No expressions yet — waiting for VRM to finish loading.",
+                        )
+                        .weak(),
+                    );
+                    return;
+                }
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // ── Standard VRM presets (spec-defined, same for all VRMs) ──
+                        if !spec_exprs.is_empty() {
+                            egui::CollapsingHeader::new(
+                                RichText::new(format!("Standard  ({})", spec_exprs.len()))
+                                    .strong(),
+                            )
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for name in &spec_exprs {
+                                    if expr_slider(ui, name, &mut expr_state.weights) {
+                                        expr_dirty = true;
+                                    }
+                                }
+                            });
+                            ui.add_space(2.0);
+                        }
+
+                        // ── Custom expressions (all model-specific, prefix-grouped) ──
+                        let custom_count = custom_all.len();
+                        if custom_count > 0 {
+                            egui::CollapsingHeader::new(
+                                RichText::new(format!("Custom  ({custom_count})")).strong(),
+                            )
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for name in &standalone_custom {
+                                    if expr_slider(ui, name, &mut expr_state.weights) {
+                                        expr_dirty = true;
+                                    }
+                                }
+                                if !standalone_custom.is_empty() && !prefix_groups.is_empty() {
+                                    ui.add_space(2.0);
+                                }
+                                for (prefix, names) in &prefix_groups {
+                                    egui::CollapsingHeader::new(
+                                        format!("{}…  ({})", prefix, names.len()),
+                                    )
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        for name in names {
+                                            if expr_slider(ui, name, &mut expr_state.weights) {
+                                                expr_dirty = true;
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    });
+            });
+
+        if !show_expressions {
+            ui_state.show_expressions = false;
+        }
+
+        if expr_dirty {
+            if let Some(vrm_e) = vrm_entity {
+                let weights: std::collections::HashMap<VrmExpression, f32> = expr_state
+                    .weights
+                    .iter()
+                    .filter_map(|(k, &v)| {
+                        let n = k.trim();
+                        if n.is_empty() {
+                            None
+                        } else {
+                            Some((VrmExpression::from(n), v))
+                        }
+                    })
+                    .collect();
+                commands.trigger(SetExpressions::from_iter(vrm_e, weights));
+            }
+        }
     }
 
     if ui_state.show_about {

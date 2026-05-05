@@ -31,6 +31,7 @@ use bevy_vrm1::prelude::*;
 use core::ptr::NonNull;
 
 use crate::ios_graphics::{msaa_for_samples, IosGraphicsSettings};
+use crate::ios_mtoon_overrides::{ios_apply_mtoon_overrides_on_vrm_ready, IosMToonOverridesJson};
 use crate::ios_profile_manifest::{IosAvatarSettings, IosSpringPresetToml};
 use crate::ios_spring_preset::{apply_spring_preset, parse_preset_toml};
 use raw_window_handle::{
@@ -57,6 +58,22 @@ struct JarvisIosGroundPlane;
 /// Entity with [`JarvisIosAvatarRoot`] (VRM + optional idle VRMA children).
 #[derive(Resource, Default)]
 struct IosAvatarRootEntity(Option<Entity>);
+
+/// When set, the VRM load is deferred by `remaining` frames to let Bevy's render backend settle.
+/// Used for VRMs ≥ [`VRM_WARN_BYTES`] where simultaneous Bevy init + large asset load causes OOM spikes.
+#[derive(Resource)]
+struct DeferredVrmLoad {
+    remaining: u32,
+    settings: IosAvatarSettings,
+}
+
+/// Live expression preset names + slider weights for the iOS Expressions egui window.
+/// Populated by `ios_collect_expression_presets` whenever a VRM finishes initializing.
+#[derive(Resource, Default)]
+pub(crate) struct IosExpressionsState {
+    pub presets: Vec<String>,
+    pub weights: std::collections::HashMap<String, f32>,
+}
 
 /// Passed into the app before `DefaultPlugins`; consumed by [`IosEmbedRawHandlesPlugin`].
 ///
@@ -141,8 +158,22 @@ fn spawn_ios_viewport(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     settings: Res<IosAvatarSettings>,
-    graphics: Res<IosGraphicsSettings>,
+    mut graphics: ResMut<IosGraphicsSettings>,
 ) {
+    // Reduce MSAA for large VRMs: decoded textures already push memory pressure hard.
+    // An MSAA=4 HDR (Rgba16Float) buffer at iPhone 14 resolution adds ~86 MB; dropping to 1
+    // recovers that headroom at the cost of slightly rougher edges.
+    let asset_root = ios_asset_file_path();
+    let vrm_disk = Path::new(&asset_root).join(&settings.model_path);
+    if let Ok(meta) = std::fs::metadata(&vrm_disk) {
+        if meta.len() >= VRM_WARN_BYTES && graphics.msaa_samples > 1 {
+            graphics.msaa_samples = 1;
+            crate::jarvis_ios_line!(
+                "[JarvisIOS] Large VRM ({:.1} MB): forcing MSAA off to reclaim ~86 MB MSAA buffer",
+                meta.len() as f64 / (1024.0 * 1024.0)
+            );
+        }
+    }
     let focus = settings.world_position;
     let look_at = focus + Vec3::Y * 0.5;
     commands.spawn((
@@ -212,16 +243,61 @@ fn spawn_ios_viewport(
     }
 }
 
+/// VRM 1.0 spec-defined preset expression names (universal across all VRM avatars).
+/// These are the only names defined in the VRMC_vrm specification; everything else
+/// loaded at runtime is a custom/model-specific expression.
+pub(crate) const VRM1_SPEC_PRESET_NAMES: &[&str] = &[
+    "aa", "ih", "ou", "ee", "oh",
+    "blink", "blinkLeft", "blinkRight",
+    "lookUp", "lookDown", "lookLeft", "lookRight",
+    "happy", "angry", "sad", "relaxed", "surprised", "neutral",
+];
+
+/// Returns true if `name` is one of the 18 names defined in the VRM 1.0 spec.
+pub(crate) fn is_vrm1_spec_preset(name: &str) -> bool {
+    VRM1_SPEC_PRESET_NAMES.contains(&name)
+}
+
+/// Log a diagnostic advisory when the on-disk VRM exceeds this size.
+/// Textures in a VRM are stored as JPEG/PNG and decoded to raw RGBA on load, so the
+/// in-RAM footprint can be several times the file size.  MSAA is already forced off for
+/// VRMs at this threshold (see `spawn_ios_viewport`), which reclaims ~86 MB.
+const VRM_WARN_BYTES: u64 = 150 * 1024 * 1024; // 150 MB
+/// Hard limit: refuse to load rather than OOM-kill the process.
+const VRM_HARD_LIMIT_BYTES: u64 = 260 * 1024 * 1024; // 260 MB
+
 /// Spawns [`JarvisIosAvatarRoot`] + [`VrmHandle`], optional idle VRMA; returns the root [`Entity`].
 fn spawn_jarvis_ios_vrm_root(commands: &mut Commands, asset_server: &AssetServer, settings: &IosAvatarSettings) -> Entity {
     let asset_root = ios_asset_file_path();
     let vrm_disk = Path::new(&asset_root).join(&settings.model_path);
+    let vrm_bytes = std::fs::metadata(&vrm_disk).map(|m| m.len()).unwrap_or(0);
     crate::jarvis_ios_line!(
-        "[JarvisIOS] spawn_jarvis_ios_vrm_root model_path={} exists_on_disk={} abs={}",
+        "[JarvisIOS] spawn_jarvis_ios_vrm_root model_path={} size={:.1}MB exists_on_disk={}",
         settings.model_path,
-        vrm_disk.is_file(),
-        vrm_disk.display()
+        vrm_bytes as f64 / (1024.0 * 1024.0),
+        vrm_disk.is_file()
     );
+    if vrm_bytes >= VRM_WARN_BYTES {
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] Warning: VRM is large ({:.1} MB) — MSAA disabled; may cause memory \
+             pressure on older devices with less RAM",
+            vrm_bytes as f64 / (1024.0 * 1024.0)
+        );
+    }
+    if vrm_bytes >= VRM_HARD_LIMIT_BYTES {
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] VRM too large for iOS ({:.1} MB \u{2265} {} MB hard limit) — skipping load \
+             to prevent OOM crash.  Run scripts/compress_vrm_textures.py to reduce it.",
+            vrm_bytes as f64 / (1024.0 * 1024.0),
+            VRM_HARD_LIMIT_BYTES / (1024 * 1024)
+        );
+        return commands.spawn((
+            JarvisIosAvatarRoot,
+            Transform::default(),
+            GlobalTransform::default(),
+        )).id();
+    }
+
     if !settings.idle_vrma_path.trim().is_empty() {
         let vrma_disk = Path::new(&asset_root).join(settings.idle_vrma_path.trim());
         crate::jarvis_ios_line!(
@@ -265,8 +341,70 @@ fn spawn_ios_avatar(
     settings: Res<IosAvatarSettings>,
 ) {
     commands.insert_resource(ClearColor(settings.background_color));
+
+    let asset_root = ios_asset_file_path();
+    let vrm_disk = Path::new(&asset_root).join(&settings.model_path);
+    let vrm_bytes = std::fs::metadata(&vrm_disk).map(|m| m.len()).unwrap_or(0);
+
+    // Defer large VRM loads so Bevy's render backend (wgpu + Metal) fully
+    // initialises before the memory-intensive asset load begins.  On an iPhone
+    // with limited RAM the simultaneous Bevy startup + large VRM decompression
+    // spikes hard enough to trigger the jetsam OOM killer.
+    if vrm_bytes >= VRM_WARN_BYTES {
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] Large VRM ({:.1} MB): deferring load by 8 frames to let renderer settle",
+            vrm_bytes as f64 / (1024.0 * 1024.0)
+        );
+        commands.insert_resource(DeferredVrmLoad {
+            remaining: 8,
+            settings: settings.clone(),
+        });
+        commands.insert_resource(IosAvatarRootEntity(None));
+        return;
+    }
     let id = spawn_jarvis_ios_vrm_root(&mut commands, &asset_server, &settings);
     commands.insert_resource(IosAvatarRootEntity(Some(id)));
+}
+
+/// Counts down `DeferredVrmLoad` each frame and spawns the VRM once the counter reaches zero.
+fn handle_deferred_vrm_load(
+    mut commands: Commands,
+    deferred: Option<ResMut<DeferredVrmLoad>>,
+    asset_server: Res<AssetServer>,
+) {
+    let Some(mut d) = deferred else { return; };
+    if d.remaining > 0 {
+        d.remaining -= 1;
+        return;
+    }
+    let id = spawn_jarvis_ios_vrm_root(&mut commands, &asset_server, &d.settings);
+    commands.insert_resource(IosAvatarRootEntity(Some(id)));
+    commands.remove_resource::<DeferredVrmLoad>();
+    crate::jarvis_ios_line!("[JarvisIOS] deferred VRM load: spawned after render backend settle");
+}
+
+/// Populate [`IosExpressionsState`] whenever a new VRM finishes loading.
+fn ios_collect_expression_presets(
+    mut expr_state: ResMut<IosExpressionsState>,
+    vrm_q: Query<&ExpressionEntityMap, (With<Vrm>, Added<Initialized>)>,
+) {
+    let Ok(map) = vrm_q.single() else { return; };
+    let mut names: Vec<String> = map.keys().map(|k| k.0.clone()).collect();
+    names.sort();
+    names.dedup();
+    let old_weights = expr_state.weights.clone();
+    expr_state.weights = names
+        .iter()
+        .map(|n| (n.clone(), old_weights.get(n).copied().unwrap_or(0.0)))
+        .collect();
+    expr_state.presets = names;
+    let spec_count = expr_state.presets.iter().filter(|n| is_vrm1_spec_preset(n)).count();
+    crate::jarvis_ios_line!(
+        "[JarvisIOS] expressions: collected {} total ({} spec preset + {} custom) from VRM",
+        expr_state.presets.len(),
+        spec_count,
+        expr_state.presets.len() - spec_count,
+    );
 }
 
 fn play_idle_when_vrma_loaded(trigger: On<LoadedVrma>, mut commands: Commands) {
@@ -557,7 +695,7 @@ impl IosEmbeddedRenderer {
             height_px: height_px.max(1),
             scale_factor: scale,
         });
-        let (avatar_settings, graphics_settings, spring_toml) =
+        let (avatar_settings, graphics_settings, spring_toml, mtoon_overrides_json) =
             crate::ios_profile_manifest::load_ios_hub_profile_bundle_from_env();
         crate::jarvis_ios_line!(
             "[JarvisIOS] IosAvatarSettings model_path={} idle_vrma_path={}",
@@ -567,7 +705,9 @@ impl IosEmbeddedRenderer {
         app.insert_resource(avatar_settings);
         app.insert_resource(graphics_settings);
         app.insert_resource(IosSpringPresetToml(spring_toml));
+        app.insert_resource(IosMToonOverridesJson(mtoon_overrides_json));
         app.init_resource::<IosAvatarRootEntity>();
+        app.init_resource::<IosExpressionsState>();
 
         app.add_plugins(
             DefaultPlugins
@@ -578,6 +718,10 @@ impl IosEmbeddedRenderer {
                     ..default()
                 })
                 .disable::<WinitPlugin>()
+                // Our file tracing subscriber (installed by jarvis_ios_set_log_file before
+                // Bevy starts) handles all log output; disable Bevy's LogPlugin to avoid a
+                // "global default already set" panic from the tracing crate.
+                .disable::<bevy::log::LogPlugin>()
                 .set(WindowPlugin {
                     primary_window: Some(primary_window),
                     primary_cursor_options: Some(CursorOptions::default()),
@@ -613,7 +757,13 @@ impl IosEmbeddedRenderer {
         );
         app.add_systems(
             Update,
-            (ios_apply_spring_preset_on_vrm_ready, jarvis_ios_vrm_load_diag),
+            (
+                ios_apply_spring_preset_on_vrm_ready,
+                ios_apply_mtoon_overrides_on_vrm_ready,
+                ios_collect_expression_presets,
+                handle_deferred_vrm_load,
+                jarvis_ios_vrm_load_diag,
+            ),
         );
         app.add_systems(
             EguiPrimaryContextPass,
@@ -757,11 +907,24 @@ impl IosEmbeddedRenderer {
     }
 
     fn apply_hub_profile_reload(&mut self) {
-        let (avatar, graphics, spring) = crate::ios_profile_manifest::load_ios_hub_profile_bundle_from_env();
+        let (avatar, mut graphics, spring, mtoon) = crate::ios_profile_manifest::load_ios_hub_profile_bundle_from_env();
+        // Apply the same MSAA reduction as spawn_ios_viewport for large VRMs.
+        let asset_root = ios_asset_file_path();
+        let vrm_disk = Path::new(&asset_root).join(&avatar.model_path);
+        if let Ok(meta) = std::fs::metadata(&vrm_disk) {
+            if meta.len() >= VRM_WARN_BYTES && graphics.msaa_samples > 1 {
+                graphics.msaa_samples = 1;
+                crate::jarvis_ios_line!(
+                    "[JarvisIOS] profile reload: large VRM ({:.1} MB) → MSAA forced off",
+                    meta.len() as f64 / (1024.0 * 1024.0)
+                );
+            }
+        }
         let world = self.app.world_mut();
         *world.resource_mut::<IosAvatarSettings>() = avatar.clone();
         *world.resource_mut::<IosGraphicsSettings>() = graphics.clone();
         *world.resource_mut::<IosSpringPresetToml>() = IosSpringPresetToml(spring);
+        *world.resource_mut::<IosMToonOverridesJson>() = IosMToonOverridesJson(mtoon);
         world.insert_resource(ClearColor(avatar.background_color));
         // Despawn every avatar root (VRM + VRMA children). Relying on a single stored entity can miss
         // duplicates if a previous reload partially failed, which breaks PanOrbit + leaves a black view.
