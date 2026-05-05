@@ -33,6 +33,7 @@ use jarvis_avatar::act::Emotion;
 use jarvis_avatar::config::Settings;
 
 use crate::plugins::chat_pipeline_status::ChatPipelineStatus;
+use crate::plugins::jarvis_ios_hub::write_vrm_graphics_override;
 use crate::plugins::traffic_log::TrafficChannel;
 
 pub struct DebugUiPlugin;
@@ -253,7 +254,13 @@ fn file_menu(
             .clicked()
         {
             state.save_status = Some(match settings.save_user() {
-                Ok(()) => "saved → config/user.toml".to_string(),
+                Ok(()) => {
+                    // Also write per-VRM graphics overrides so iOS picks up lighting per model.
+                    if let Err(e) = write_vrm_graphics_override(settings) {
+                        warn!("save per-VRM graphics override failed: {e}");
+                    }
+                    "saved → config/user.toml".to_string()
+                }
                 Err(e) => format!("save failed: {e}"),
             });
             ui.close();

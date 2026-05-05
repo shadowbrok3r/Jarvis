@@ -16,6 +16,7 @@ private struct EmotionBindingDTO: Codable, Equatable {
     var notes: String?
 }
 
+/// Common VRM0 / VRM1 preset names — use "Or custom" for anything else on the model.
 private enum VrmExpressionPresets {
     static let names: [String] = [
         "neutral", "happy", "angry", "sad", "relaxed", "surprised",
@@ -23,7 +24,53 @@ private enum VrmExpressionPresets {
         "blink", "blinkLeft", "blinkRight",
         "lookUp", "lookDown", "lookLeft", "lookRight",
         "thinking",
+        "kitagawa", "wink", "kiss", "embarrassed", "joy", "sorrow", "fun", "scared", "disgusted",
+        "lookUpLookDown", "lookLeftLookRight",
     ]
+}
+
+private enum LoopingMode: String, CaseIterable, Identifiable {
+    case inherit
+    case loop
+    case noLoop
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .inherit: return "Default (from animation JSON)"
+        case .loop: return "Loop"
+        case .noLoop: return "Play once"
+        }
+    }
+
+    init(from optional: Bool?) {
+        switch optional {
+        case nil: self = .inherit
+        case true?: self = .loop
+        case false?: self = .noLoop
+        }
+    }
+
+    var jsonValue: Bool? {
+        switch self {
+        case .inherit: return nil
+        case .loop: return true
+        case .noLoop: return false
+        }
+    }
+}
+
+private struct ExpressionBlendRow: Identifiable, Hashable {
+    let id: UUID
+    var preset: String
+    var weight: Double
+
+    init(id: UUID = UUID(), preset: String = "", weight: Double = 0.5) {
+        self.id = id
+        self.preset = preset
+        self.weight = weight
+    }
 }
 
 /// Edits `config/emotions.json` under the active asset root (or Application Support fallback).
@@ -44,7 +91,7 @@ struct ActEmotionMapEditorView: View {
             Section {
                 Text(
                     "Keys are ACT emotion labels (lowercase), e.g. `sensual`, `curious`. " +
-                        "`animation` is a pose-library JSON filename relative to your animations folder (same as desktop `EmotionBinding.animation`)."
+                        "Matches desktop `config/emotions.json`: primary expression + weight, optional multi-preset blend, looping, animation path."
                 )
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -71,7 +118,7 @@ struct ActEmotionMapEditorView: View {
                 }
                 .onDelete { rows.remove(atOffsets: $0) }
                 Button("Add mapping") {
-                    rows.append(EmotionRow(key: "", animationFile: "", expression: "", holdSeconds: 2.5, notes: ""))
+                    rows.append(EmotionRow())
                 }
             }
             Section {
@@ -92,10 +139,16 @@ struct ActEmotionMapEditorView: View {
     private func rowSummary(_ r: EmotionRow) -> String {
         let a = r.animationFile.trimmingCharacters(in: .whitespacesAndNewlines)
         let e = r.expression.trimmingCharacters(in: .whitespacesAndNewlines)
-        if a.isEmpty, e.isEmpty { return "—" }
-        if a.isEmpty { return "expr: \(e)" }
-        if e.isEmpty { return "anim: \(a)" }
-        return "anim: \(a) · expr: \(e)"
+        let blend = r.blendRows.filter { !$0.preset.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        var parts: [String] = []
+        if !a.isEmpty { parts.append("anim: \(a)") }
+        if !e.isEmpty {
+            let w = r.expressionWeight
+            parts.append(abs(w - 1.0) < 0.001 ? "expr: \(e)" : "expr: \(e) @ \(String(format: "%.2f", w))")
+        }
+        if !blend.isEmpty { parts.append("blend: \(blend.count) preset(s)") }
+        if parts.isEmpty { return "—" }
+        return parts.joined(separator: " · ")
     }
 
     private func reloadFromDisk() {
@@ -114,10 +167,17 @@ struct ActEmotionMapEditorView: View {
             let file = try dec.decode(EmotionMapFileDTO.self, from: data)
             rows = file.mappings.keys.sorted().map { k in
                 let b = file.mappings[k] ?? EmotionBindingDTO()
+                let blendSorted = (b.expressionBlend ?? [:]).sorted { $0.key < $1.key }.map { kv in
+                    ExpressionBlendRow(preset: kv.key, weight: Double(kv.value))
+                }
+                let w = b.expressionWeight.map(Double.init) ?? 1.0
                 return EmotionRow(
                     key: k,
                     animationFile: b.animation ?? "",
                     expression: b.expression ?? "",
+                    expressionWeight: w,
+                    loopingMode: LoopingMode(from: b.looping),
+                    blendRows: blendSorted,
                     holdSeconds: Double(b.holdSeconds ?? 2.5),
                     notes: b.notes ?? ""
                 )
@@ -138,12 +198,23 @@ struct ActEmotionMapEditorView: View {
             guard !k.isEmpty else { continue }
             let anim = r.animationFile.trimmingCharacters(in: .whitespacesAndNewlines)
             let expr = r.expression.trimmingCharacters(in: .whitespacesAndNewlines)
+            var blendOut: [String: Float]?
+            var merged: [String: Float] = [:]
+            for br in r.blendRows {
+                let pk = br.preset.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !pk.isEmpty else { continue }
+                merged[pk] = Float(min(max(br.weight, 0), 1))
+            }
+            if !merged.isEmpty {
+                blendOut = merged
+            }
+            let ew: Float? = expr.isEmpty ? nil : Float(min(max(r.expressionWeight, 0), 1))
             map[k] = EmotionBindingDTO(
                 animation: anim.isEmpty ? nil : anim,
                 expression: expr.isEmpty ? nil : expr,
-                expressionWeight: nil,
-                expressionBlend: nil,
-                looping: nil,
+                expressionWeight: ew,
+                expressionBlend: blendOut,
+                looping: r.loopingMode.jsonValue,
                 holdSeconds: Float(r.holdSeconds),
                 notes: r.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : r.notes
             )
@@ -171,14 +242,30 @@ private struct EmotionRow: Identifiable, Hashable {
     /// Pose-library JSON path/filename (maps to `EmotionBinding.animation` on disk). Not named `animation` — clashes with `View.animation(_:)`.
     var animationFile: String
     var expression: String
+    var expressionWeight: Double
+    var loopingMode: LoopingMode
+    var blendRows: [ExpressionBlendRow]
     var holdSeconds: Double
     var notes: String
 
-    init(id: UUID = UUID(), key: String, animationFile: String, expression: String, holdSeconds: Double, notes: String) {
+    init(
+        id: UUID = UUID(),
+        key: String = "",
+        animationFile: String = "",
+        expression: String = "",
+        expressionWeight: Double = 1.0,
+        loopingMode: LoopingMode = .inherit,
+        blendRows: [ExpressionBlendRow] = [],
+        holdSeconds: Double = 2.5,
+        notes: String = ""
+    ) {
         self.id = id
         self.key = key
         self.animationFile = animationFile
         self.expression = expression
+        self.expressionWeight = expressionWeight
+        self.loopingMode = loopingMode
+        self.blendRows = blendRows
         self.holdSeconds = holdSeconds
         self.notes = notes
     }
@@ -206,6 +293,11 @@ private struct EmotionRowEditorView: View {
                 TextField("Or type filename (e.g. curious_tilt.json)", text: $row.animationFile)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                Picker("Looping override", selection: $row.loopingMode) {
+                    ForEach(LoopingMode.allCases) { m in
+                        Text(m.label).tag(m)
+                    }
+                }
             }
             Section("VRM expression") {
                 Picker("Preset", selection: $row.expression) {
@@ -217,6 +309,30 @@ private struct EmotionRowEditorView: View {
                 TextField("Or custom preset name", text: $row.expression)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                Stepper(value: $row.expressionWeight, in: 0 ... 1, step: 0.05) {
+                    Text("Primary weight: \(row.expressionWeight, specifier: "%.2f")")
+                }
+                .disabled(row.expression.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            Section("Expression blend (optional)") {
+                Text("Extra preset → weight pairs merged with the primary expression (same as desktop `expression_blend`).")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                ForEach($row.blendRows) { $br in
+                    HStack(alignment: .firstTextBaseline) {
+                        TextField("preset", text: $br.preset)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Stepper(value: $br.weight, in: 0 ... 1, step: 0.05) {
+                            Text(String(format: "%.2f", br.weight))
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                .onDelete { row.blendRows.remove(atOffsets: $0) }
+                Button("Add blend slot") {
+                    row.blendRows.append(ExpressionBlendRow())
+                }
             }
             Section("Timing") {
                 Stepper(value: $row.holdSeconds, in: 0.25 ... 30, step: 0.25) {

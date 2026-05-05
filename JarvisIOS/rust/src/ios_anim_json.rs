@@ -84,7 +84,29 @@ impl IosJsonAnimPlayback {
     }
 }
 
+/// Single-frame pose format: top-level `bones` and `expressions` without a `frames` array.
+/// Produced by the desktop pose-library export (e.g. `assets/poses/*.json`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IosPoseFile {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    bones: HashMap<String, IosBoneRot>,
+    #[serde(default)]
+    expressions: HashMap<String, f32>,
+    /// Used as the hold duration so the pose stays visible for a moment before clearing.
+    #[serde(default)]
+    transition_duration: Option<f32>,
+    #[serde(default)]
+    hold_duration: Option<f32>,
+}
+
 /// Load JSON from `JARVIS_ASSET_ROOT` / `rel_path` and snapshot bone entities under the avatar root.
+///
+/// Supports two formats:
+///  - **Animation** (`{fps, frames:[{bones,expressions},...], looping, holdDuration}`)
+///  - **Pose** (`{bones, expressions, transitionDuration}`) — treated as a single-frame animation.
 pub(crate) fn try_build_clip(rel_path: &str, world: &mut World) -> Option<ActiveJsonClip> {
     if !crate::ios_bevy::is_safe_asset_rel(rel_path) {
         crate::jarvis_ios_line!("[JarvisIOS] json anim: rejected unsafe path {rel_path:?}");
@@ -94,10 +116,47 @@ pub(crate) fn try_build_clip(rel_path: &str, world: &mut World) -> Option<Active
     let abs = Path::new(&root).join(rel_path);
     let raw = std::fs::read_to_string(&abs).ok()?;
     let animation: IosAnimFile = serde_json::from_str(&raw).ok()?;
-    if animation.frames.is_empty() {
-        crate::jarvis_ios_line!("[JarvisIOS] json anim: no frames in {}", abs.display());
-        return None;
-    }
+    // If no `frames` array, check for a pose file with top-level `bones`.
+    let animation = if animation.frames.is_empty() {
+        let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        if v.get("bones").is_some_and(|b| b.is_object()) {
+            match serde_json::from_value::<IosPoseFile>(v) {
+                Ok(pose) => {
+                    let hold = pose.hold_duration
+                        .or(pose.transition_duration)
+                        .unwrap_or(1.0)
+                        .max(0.05);
+                    crate::jarvis_ios_line!(
+                        "[JarvisIOS] json anim: pose file {} → single-frame hold={:.2}s",
+                        abs.display(),
+                        hold
+                    );
+                    IosAnimFile {
+                        name: pose.name,
+                        fps: 30.0,
+                        frames: vec![IosAnimFrame {
+                            bones: pose.bones,
+                            expressions: pose.expressions,
+                        }],
+                        looping: Some(false),
+                        hold_duration: Some(hold),
+                    }
+                }
+                Err(e) => {
+                    crate::jarvis_ios_line!(
+                        "[JarvisIOS] json anim: pose parse failed {}: {e}",
+                        abs.display()
+                    );
+                    return None;
+                }
+            }
+        } else {
+            crate::jarvis_ios_line!("[JarvisIOS] json anim: no frames in {}", abs.display());
+            return None;
+        }
+    } else {
+        animation
+    };
     let avatar_root = world
         .query_filtered::<Entity, With<JarvisIosAvatarRoot>>()
         .iter(world)

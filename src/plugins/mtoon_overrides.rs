@@ -19,6 +19,32 @@ use serde::{Deserialize, Serialize};
 
 use jarvis_avatar::config::Settings;
 
+// ── Per-VRM ModelOverrides directory helpers ────────────────────────────────────────────────────
+
+/// Returns `config/ModelOverrides/{stem}/` where stem is the VRM filename without extension.
+/// e.g. `models/3.vrm` → `config/ModelOverrides/3/`
+pub fn vrm_model_overrides_dir(model_path: &str) -> PathBuf {
+    let stem = std::path::Path::new(model_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("default");
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join("config")
+        .join("ModelOverrides")
+        .join(stem)
+}
+
+/// Returns `config/ModelOverrides/{stem}/mtoon_overrides.json`.
+pub fn vrm_model_mtoon_override_path(model_path: &str) -> PathBuf {
+    vrm_model_overrides_dir(model_path).join("mtoon_overrides.json")
+}
+
+/// Returns `config/ModelOverrides/{stem}/graphics_overrides.json`.
+pub fn vrm_model_graphics_override_path(model_path: &str) -> PathBuf {
+    vrm_model_overrides_dir(model_path).join("graphics_overrides.json")
+}
+
 pub struct MToonOverridesPlugin;
 
 impl Plugin for MToonOverridesPlugin {
@@ -124,9 +150,8 @@ impl MToonOverridesStore {
     }
 }
 
-fn load_overrides(mut commands: Commands, settings: Res<Settings>) {
-    let path = PathBuf::from(&settings.mtoon_overrides.path);
-    let file: MToonOverridesFile = match fs::read_to_string(&path) {
+fn load_mtoon_overrides_file(path: &PathBuf) -> MToonOverridesFile {
+    match fs::read_to_string(path) {
         Ok(body) => match serde_json::from_str(&body) {
             Ok(f) => f,
             Err(e) => {
@@ -139,8 +164,30 @@ fn load_overrides(mut commands: Commands, settings: Res<Settings>) {
             warn!("mtoon overrides: read {path:?}: {e}");
             MToonOverridesFile::default()
         }
+    }
+}
+
+fn load_overrides(mut commands: Commands, settings: Res<Settings>) {
+    let per_vrm_path = vrm_model_mtoon_override_path(&settings.avatar.model_path);
+    // Load from per-VRM file if it exists, else from the global sidecar.
+    // Saves always target the per-VRM file so the first "Save to overrides" creates it.
+    let file = if per_vrm_path.is_file() {
+        let file = load_mtoon_overrides_file(&per_vrm_path);
+        info!("mtoon overrides: loaded per-VRM overrides from {per_vrm_path:?}");
+        file
+    } else {
+        let global_path = PathBuf::from(&settings.mtoon_overrides.path);
+        let file = load_mtoon_overrides_file(&global_path);
+        if !file.entries.is_empty() {
+            info!(
+                "mtoon overrides: no per-VRM file at {per_vrm_path:?}, \
+                 loaded global overrides from {global_path:?}"
+            );
+        }
+        file
     };
-    commands.insert_resource(MToonOverridesStore::new(path, file));
+    // Store always points to the per-VRM path so "Save to overrides" writes there.
+    commands.insert_resource(MToonOverridesStore::new(per_vrm_path, file));
 }
 
 /// Stable JSON key for one mesh primitive's MToon material (matches Graphics

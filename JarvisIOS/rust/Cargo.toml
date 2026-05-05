@@ -46,6 +46,8 @@ bevy_panorbit_camera = { version = "0.34", default-features = false, features = 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
 
 # `tracing-oslog` runs a C build that expects Apple `xcrun`; use a stub when building on Linux.
 [patch.crates-io]

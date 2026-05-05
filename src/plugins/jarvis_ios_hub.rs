@@ -4,6 +4,7 @@
 //! send **`Authorization: Bearer <token>`** (same value as WS `module:authenticate`). Empty token
 //! keeps routes open for local dev (matches hub WS behaviour).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -11,6 +12,7 @@ use serde_json::{Value, json};
 
 use jarvis_avatar::config::{AvatarSettings, CameraSettings, Settings};
 
+use super::mtoon_overrides::{vrm_model_graphics_override_path, vrm_model_mtoon_override_path};
 use super::spring_preset::{default_preset_path_for_logical_path, vrm_preset_key};
 
 /// Snapshot served over HTTP until Bevy can bump revisions when settings change.
@@ -50,6 +52,37 @@ pub struct JarvisIosGraphicsLite {
     pub show_ground_plane: bool,
     pub ground_size: f32,
     pub ground_base_color: [f32; 3],
+}
+
+/// Write per-VRM graphics overrides JSON to `config/ModelOverrides/{stem}/graphics_overrides.json`.
+///
+/// Called by the debug UI "Save settings" button so iOS can apply per-VRM lighting.
+pub fn write_vrm_graphics_override(settings: &Settings) -> std::io::Result<()> {
+    let path = vrm_model_graphics_override_path(&settings.avatar.model_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lite = graphics_lite_from_settings(settings);
+    let body = serde_json::to_string_pretty(&lite)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&path, body)
+}
+
+fn graphics_lite_from_settings(settings: &Settings) -> JarvisIosGraphicsLite {
+    JarvisIosGraphicsLite {
+        msaa_samples: settings.graphics.msaa_samples,
+        present_mode: settings.graphics.present_mode.clone(),
+        hdr: settings.graphics.hdr,
+        exposure_ev100: settings.graphics.exposure_ev100,
+        ambient_brightness: settings.graphics.ambient_brightness,
+        ambient_color: settings.graphics.ambient_color,
+        directional_illuminance: settings.graphics.directional_illuminance,
+        directional_shadows: settings.graphics.directional_shadows,
+        directional_position: settings.graphics.directional_position,
+        show_ground_plane: settings.graphics.show_ground_plane,
+        ground_size: settings.graphics.ground_size,
+        ground_base_color: settings.graphics.ground_base_color,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +150,28 @@ fn build_manifest_value(settings: &Settings, revision: u64) -> Value {
         });
     }
 
+    // Any other `.vrm` / `.vrma` under `./assets/` so iOS can hot-swap models without changing
+    // desktop `model_path` first (manifest previously only listed the active VRM + idle VRMA).
+    const MAX_SYNC_VRM: usize = 120;
+    let mut seen_paths: HashSet<String> = assets.iter().map(|a| a.path.clone()).collect();
+    for rel in collect_assets_by_extensions(&root, &root, &["vrm", "vrma"], MAX_SYNC_VRM) {
+        if seen_paths.insert(rel.clone()) {
+            let role = if rel
+                .rsplit_once('.')
+                .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("vrma"))
+            {
+                "vrma"
+            } else {
+                "vrm"
+            };
+            assets.push(JarvisIosAssetRef {
+                role: role.into(),
+                path: rel.clone(),
+                url: format!("/jarvis-ios/v1/asset/{rel}"),
+            });
+        }
+    }
+
     let preset_path = default_preset_path_for_logical_path(None, &settings.avatar.model_path);
     let spring = preset_path
         .file_name()
@@ -133,19 +188,30 @@ fn build_manifest_value(settings: &Settings, revision: u64) -> Value {
             }
         });
 
-    let graphics = JarvisIosGraphicsLite {
-        msaa_samples: settings.graphics.msaa_samples,
-        present_mode: settings.graphics.present_mode.clone(),
-        hdr: settings.graphics.hdr,
-        exposure_ev100: settings.graphics.exposure_ev100,
-        ambient_brightness: settings.graphics.ambient_brightness,
-        ambient_color: settings.graphics.ambient_color,
-        directional_illuminance: settings.graphics.directional_illuminance,
-        directional_shadows: settings.graphics.directional_shadows,
-        directional_position: settings.graphics.directional_position,
-        show_ground_plane: settings.graphics.show_ground_plane,
-        ground_size: settings.graphics.ground_size,
-        ground_base_color: settings.graphics.ground_base_color,
+    let graphics = graphics_lite_from_settings(settings);
+
+    // Per-VRM graphics: override global values when `config/ModelOverrides/{stem}/graphics_overrides.json` exists.
+    let graphics = {
+        let per_vrm_path = vrm_model_graphics_override_path(&settings.avatar.model_path);
+        if let Ok(body) = std::fs::read_to_string(&per_vrm_path) {
+            if let Ok(overrides) = serde_json::from_str::<serde_json::Value>(&body) {
+                merge_graphics_overrides(graphics, &overrides)
+            } else {
+                graphics
+            }
+        } else {
+            graphics
+        }
+    };
+
+    // Inline MToon overrides: prefer per-VRM file, fall back to global.
+    let mtoon_overrides_json: Option<String> = {
+        let per_vrm = vrm_model_mtoon_override_path(&settings.avatar.model_path);
+        let global = std::env::current_dir()
+            .unwrap_or_default()
+            .join(&settings.mtoon_overrides.path);
+        let path = if per_vrm.is_file() { per_vrm } else { global };
+        std::fs::read_to_string(path).ok()
     };
 
     serde_json::to_value(ManifestDto {
@@ -158,6 +224,7 @@ fn build_manifest_value(settings: &Settings, revision: u64) -> Value {
         graphics,
         assets,
         spring_preset: spring,
+        mtoon_overrides_json,
     })
     .unwrap_or_else(|_| json!({ "schema": "jarvis-ios.profile.v1", "error": "serialize_failed" }))
 }
@@ -174,6 +241,69 @@ struct ManifestDto {
     assets: Vec<JarvisIosAssetRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     spring_preset: Option<JarvisIosSpringPresetRef>,
+    /// Inlined MToon overrides JSON for the active VRM (per-VRM preferred, else global).
+    /// iOS applies this after VRM loads via `ios_apply_mtoon_overrides_on_vrm_ready`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mtoon_overrides_json: Option<String>,
+}
+
+/// Merge partial graphics overrides JSON (from per-VRM `graphics_overrides.json`) on top of `base`.
+fn merge_graphics_overrides(mut base: JarvisIosGraphicsLite, v: &serde_json::Value) -> JarvisIosGraphicsLite {
+    if let Some(x) = v.get("msaa_samples").and_then(|x| x.as_u64()) {
+        base.msaa_samples = x as u32;
+    }
+    if let Some(x) = v.get("present_mode").and_then(|x| x.as_str()) {
+        base.present_mode = x.to_string();
+    }
+    if let Some(x) = v.get("hdr").and_then(|x| x.as_bool()) {
+        base.hdr = x;
+    }
+    if let Some(x) = v.get("exposure_ev100").and_then(|x| x.as_f64()) {
+        base.exposure_ev100 = x as f32;
+    }
+    if let Some(x) = v.get("ambient_brightness").and_then(|x| x.as_f64()) {
+        base.ambient_brightness = x as f32;
+    }
+    if let Some(serde_json::Value::Array(arr)) = v.get("ambient_color") {
+        if arr.len() == 4 {
+            let mut c = [0.0_f32; 4];
+            for (i, val) in arr.iter().enumerate().take(4) {
+                c[i] = val.as_f64().unwrap_or(0.0) as f32;
+            }
+            base.ambient_color = c;
+        }
+    }
+    if let Some(x) = v.get("directional_illuminance").and_then(|x| x.as_f64()) {
+        base.directional_illuminance = x as f32;
+    }
+    if let Some(x) = v.get("directional_shadows").and_then(|x| x.as_bool()) {
+        base.directional_shadows = x;
+    }
+    if let Some(serde_json::Value::Array(arr)) = v.get("directional_position") {
+        if arr.len() == 3 {
+            let mut p = [0.0_f32; 3];
+            for (i, val) in arr.iter().enumerate().take(3) {
+                p[i] = val.as_f64().unwrap_or(0.0) as f32;
+            }
+            base.directional_position = p;
+        }
+    }
+    if let Some(x) = v.get("show_ground_plane").and_then(|x| x.as_bool()) {
+        base.show_ground_plane = x;
+    }
+    if let Some(x) = v.get("ground_size").and_then(|x| x.as_f64()) {
+        base.ground_size = x as f32;
+    }
+    if let Some(serde_json::Value::Array(arr)) = v.get("ground_base_color") {
+        if arr.len() == 3 {
+            let mut c = [0.0_f32; 3];
+            for (i, val) in arr.iter().enumerate().take(3) {
+                c[i] = val.as_f64().unwrap_or(0.0) as f32;
+            }
+            base.ground_base_color = c;
+        }
+    }
+    base
 }
 
 /// `Authorization: Bearer …` must match `expected` when `expected` is non-empty.
@@ -249,6 +379,45 @@ fn collect_json_assets_under(dir: &Path, assets_root: &Path, max_files: usize) -
                     if is_safe_assets_rel(&rel_s) {
                         out.push(rel_s);
                     }
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Recursive walk of `dir` for files whose extension is in `exts` (case-insensitive), returning
+/// paths relative to `assets_root`, sorted, capped at `max_files`.
+fn collect_assets_by_extensions(
+    dir: &Path,
+    assets_root: &Path,
+    exts: &[&str],
+    max_files: usize,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return out;
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            if out.len() >= max_files {
+                return out;
+            }
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+                exts.iter().any(|want| x.eq_ignore_ascii_case(want))
+            }) && let Ok(rel) = p.strip_prefix(assets_root)
+            {
+                let rel_s = rel.to_string_lossy().replace('\\', "/");
+                if is_safe_assets_rel(&rel_s) {
+                    out.push(rel_s);
                 }
             }
         }

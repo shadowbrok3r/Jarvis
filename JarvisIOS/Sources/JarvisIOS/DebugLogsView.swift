@@ -7,12 +7,21 @@ struct DebugLogsView: View {
     @State private var poll = false
     @State private var micMonitor = JarvisMicLevelMonitor()
     @State private var cameraSession = JarvisCameraSession()
+    @State private var uploadStatus: String? = nil
+    @State private var uploading = false
 
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 8) {
                 micDebugSection
                 cameraDebugSection
+                if let status = uploadStatus {
+                    Text(status)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 8)
+                        .lineLimit(2)
+                }
                 ScrollView {
                     Text(bus.displayText)
                         .font(.system(.footnote, design: .monospaced))
@@ -25,9 +34,22 @@ struct DebugLogsView: View {
             .navigationTitle("Logs")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        pushLogsToHub()
+                    } label: {
+                        if uploading {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Label("Push to Hub", systemImage: "arrow.up.circle")
+                        }
+                    }
+                    .disabled(uploading)
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Clear") {
                         bus.clearAll()
+
                     }
                 }
             }
@@ -156,5 +178,22 @@ struct DebugLogsView: View {
     private func refreshRustSnapshot() {
         let s = jarvis_ios_debug_log_snapshot().toString()
         bus.setRustSnapshot(s)
+    }
+
+    private func pushLogsToHub() {
+        let hubURL = UserDefaults.standard.string(forKey: HubProfileSync.userDefaultsBaseURLKey) ?? ""
+        guard !hubURL.isEmpty else {
+            uploadStatus = "No hub URL configured"
+            return
+        }
+        uploading = true
+        uploadStatus = nil
+        Task {
+            let ok = await JarvisIOSCrashLog.uploadCurrentSnapshot(hubBaseURL: hubURL)
+            uploading = false
+            uploadStatus = ok ? "Pushed to hub → .dev/ios_live_snapshot.txt" : "Push failed — check logs"
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            uploadStatus = nil
+        }
     }
 }

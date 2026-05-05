@@ -17,6 +17,7 @@
 //! * `GET  /jarvis-ios/v1/manifest` — JSON profile snapshot for the iOS companion (Bearer token when set).
 //! * `GET  /jarvis-ios/v1/asset/{*path}` — Raw bytes under `./assets/` (path traversal rejected).
 //! * `GET  /jarvis-ios/v1/config/spring-presets/{name}` — Preset TOML (`xxxxxxxxxxxxxxxx.toml` only).
+//! * `POST /jarvis-ios/v1/log-upload` — iOS session / crash log upload; saved to `.dev/ios_<filename>.txt`.
 //!
 //! Emits the same Bevy `Message`s the old WS client did so downstream plugins
 //! (`expressions`, `look_at`, `tts`, `debug_ui`) stay on the same contract:
@@ -326,6 +327,7 @@ async fn run_hub(
             "/jarvis-ios/v1/config/spring-presets/{name}",
             get(jarvis_ios_spring_preset_handler),
         )
+        .route("/jarvis-ios/v1/log-upload", post(jarvis_ios_log_upload_handler))
         .with_state(shared);
 
     let addr: SocketAddr = match bind.parse() {
@@ -436,6 +438,49 @@ async fn jarvis_ios_spring_preset_handler(
             }
         }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn jarvis_ios_log_upload_handler(
+    State(shared): State<HubShared>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+    if !super::jarvis_ios_hub::http_authorized(&shared.auth_token, auth) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    if body.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty body").into_response();
+    }
+    let filename = headers
+        .get("x-log-filename")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("ios_log.txt");
+    // Sanitize: allow only alphanum, _, -, .
+    let safe_name: String = filename
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' || c == '.' { c } else { '_' })
+        .collect();
+    let dev_dir = std::path::Path::new(".dev");
+    let _ = std::fs::create_dir_all(dev_dir);
+    let out_path = dev_dir.join(format!("ios_{safe_name}"));
+    match std::fs::write(&out_path, &body) {
+        Ok(()) => {
+            info!(
+                "iOS log uploaded: {} ({} bytes) → {}",
+                safe_name,
+                body.len(),
+                out_path.display()
+            );
+            (StatusCode::OK, format!("saved to {}", out_path.display())).into_response()
+        }
+        Err(e) => {
+            error!("iOS log upload write failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
     }
 }
 

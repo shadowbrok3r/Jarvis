@@ -2,6 +2,83 @@ import Darwin
 import Foundation
 import Security
 
+/// Longer timeouts + retries for large `.vrm` downloads over LAN / Tailscale (avoids `NSURLErrorDomain` -1005 mid-sync).
+private enum JarvisHubDownloadNetworking {
+    static let session: URLSession = {
+        let c = URLSessionConfiguration.default
+        c.timeoutIntervalForRequest = 180
+        c.timeoutIntervalForResource = 3600
+        c.waitsForConnectivity = true
+        return URLSession(configuration: c)
+    }()
+
+    static func dataWithRetries(for request: URLRequest, maxAttempts: Int = 4) async throws -> (Data, URLResponse) {
+        var last: Error?
+        for attempt in 1 ... maxAttempts {
+            do {
+                return try await session.data(for: request)
+            } catch {
+                last = error
+                if attempt < maxAttempts, isTransientNetworkError(error) {
+                    let ns = UInt64(400 + attempt * 350) * 1_000_000
+                    try await Task.sleep(nanoseconds: ns)
+                    continue
+                }
+                throw error
+            }
+        }
+        throw last ?? URLError(.unknown)
+    }
+
+    /// Downloads directly to `dest` using `URLSession.download(for:)` so the file is never fully buffered
+    /// in RAM — essential for large binary assets like `.vrm` / `.vrma` / `.glb` on memory-constrained iOS.
+    static func downloadFileStreamingWithRetries(for request: URLRequest, dest: URL, maxAttempts: Int = 4) async throws {
+        var last: Error?
+        for attempt in 1 ... maxAttempts {
+            do {
+                let (tmpURL, response) = try await session.download(for: request)
+                guard let http = response as? HTTPURLResponse, (200 ... 299).contains(http.statusCode) else {
+                    try? FileManager.default.removeItem(at: tmpURL)
+                    throw URLError(.badServerResponse)
+                }
+                let fm = FileManager.default
+                if fm.fileExists(atPath: dest.path) {
+                    try fm.removeItem(at: dest)
+                }
+                try fm.moveItem(at: tmpURL, to: dest)
+                return
+            } catch {
+                last = error
+                if attempt < maxAttempts, isTransientNetworkError(error) {
+                    let ns = UInt64(400 + attempt * 350) * 1_000_000
+                    try await Task.sleep(nanoseconds: ns)
+                    continue
+                }
+                throw error
+            }
+        }
+        throw last ?? URLError(.unknown)
+    }
+
+    private static func isTransientNetworkError(_ error: Error) -> Bool {
+        let e = error as NSError
+        guard e.domain == NSURLErrorDomain else { return false }
+        switch e.code {
+        case NSURLErrorNetworkConnectionLost,
+             NSURLErrorTimedOut,
+             NSURLErrorCannotConnectToHost,
+             NSURLErrorDNSLookupFailed,
+             NSURLErrorNotConnectedToInternet,
+             NSURLErrorInternationalRoamingOff,
+             NSURLErrorCallIsActive,
+             NSURLErrorDataNotAllowed:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 /// Keys for desktop channel hub (same port as WebSocket, typically 6121).
 enum HubProfileSync {
     static let userDefaultsBaseURLKey = "jarvis.hub.baseURL"
@@ -423,7 +500,7 @@ enum HubProfileSync {
             manifestRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        let (manifestData, manifestResponse) = try await URLSession.shared.data(for: manifestRequest)
+        let (manifestData, manifestResponse) = try await JarvisHubDownloadNetworking.dataWithRetries(for: manifestRequest)
         guard let httpManifest = manifestResponse as? HTTPURLResponse,
               (200 ... 299).contains(httpManifest.statusCode)
         else {
@@ -468,11 +545,21 @@ enum HubProfileSync {
             if !token.isEmpty {
                 req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
-            let (fileData, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse, (200 ... 299).contains(http.statusCode) else {
-                throw URLError(.badServerResponse)
+
+            // Large binary assets (VRM/VRMA/GLB) are streamed directly to disk so the full file
+            // is never held in RAM as a Data object.  Everything else (JSON, TOML, …) uses the
+            // in-memory path which is simpler and fine for small payloads.
+            let pathExt = (asset.path as NSString).pathExtension.lowercased()
+            let isLargeBinary = pathExt == "vrm" || pathExt == "vrma" || pathExt == "glb"
+            if isLargeBinary {
+                try await JarvisHubDownloadNetworking.downloadFileStreamingWithRetries(for: req, dest: destURL)
+            } else {
+                let (fileData, resp) = try await JarvisHubDownloadNetworking.dataWithRetries(for: req)
+                guard let http = resp as? HTTPURLResponse, (200 ... 299).contains(http.statusCode) else {
+                    throw URLError(.badServerResponse)
+                }
+                try fileData.write(to: destURL, options: .atomic)
             }
-            try fileData.write(to: destURL, options: .atomic)
 
             let done = index + 1
             let cap = done == n ? "Finishing…" : "Downloaded \(assetLabel) (\(done)/\(n))"

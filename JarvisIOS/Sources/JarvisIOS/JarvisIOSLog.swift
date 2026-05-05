@@ -3,6 +3,137 @@ import Darwin
 import Foundation
 import os
 
+// MARK: - Persistent crash log file
+
+/// Manages the two log file paths and wires Swift + Rust to write there.
+/// Call `JarvisIOSCrashLog.setup()` once at app start, before Bevy boots.
+enum JarvisIOSCrashLog {
+    static let sessionFileName  = "session_log.txt"
+    static let previousFileName = "prev_session_log.txt"
+
+    nonisolated(unsafe) private static var _sessionURL: URL?
+    nonisolated(unsafe) private static var _fileHandle: FileHandle?
+    private static let writeLock = NSLock()
+
+    /// App-Support subdir for all Jarvis log files.
+    static func logsDirectory() -> URL? {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let dir = base.appendingPathComponent("JarvisIOSLogs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Path to the previous (crashed) session log.  Nil if it doesn't exist yet.
+    static var previousSessionLogURL: URL? {
+        guard let dir = logsDirectory() else { return nil }
+        let u = dir.appendingPathComponent(previousFileName)
+        return FileManager.default.fileExists(atPath: u.path) ? u : nil
+    }
+
+    /// Called once before Bevy boots.  Rotates old log, opens new one, tells Rust.
+    static func setup() {
+        guard let dir = logsDirectory() else { return }
+        let current = dir.appendingPathComponent(sessionFileName)
+        let previous = dir.appendingPathComponent(previousFileName)
+
+        // Rotate: existing session log → previous session log (overwrite)
+        if FileManager.default.fileExists(atPath: current.path) {
+            try? FileManager.default.removeItem(at: previous)
+            try? FileManager.default.moveItem(at: current, to: previous)
+        }
+
+        // Create fresh session log
+        FileManager.default.createFile(atPath: current.path, contents: nil)
+        _sessionURL = current
+
+        if let fh = try? FileHandle(forWritingTo: current) {
+            _fileHandle = fh
+        }
+
+        // Tell Rust: open file + install tracing subscriber
+        let prevPath = FileManager.default.fileExists(atPath: previous.path) ? previous.path : ""
+        current.path.withCString { cCurrent in
+            prevPath.withCString { cPrev in
+                jarvis_ios_set_log_file(cCurrent, cPrev)
+            }
+        }
+
+        JarvisIOSLog.recordHub("JarvisIOSCrashLog: session log at \(current.path)")
+    }
+
+    /// Append a Swift log line to the persistent file.  Non-blocking (uses NSLock).
+    static func append(_ line: String) {
+        guard let fh = _fileHandle else { return }
+        let data = (line + "\n").data(using: .utf8) ?? Data()
+        writeLock.lock()
+        fh.seekToEndOfFile()
+        fh.write(data)
+        writeLock.unlock()
+    }
+
+    /// Upload `prev_session_log.txt` to the desktop hub.  Returns the saved path on success.
+    @discardableResult
+    static func uploadPreviousSessionLog(hubBaseURL: String) async -> String? {
+        guard let logURL = previousSessionLogURL,
+              let data = try? Data(contentsOf: logURL),
+              !data.isEmpty
+        else { return nil }
+        guard let base = URL(string: hubBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              base.scheme == "http" || base.scheme == "https"
+        else { return nil }
+
+        let endpoint = base.appending(path: "jarvis-ios/v1/log-upload")
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "POST"
+        req.setValue("text/plain; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        req.setValue("prev_session_log.txt", forHTTPHeaderField: "X-Log-Filename")
+        let token = HubProfileSync.resolvedHubBearerToken()
+        if !token.isEmpty { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        req.httpBody = data
+        req.timeoutInterval = 30
+
+        do {
+            let (respData, _) = try await URLSession.shared.data(for: req)
+            let msg = String(data: respData, encoding: .utf8) ?? "(no response body)"
+            JarvisIOSLog.recordHub("CrashLog upload OK: \(msg)")
+            return msg
+        } catch {
+            JarvisIOSLog.recordHubError("CrashLog upload failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Upload the CURRENT in-memory ring buffer snapshot to the desktop hub.
+    @discardableResult
+    static func uploadCurrentSnapshot(hubBaseURL: String) async -> Bool {
+        let snapshot = jarvis_ios_debug_log_snapshot().toString()
+        guard !snapshot.isEmpty else { return false }
+        guard let base = URL(string: hubBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              base.scheme == "http" || base.scheme == "https"
+        else { return false }
+
+        let endpoint = base.appending(path: "jarvis-ios/v1/log-upload")
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "POST"
+        req.setValue("text/plain; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        req.setValue("live_snapshot.txt", forHTTPHeaderField: "X-Log-Filename")
+        let token = HubProfileSync.resolvedHubBearerToken()
+        if !token.isEmpty { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        req.httpBody = snapshot.data(using: .utf8)
+        req.timeoutInterval = 30
+
+        do {
+            _ = try await URLSession.shared.data(for: req)
+            return true
+        } catch {
+            JarvisIOSLog.recordHubError("Live log push failed: \(error)")
+            return false
+        }
+    }
+}
+
 // MARK: - In-app log bus (Swift + polled Rust buffer)
 
 /// Ring buffer shown on the **Logs** tab. Thread-safe append from any isolation.
@@ -31,10 +162,12 @@ final class JarvisIOSLogBus {
 
     func appendSwiftLine(_ line: String) {
         let ts = dateFormatter.string(from: Date())
-        swiftLines.append("\(ts) \(line)")
+        let full = "\(ts) \(line)"
+        swiftLines.append(full)
         if swiftLines.count > maxSwiftLines {
             swiftLines.removeFirst(swiftLines.count - maxSwiftLines)
         }
+        JarvisIOSCrashLog.append(full)
     }
 
     func setRustSnapshot(_ text: String) {
