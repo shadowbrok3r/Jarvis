@@ -66,6 +66,12 @@ pub struct JarvisIosUiState {
     pub show_graphics_advanced: bool,
     /// Full expression preset sliders (mirrors desktop Pose Controller → Expressions tab).
     pub show_expressions: bool,
+    /// Animation playback list — VRMA + JSON pose clips with Play/Stop buttons.
+    /// Lets the user trigger animations without leaving the Avatar tab.
+    pub show_animations: bool,
+    /// Logging verbosity controls (also exposes the "less logging" toggle the user wanted
+    /// for testing whether log I/O contributes to glitching).
+    pub show_logging: bool,
 }
 
 impl Default for JarvisIosUiState {
@@ -91,6 +97,8 @@ impl Default for JarvisIosUiState {
             show_rig_editor: false,
             show_graphics_advanced: false,
             show_expressions: false,
+            show_animations: true,
+            show_logging: false,
         }
     }
 }
@@ -143,6 +151,8 @@ pub fn jarvis_ios_egui_menu_bar(mut contexts: EguiContexts, mut ui_state: ResMut
                 ui.checkbox(&mut s.show_camera, "Camera");
                 ui.checkbox(&mut s.show_graphics, "Graphics / lights");
                 ui.checkbox(&mut s.show_expressions, "Expressions");
+                ui.checkbox(&mut s.show_animations, "Animations");
+                ui.checkbox(&mut s.show_logging, "Logging");
                 ui.separator();
                 ui.menu_button("More windows…", |ui| {
                     egui::ScrollArea::vertical()
@@ -185,6 +195,8 @@ pub fn jarvis_ios_egui_windows(
     avatar: Res<crate::ios_profile_manifest::IosAvatarSettings>,
     graphics: Res<crate::ios_graphics::IosGraphicsSettings>,
     mut expr_state: ResMut<crate::ios_bevy::IosExpressionsState>,
+    catalog: Res<crate::ios_bevy::IosAnimationCatalog>,
+    mut anim_requests: ResMut<crate::ios_bevy::IosEguiAnimRequests>,
     vrm_q: Query<Entity, (With<Vrm>, With<Initialized>)>,
     mut commands: Commands,
 ) -> Result {
@@ -575,6 +587,161 @@ pub fn jarvis_ios_egui_windows(
                     .collect();
                 commands.trigger(SetExpressions::from_iter(vrm_e, weights));
             }
+        }
+    }
+
+    // ── Animations window ───────────────────────────────────────────────
+    // Replaces the Settings-tab "Saved motions" detour. User clicks Play here, sees the avatar
+    // react in the same view (no tab swap). Clips are drained the same frame in `Last`.
+    if ui_state.show_animations {
+        let mut show = true;
+        egui::Window::new("Animations")
+            .default_pos(egui::pos2(310.0, 60.0))
+            .default_size(egui::vec2(280.0, 380.0))
+            .collapsible(true)
+            .resizable(true)
+            .open(&mut show)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("Asset root:").weak().small());
+                ui.monospace(format!(
+                    "{} VRMA · {} JSON",
+                    catalog.vrma_paths.len(),
+                    catalog.json_paths.len()
+                ));
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if !catalog.vrma_paths.is_empty() {
+                            egui::CollapsingHeader::new(
+                                RichText::new(format!("VRMA  ({})", catalog.vrma_paths.len()))
+                                    .strong(),
+                            )
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for path in &catalog.vrma_paths {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(path).monospace().small(),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui.small_button("Loop").clicked() {
+                                                    anim_requests
+                                                        .vrma
+                                                        .push((path.clone(), true));
+                                                }
+                                                if ui.small_button("Play").clicked() {
+                                                    anim_requests
+                                                        .vrma
+                                                        .push((path.clone(), false));
+                                                }
+                                            },
+                                        );
+                                    });
+                                }
+                            });
+                        }
+                        if !catalog.json_paths.is_empty() {
+                            egui::CollapsingHeader::new(
+                                RichText::new(format!(
+                                    "Pose-library JSON  ({})",
+                                    catalog.json_paths.len()
+                                ))
+                                .strong(),
+                            )
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for path in &catalog.json_paths {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(path).monospace().small(),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui.small_button("Play").clicked() {
+                                                    anim_requests.json.push(path.clone());
+                                                }
+                                            },
+                                        );
+                                    });
+                                }
+                            });
+                        }
+                        if catalog.vrma_paths.is_empty() && catalog.json_paths.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "No animations under asset root yet. Run the desktop hub sync to push `models/*.vrma` and `animations/*.json` to this device.",
+                                )
+                                .weak(),
+                            );
+                        }
+                    });
+            });
+        if !show {
+            ui_state.show_animations = false;
+        }
+    }
+
+    // ── Logging window ──────────────────────────────────────────────────
+    // User-facing knob to silence the per-frame log spam. At QUIET we drop ~95% of writes,
+    // which is the test the user asked for ("controls over log verbosity to test if less
+    // log writing will help"). At OFF the entire async file writer is bypassed.
+    if ui_state.show_logging {
+        let mut show = true;
+        let mut current = crate::debug_log::log_verbosity();
+        egui::Window::new("Logging")
+            .default_pos(egui::pos2(620.0, 60.0))
+            .default_size(egui::vec2(260.0, 0.0))
+            .collapsible(true)
+            .resizable(true)
+            .open(&mut show)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("Verbosity").strong());
+                ui.label(
+                    RichText::new(
+                        "Lower verbosity = fewer file writes. Use QUIET / OFF to test whether logging contributes to the periodic frame stalls.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.separator();
+                let prev = current;
+                ui.radio_value(
+                    &mut current,
+                    crate::debug_log::LOG_VERBOSITY_OFF,
+                    "Off — drop everything (incl. tracing INFO/WARN; ERROR still logged)",
+                );
+                ui.radio_value(
+                    &mut current,
+                    crate::debug_log::LOG_VERBOSITY_QUIET,
+                    "Quiet — only crit lifecycle + WARN/ERROR",
+                );
+                ui.radio_value(
+                    &mut current,
+                    crate::debug_log::LOG_VERBOSITY_NORMAL,
+                    "Normal — current default (every-30-frame stats)",
+                );
+                ui.radio_value(
+                    &mut current,
+                    crate::debug_log::LOG_VERBOSITY_DEBUG,
+                    "Debug — every-frame stats (very chatty)",
+                );
+                if current != prev {
+                    crate::debug_log::set_log_verbosity(current);
+                }
+                ui.separator();
+                ui.label(
+                    RichText::new("Tip: env JARVIS_IOS_LOG_VERBOSITY={off|quiet|normal|debug} sets the boot default.")
+                        .weak()
+                        .small(),
+                );
+            });
+        if !show {
+            ui_state.show_logging = false;
         }
     }
 

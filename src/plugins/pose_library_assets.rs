@@ -34,6 +34,13 @@ pub struct PoseLibraryAssets {
     dirty: Arc<RwLock<bool>>,
     last_error: Arc<RwLock<Option<String>>>,
     last_refresh: Arc<RwLock<Option<std::time::Instant>>>,
+    /// Last directory `mtime` we observed when reading. When the dir hasn't been touched
+    /// since, the periodic refresh skips its read+parse pass — this is the entire reason
+    /// the desktop avatar would freeze every ~3 s when a large `animations/` folder existed.
+    /// On iOS we never hit this code path (no `PoseLibraryAssets` plugin), but the same
+    /// optimization keeps cargo `dev` builds smooth.
+    last_poses_mtime: Arc<RwLock<Option<std::time::SystemTime>>>,
+    last_animations_mtime: Arc<RwLock<Option<std::time::SystemTime>>>,
 }
 
 impl PoseLibraryAssets {
@@ -45,6 +52,8 @@ impl PoseLibraryAssets {
             dirty: Arc::new(RwLock::new(true)),
             last_error: Arc::new(RwLock::new(None)),
             last_refresh: Arc::new(RwLock::new(None)),
+            last_poses_mtime: Arc::new(RwLock::new(None)),
+            last_animations_mtime: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -102,6 +111,35 @@ fn refresh_pose_library(assets: Option<Res<PoseLibraryAssets>>) {
         return;
     }
 
+    // Cheap skip: stat the directories and bail if neither has been touched since the last
+    // successful read. This eliminates the periodic ~3 s freeze that the user reported on
+    // desktop ("every 3 or 4 seconds, it will freeze for a split moment") for any avatar.
+    // The dirty flag still forces a refresh after explicit save / delete / rename calls.
+    let poses_mtime = assets
+        .library
+        .poses_dir
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok();
+    let anims_mtime = assets
+        .library
+        .animations_dir
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok();
+    let cached_poses_mtime = *assets.last_poses_mtime.read();
+    let cached_anims_mtime = *assets.last_animations_mtime.read();
+    let mtimes_unchanged = poses_mtime.is_some()
+        && anims_mtime.is_some()
+        && cached_poses_mtime == poses_mtime
+        && cached_anims_mtime == anims_mtime;
+    if mtimes_unchanged {
+        // Nothing changed on disk — just push the freshness sentinel so the next `stale` check
+        // is delayed another 3 s and we don't repeatedly stat the directories every frame.
+        *assets.last_refresh.write() = Some(now);
+        return;
+    }
+
     match assets.library.load_all_poses() {
         Ok(mut p) => {
             p.sort_by(|a, b| {
@@ -125,4 +163,6 @@ fn refresh_pose_library(assets: Option<Res<PoseLibraryAssets>>) {
         Err(e) => assets.set_error(format!("list_animations: {e}")),
     }
     *assets.last_refresh.write() = Some(now);
+    *assets.last_poses_mtime.write() = poses_mtime;
+    *assets.last_animations_mtime.write() = anims_mtime;
 }

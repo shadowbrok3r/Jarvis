@@ -20,6 +20,7 @@ swift-bridge = "0.1"
 # Direct dependency so `#[derive(Component)]` / `#[derive(Resource)]` proc-macros resolve `bevy_ecs`
 # when using `bevy` with `default-features = false` (BevyManifest / rustc extern prelude).
 bevy_ecs = { version = "0.18", default-features = false, features = ["std", "bevy_reflect", "async_executor"] }
+libc = "0.2"
 # Do **not** use `default_platform`: it pulls `bevy_gilrs`, `sysinfo_plugin`, `webgl2`, `x11`, `wayland`,
 # etc. Embedded JarvisIOS only needs `WinitPlugin` as a **type** to `.disable::<WinitPlugin>()` — not
 # gilrs threads (seen in crash reports next to the main-thread DisplayLink abort).
@@ -50,5 +51,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
 
 # `tracing-oslog` runs a C build that expects Apple `xcrun`; use a stub when building on Linux.
+# `bevy_vrm1` is patched to make optional `VrmPreset` fields (isBinary, overrideBlink/Mouth/LookAt)
+# tolerate absence — without this, custom expressions silently disappear because the upstream struct
+# rejects entries missing those fields. Desktop applies the same patch in the workspace Cargo.toml.
 [patch.crates-io]
 tracing-oslog = { path = "vendor/tracing-oslog-stub" }
+bevy_vrm1 = { path = "../../vendor/bevy_vrm1" }

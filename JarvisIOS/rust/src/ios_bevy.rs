@@ -16,6 +16,7 @@ use bevy::camera::{Exposure, PerspectiveProjection, Projection};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::MouseButton;
 use bevy::input::touch::{TouchInput, TouchPhase};
+use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
 use bevy::render::view::{Hdr, Msaa};
 use bevy::render::RenderPlugin;
@@ -73,6 +74,31 @@ struct DeferredVrmLoad {
 pub(crate) struct IosExpressionsState {
     pub presets: Vec<String>,
     pub weights: std::collections::HashMap<String, f32>,
+}
+
+/// Catalog of playable animations discovered under `JARVIS_ASSET_ROOT`. Refreshed by
+/// `ios_refresh_animation_catalog` once at startup, then debounced — not every frame.
+/// The egui Animations window pulls from this and queues clips through the existing
+/// `IosEmbeddedRenderer::queue_*_play` paths (same code Swift uses).
+#[derive(Resource, Default)]
+pub(crate) struct IosAnimationCatalog {
+    /// `models/*.vrma` paths (relative to asset root). Played via `queue_vrma_play`.
+    pub vrma_paths: Vec<String>,
+    /// `animations/*.json` paths (relative to asset root). Played via `queue_json_anim_play`.
+    pub json_paths: Vec<String>,
+    /// True once the catalog has been populated at least once.
+    pub initialized: bool,
+    /// Last manifest revision number when scanned (re-scan when manifest reloads).
+    pub last_scan_at: f64,
+}
+
+/// Pending animation requests submitted by the egui UI. Drained in the `Last` schedule by
+/// `ios_drain_egui_anim_requests`, which forwards them through the same code paths that
+/// Swift uses (`flush_queued_vrma_requests` / `flush_queued_json_anim_requests`).
+#[derive(Resource, Default)]
+pub(crate) struct IosEguiAnimRequests {
+    pub vrma: Vec<(String, bool)>,
+    pub json: Vec<String>,
 }
 
 /// Passed into the app before `DefaultPlugins`; consumed by [`IosEmbedRawHandlesPlugin`].
@@ -152,6 +178,64 @@ impl Plugin for IosEmbedRawHandlesPlugin {
 }
 
 // ── VRM scene (adapted from desktop `plugins/avatar.rs`) ───────────────────────────────────────
+
+/// Log key Bevy / wgpu render-device limits once after the renderer has been initialized.
+///
+/// We need to know definitively whether iOS Metal exposes storage buffers (which would let Bevy
+/// use the unbounded `array<mat4x4<f32>>` storage-buffer skinning path) or whether it's falling
+/// back to fixed-size 256-joint uniform buffers. The crash on frame ~12 happens the first time
+/// a skinned mesh is rendered; if `max_storage_buffers_per_shader_stage = 0` then Bevy is using
+/// the uniform path and the 256-joint hard limit applies — that's a likely root cause for the
+/// 393-395-joint VRMs we're loading.
+fn log_render_device_limits(
+    mut done: Local<bool>,
+    render_device: Option<Res<bevy::render::renderer::RenderDevice>>,
+    render_adapter_info: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
+) {
+    if *done {
+        return;
+    }
+    let Some(rd) = render_device else { return };
+    let limits = rd.limits();
+    let features = rd.features();
+
+    if let Some(info) = render_adapter_info.as_deref() {
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] wgpu adapter: name='{}' backend={:?} device_type={:?} driver='{}'",
+            info.name, info.backend, info.device_type, info.driver,
+        );
+    }
+    crate::jarvis_ios_line!(
+        "[JarvisIOS] wgpu limits: max_storage_buffers_per_shader_stage={} \
+         max_uniform_buffers_per_shader_stage={} \
+         max_uniform_buffer_binding_size={} \
+         max_buffer_size={} \
+         max_bind_groups={}",
+        limits.max_storage_buffers_per_shader_stage,
+        limits.max_uniform_buffers_per_shader_stage,
+        limits.max_uniform_buffer_binding_size,
+        limits.max_buffer_size,
+        limits.max_bind_groups,
+    );
+    crate::jarvis_ios_line!(
+        "[JarvisIOS] wgpu features: {:?}",
+        features,
+    );
+
+    // Decide which skinning path Bevy will pick — same logic as bevy_pbr::render::skin::skins_use_uniform_buffers
+    let skins_uniform = limits.max_storage_buffers_per_shader_stage == 0;
+    crate::jarvis_ios_line!(
+        "[JarvisIOS] skinning path: {} {}",
+        if skins_uniform { "UNIFORM_BUFFERS" } else { "STORAGE_BUFFERS" },
+        if skins_uniform {
+            "(⚠ HARD 256-joint limit; VRMs with >256 joints WILL CRASH on Metal)"
+        } else {
+            "(unbounded array; VRMs with any joint count should work)"
+        },
+    );
+
+    *done = true;
+}
 
 fn spawn_ios_viewport(
     mut commands: Commands,
@@ -266,14 +350,46 @@ const VRM_WARN_BYTES: u64 = 150 * 1024 * 1024; // 150 MB
 /// Hard limit: refuse to load rather than OOM-kill the process.
 const VRM_HARD_LIMIT_BYTES: u64 = 260 * 1024 * 1024; // 260 MB
 
+/// Resolve the on-disk path for the model. If `<basename>.ios.vrm` exists in the same
+/// directory as the requested model, return that path instead. Returns the *relative-to-asset-root*
+/// path (suitable for both `AssetServer::load` and `Path::join(asset_root, ...)`).
+fn resolve_ios_variant_path(asset_root: &str, model_path: &str) -> String {
+    // Trim a trailing `.vrm` (case-insensitive) and check for `<base>.ios.vrm` alongside it.
+    let lower = model_path.to_ascii_lowercase();
+    let base: &str = if let Some(stripped) = lower.strip_suffix(".vrm") {
+        &model_path[..stripped.len()]
+    } else {
+        return model_path.to_string();
+    };
+    let candidate = format!("{base}.ios.vrm");
+    let candidate_disk = Path::new(asset_root).join(&candidate);
+    if candidate_disk.is_file() {
+        candidate
+    } else {
+        model_path.to_string()
+    }
+}
+
 /// Spawns [`JarvisIosAvatarRoot`] + [`VrmHandle`], optional idle VRMA; returns the root [`Entity`].
 fn spawn_jarvis_ios_vrm_root(commands: &mut Commands, asset_server: &AssetServer, settings: &IosAvatarSettings) -> Entity {
     let asset_root = ios_asset_file_path();
-    let vrm_disk = Path::new(&asset_root).join(&settings.model_path);
+
+    // Prefer the `<basename>.ios.vrm` variant if it exists alongside the source. This lets the
+    // desktop pre-process step (scripts/compress_vrm_textures.py --ios-variant) ship a slim
+    // texture-downscaled copy without touching the original file. Source `3.vrm` decodes to
+    // ~650 MB of GPU RGBA on this device; the iOS variant fits in ~50 MB.
+    let resolved_model_path = resolve_ios_variant_path(&asset_root, &settings.model_path);
+    let vrm_disk = Path::new(&asset_root).join(&resolved_model_path);
     let vrm_bytes = std::fs::metadata(&vrm_disk).map(|m| m.len()).unwrap_or(0);
+    if resolved_model_path != settings.model_path {
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] using iOS-variant VRM '{}' (instead of '{}')",
+            resolved_model_path, settings.model_path,
+        );
+    }
     crate::jarvis_ios_line!(
         "[JarvisIOS] spawn_jarvis_ios_vrm_root model_path={} size={:.1}MB exists_on_disk={}",
-        settings.model_path,
+        resolved_model_path,
         vrm_bytes as f64 / (1024.0 * 1024.0),
         vrm_disk.is_file()
     );
@@ -317,11 +433,11 @@ fn spawn_jarvis_ios_vrm_root(commands: &mut Commands, asset_server: &AssetServer
             ..default()
         },
         GlobalTransform::default(),
-        VrmHandle(asset_server.load(settings.model_path.clone())),
+        VrmHandle(asset_server.load(resolved_model_path.clone())),
     ));
     crate::jarvis_ios_line!(
         "[JarvisIOS] spawn_jarvis_ios_vrm_root queued VrmHandle for {}",
-        settings.model_path
+        resolved_model_path,
     );
 
     if !settings.idle_vrma_path.trim().is_empty() {
@@ -405,6 +521,132 @@ fn ios_collect_expression_presets(
         spec_count,
         expr_state.presets.len() - spec_count,
     );
+}
+
+/// Walk the asset root for `.vrma` and `animations/*.json` files exactly once at startup
+/// (and any time the catalog is explicitly re-armed). Filesystem walks are *not* free on
+/// iOS — we do this on a `Local<bool>` flag so it never repeats per-frame after init.
+fn ios_refresh_animation_catalog(
+    mut catalog: ResMut<IosAnimationCatalog>,
+    time: Res<Time>,
+) {
+    if catalog.initialized {
+        return;
+    }
+    catalog.initialized = true;
+    catalog.last_scan_at = time.elapsed_secs_f64();
+
+    let root = ios_asset_file_path();
+    let root_p = std::path::PathBuf::from(&root);
+
+    let mut vrma: Vec<String> = Vec::new();
+    let mut json: Vec<String> = Vec::new();
+
+    // Walk a small set of well-known dirs (don't recurse the whole asset bundle).
+    for dir in ["models", "animations", "vrma"] {
+        let abs = root_p.join(dir);
+        let Ok(read) = std::fs::read_dir(&abs) else { continue };
+        for entry in read.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let lower = name.to_ascii_lowercase();
+            if !path.is_file() {
+                continue;
+            }
+            if lower.ends_with(".vrma") {
+                vrma.push(format!("{dir}/{name}"));
+            } else if lower.ends_with(".json") && dir != "models" {
+                json.push(format!("{dir}/{name}"));
+            }
+        }
+    }
+
+    vrma.sort();
+    vrma.dedup();
+    json.sort();
+    json.dedup();
+
+    crate::jarvis_ios_line!(
+        "[JarvisIOS] anim catalog: scanned root={} vrma={} json={}",
+        root,
+        vrma.len(),
+        json.len(),
+    );
+
+    catalog.vrma_paths = vrma;
+    catalog.json_paths = json;
+}
+
+/// Apply a single JSON pose-clip request. Mirrors `IosEmbeddedRenderer::flush_queued_json_anim_requests`
+/// but as a free function so the egui drain system can reuse it without borrowing the renderer.
+pub(crate) fn ios_apply_json_anim_request(world: &mut World, path: String) {
+    let old_stopped = world
+        .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
+        .supersede_stopped_idle_snapshot();
+    let mut clip = crate::ios_anim_json::try_build_clip(&path, world);
+    if !old_stopped.is_empty() {
+        crate::ios_anim_json::resume_idle_vrmas_on_world(world, &old_stopped);
+        world.flush();
+    }
+    if let Some(ref mut c) = clip {
+        if let Some(root) = world.resource::<IosAvatarRootEntity>().0 {
+            let settings = world.resource::<IosAvatarSettings>().clone();
+            c.stopped_idle_vrma =
+                crate::ios_anim_json::pause_matching_idle_vrma(world, root, &settings);
+            if !c.stopped_idle_vrma.is_empty() {
+                world.flush();
+            }
+        }
+    }
+    world
+        .resource_mut::<crate::ios_anim_json::IosJsonAnimPlayback>()
+        .replace_with_clip(clip);
+}
+
+/// Apply a batch of VRMA play requests. Mirrors `IosEmbeddedRenderer::flush_queued_vrma_requests`
+/// but as a free function so egui can submit clips without bouncing through the FFI mutex.
+pub(crate) fn ios_apply_vrma_requests(world: &mut World, requests: Vec<(String, bool)>) {
+    let Some(root) = world.resource::<IosAvatarRootEntity>().0 else {
+        crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: no avatar root (reload profile first)");
+        return;
+    };
+    let asset_server = world.resource::<AssetServer>().clone();
+    for (path, loop_forever) in requests {
+        if !is_safe_asset_rel(&path) {
+            crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: rejected unsafe path {path:?}");
+            continue;
+        }
+        if loop_forever {
+            world.commands().entity(root).with_children(|parent| {
+                parent
+                    .spawn(VrmaHandle(asset_server.load(path.clone())))
+                    .observe(observe_vrma_play_forever);
+            });
+        } else {
+            world.commands().entity(root).with_children(|parent| {
+                parent
+                    .spawn(VrmaHandle(asset_server.load(path.clone())))
+                    .observe(observe_vrma_play_once);
+            });
+        }
+        crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: spawned {path} loop={loop_forever}");
+    }
+    world.flush();
+}
+
+/// Drain `IosEguiAnimRequests` once per frame and forward to the same code path Swift uses.
+/// Runs in `Last` so it executes after the egui systems have populated the resource for this tick.
+fn ios_drain_egui_anim_requests(world: &mut World) {
+    let (vrma, json) = {
+        let mut req = world.resource_mut::<IosEguiAnimRequests>();
+        (core::mem::take(&mut req.vrma), core::mem::take(&mut req.json))
+    };
+    if !vrma.is_empty() {
+        ios_apply_vrma_requests(world, vrma);
+    }
+    if let Some(path) = json.into_iter().last() {
+        ios_apply_json_anim_request(world, path);
+    }
 }
 
 fn play_idle_when_vrma_loaded(trigger: On<LoadedVrma>, mut commands: Commands) {
@@ -625,15 +867,106 @@ fn sync_ios_panorbit_active_camera(
     });
 }
 
-fn jarvis_ios_vrm_load_diag(mut frames: Local<u32>, vrm_q: Query<(), With<Vrm>>) {
+fn jarvis_ios_vrm_load_diag(
+    mut frames: Local<u32>,
+    mut highest_joint_count_logged: Local<usize>,
+    mut prev_visible_count: Local<usize>,
+    vrm_q: Query<(), With<Vrm>>,
+    skinned_mesh_q: Query<(Entity, &SkinnedMesh), Added<SkinnedMesh>>,
+    visibility_q: Query<(Entity, &SkinnedMesh, &bevy::camera::visibility::ViewVisibility)>,
+    meshes: Res<Assets<Mesh>>,
+    images: Res<Assets<Image>>,
+    materials: Res<Assets<bevy::pbr::StandardMaterial>>,
+) {
     *frames += 1;
-    if *frames == 30 || *frames == 120 {
+
+    // Per-frame work (`SkinnedMesh added`, joint warnings) ALWAYS runs — these are one-shots
+    // per entity, so the cost is bounded. The expensive work below (visibility iter, mem
+    // snapshot, format_snapshot) is gated by verbosity: at NORMAL we still log every 60 frames
+    // (~1 s) instead of every 30 frames, and we never log on visibility flicker (the previous
+    // implementation logged on every flicker → up to 60 extra format!() + Mach traps per second
+    // when bones moved across the camera frustum). At QUIET / OFF we skip everything.
+    let mut highest_this_frame = 0usize;
+    for (entity, sm) in &skinned_mesh_q {
+        let joint_count = sm.joints.len();
+        highest_this_frame = highest_this_frame.max(joint_count);
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] SkinnedMesh added: entity={entity:?} joints={} {}",
+            joint_count,
+            if joint_count > 256 { "⚠ OVER_256_LIMIT" } else { "OK" },
+        );
+    }
+    if highest_this_frame > *highest_joint_count_logged {
+        *highest_joint_count_logged = highest_this_frame;
+    }
+
+    if !crate::debug_log::diag_logging_enabled() {
+        return;
+    }
+
+    // Cadence: every frame in the boot window (≤30) so we have crash diagnostics, then every
+    // 60 frames at NORMAL (was 30 before — halved log volume), every frame at DEBUG.
+    let cadence = if crate::debug_log::debug_logging_enabled() { 1 } else { 60 };
+    let should_log = *frames <= 30 || (*frames % cadence == 0);
+    if !should_log {
+        return;
+    }
+
+    // Compute visibility once, share between the count and max-joints calls.
+    let mut visible_count = 0usize;
+    let mut max_v = 0usize;
+    for (_, sm, vv) in &visibility_q {
+        if vv.get() {
+            visible_count += 1;
+            if sm.joints.len() > max_v {
+                max_v = sm.joints.len();
+            }
+        }
+    }
+    *prev_visible_count = visible_count;
+
+    let mem = crate::ios_mem_probe::format_snapshot();
+    crate::jarvis_ios_line!(
+        "[JarvisIOS] frame={}: visible_skinned={} max_visible_joints={} \
+         assets[mesh={}, image={}, material={}] {}",
+        *frames,
+        visible_count,
+        max_v,
+        meshes.len(),
+        images.len(),
+        materials.len(),
+        mem,
+    );
+
+    if *frames == 5 || *frames == 30 || *frames == 120 {
         let n = vrm_q.iter().count();
         crate::jarvis_ios_line!(
-            "[JarvisIOS] diag: update_frame={} entities_with_Vrm={}",
+            "[JarvisIOS] diag: update_frame={} entities_with_Vrm={} highest_joint_count_seen={}",
             *frames,
-            n
+            n,
+            *highest_joint_count_logged,
         );
+    }
+}
+
+/// Logs the end of every PostUpdate stage. Combined with the `app.update() leave` log,
+/// this brackets the "extract → render-graph submit" window. If we see PostUpdate end
+/// but no `leave`, the crash is in render-extract or GPU command submission.
+fn jarvis_ios_post_update_marker(
+    mut frames: Local<u32>,
+    mut last_logged_frame: Local<u32>,
+) {
+    *frames += 1;
+    if !crate::debug_log::diag_logging_enabled() {
+        return;
+    }
+    // Boot window: log every frame for the first 30 to catch crash gaps. Steady-state: every
+    // 120 frames (~2 s at 60Hz). DEBUG verbosity drops the gate to 30 (~0.5 s).
+    let cadence = if crate::debug_log::debug_logging_enabled() { 30 } else { 120 };
+    if *frames <= 30 || (*frames - *last_logged_frame) >= cadence {
+        let mem = crate::ios_mem_probe::format_snapshot();
+        crate::jarvis_ios_line!("[JarvisIOS] PostUpdate end: frame={} {}", *frames, mem);
+        *last_logged_frame = *frames;
     }
 }
 
@@ -665,6 +998,16 @@ pub struct IosEmbeddedRenderer {
     vrma_play_queue: Mutex<Vec<(String, bool)>>,
     /// Pose-library JSON paths relative to `JARVIS_ASSET_ROOT` (last queued wins).
     json_anim_queue: Mutex<Vec<String>>,
+    /// Rolling buffer of recent `app.update()` durations in microseconds; used by the periodic
+    /// histogram emit to surface stalls that the slow-frame detector misses (e.g. groups of
+    /// frames hovering around 25 ms — visible as judder but never crossing the 32 ms gate).
+    frame_us_ring: Mutex<Vec<u32>>,
+    /// Frame index at which the histogram was last emitted (used together with
+    /// `frame_us_ring` to log a summary every ~120 frames).
+    last_hist_frame: u64,
+    /// Monotonic frame counter for the renderer (independent of the Bevy `FrameCount` resource;
+    /// we need it before `World` is set up too).
+    render_frame_idx: u64,
 }
 
 impl IosEmbeddedRenderer {
@@ -708,6 +1051,8 @@ impl IosEmbeddedRenderer {
         app.insert_resource(IosMToonOverridesJson(mtoon_overrides_json));
         app.init_resource::<IosAvatarRootEntity>();
         app.init_resource::<IosExpressionsState>();
+        app.init_resource::<IosAnimationCatalog>();
+        app.init_resource::<IosEguiAnimRequests>();
 
         app.add_plugins(
             DefaultPlugins
@@ -755,14 +1100,22 @@ impl IosEmbeddedRenderer {
                 .after(EguiPostUpdateSet::ProcessOutput)
                 .before(bevy_panorbit_camera::PanOrbitCameraSystemSet),
         );
+        // PostUpdate end-marker runs LAST so we can see the schedule completed before render-extract.
+        // Crash gap = (PostUpdate end logged) but NOT (app.update leave) → render extract / GPU submit.
+        app.add_systems(Last, jarvis_ios_post_update_marker);
+        // Drain egui-submitted animation requests right before the marker so user clicks in the
+        // egui window queue clips for the same tick (no one-frame delay vs the FFI path).
+        app.add_systems(Last, ios_drain_egui_anim_requests.before(jarvis_ios_post_update_marker));
         app.add_systems(
             Update,
             (
+                log_render_device_limits,
                 ios_apply_spring_preset_on_vrm_ready,
                 ios_apply_mtoon_overrides_on_vrm_ready,
                 ios_collect_expression_presets,
                 handle_deferred_vrm_load,
                 jarvis_ios_vrm_load_diag,
+                ios_refresh_animation_catalog,
             ),
         );
         app.add_systems(
@@ -798,13 +1151,16 @@ impl IosEmbeddedRenderer {
 
         Some(Self {
             app,
-            render_diag_frames_to_log: 5,
+            render_diag_frames_to_log: 30,
             render_poisoned: AtomicBool::new(false),
             primary_window,
             touch_queue: Mutex::new(Vec::new()),
             profile_reload_pending: Mutex::new(false),
             vrma_play_queue: Mutex::new(Vec::new()),
             json_anim_queue: Mutex::new(Vec::new()),
+            frame_us_ring: Mutex::new(Vec::with_capacity(240)),
+            last_hist_frame: 0,
+            render_frame_idx: 0,
         })
     }
 
@@ -845,28 +1201,7 @@ impl IosEmbeddedRenderer {
             return;
         }
         let path = drained.into_iter().last().unwrap();
-        let world = self.app.world_mut();
-        let old_stopped = world
-            .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
-            .supersede_stopped_idle_snapshot();
-        let mut clip = crate::ios_anim_json::try_build_clip(&path, world);
-        if !old_stopped.is_empty() {
-            crate::ios_anim_json::resume_idle_vrmas_on_world(world, &old_stopped);
-            world.flush();
-        }
-        if let Some(ref mut c) = clip {
-            if let Some(root) = world.resource::<IosAvatarRootEntity>().0 {
-                let settings = world.resource::<IosAvatarSettings>().clone();
-                c.stopped_idle_vrma =
-                    crate::ios_anim_json::pause_matching_idle_vrma(world, root, &settings);
-                if !c.stopped_idle_vrma.is_empty() {
-                    world.flush();
-                }
-            }
-        }
-        world
-            .resource_mut::<crate::ios_anim_json::IosJsonAnimPlayback>()
-            .replace_with_clip(clip);
+        ios_apply_json_anim_request(self.app.world_mut(), path);
     }
 
     fn flush_queued_vrma_requests(&mut self) {
@@ -877,33 +1212,7 @@ impl IosEmbeddedRenderer {
         if drained.is_empty() {
             return;
         }
-        let world = self.app.world_mut();
-        let Some(root) = world.resource::<IosAvatarRootEntity>().0 else {
-            crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: no avatar root (reload profile first)");
-            return;
-        };
-        let asset_server = world.resource::<AssetServer>().clone();
-        for (path, loop_forever) in drained {
-            if !is_safe_asset_rel(&path) {
-                crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: rejected unsafe path {path:?}");
-                continue;
-            }
-            if loop_forever {
-                world.commands().entity(root).with_children(|parent| {
-                    parent
-                        .spawn(VrmaHandle(asset_server.load(path.clone())))
-                        .observe(observe_vrma_play_forever);
-                });
-            } else {
-                world.commands().entity(root).with_children(|parent| {
-                    parent
-                        .spawn(VrmaHandle(asset_server.load(path.clone())))
-                        .observe(observe_vrma_play_once);
-                });
-            }
-            crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: spawned {path} loop={loop_forever}");
-        }
-        world.flush();
+        ios_apply_vrma_requests(self.app.world_mut(), drained);
     }
 
     fn apply_hub_profile_reload(&mut self) {
@@ -984,8 +1293,10 @@ impl IosEmbeddedRenderer {
         if self.render_poisoned.load(Ordering::Acquire) {
             return;
         }
+        let t0 = std::time::Instant::now();
         if self.render_diag_frames_to_log > 0 {
-            crate::jarvis_ios_line!("[JarvisIOS] render: app.update() enter");
+            let mem = crate::ios_mem_probe::format_snapshot();
+            crate::jarvis_ios_line!("[JarvisIOS] render: app.update() enter {mem}");
         }
         let reload = match self.profile_reload_pending.lock() {
             Ok(mut g) => core::mem::take(&mut *g),
@@ -998,9 +1309,61 @@ impl IosEmbeddedRenderer {
         self.flush_queued_vrma_requests();
         self.flush_queued_touch_inputs();
         self.app.update();
+        let elapsed = t0.elapsed();
+        self.render_frame_idx += 1;
+
+        // Maintain a rolling 240-sample frame-time ring (4 seconds at 60Hz).
+        // Periodic histogram emit catches micro-stalls that the 32 ms gate misses.
+        let elapsed_us = u32::try_from(elapsed.as_micros()).unwrap_or(u32::MAX);
+        if let Ok(mut ring) = self.frame_us_ring.lock() {
+            if ring.len() == 240 {
+                ring.remove(0);
+            }
+            ring.push(elapsed_us);
+
+            // Emit histogram every 120 frames (~2 s). Cheap arithmetic only — no heap allocs.
+            if self.render_frame_idx - self.last_hist_frame >= 120 && ring.len() >= 60 {
+                self.last_hist_frame = self.render_frame_idx;
+                if crate::debug_log::diag_logging_enabled() {
+                    let mut sorted: Vec<u32> = ring.clone();
+                    sorted.sort_unstable();
+                    let p50 = sorted[sorted.len() / 2];
+                    let p95 = sorted[(sorted.len() * 95) / 100];
+                    let p99 = sorted[(sorted.len() * 99) / 100];
+                    let max = *sorted.last().unwrap_or(&0);
+                    let avg: u64 = sorted.iter().map(|&v| v as u64).sum::<u64>() / sorted.len() as u64;
+                    let over32 = sorted.iter().filter(|&&v| v >= 32_000).count();
+                    let over16 = sorted.iter().filter(|&&v| v >= 16_700).count();
+                    crate::jarvis_ios_line!(
+                        "[JarvisIOS] frame_hist N={} avg={:.1}ms p50={:.1} p95={:.1} p99={:.1} max={:.1} hitches>=16ms={} >=32ms={}",
+                        sorted.len(),
+                        (avg as f32) / 1000.0,
+                        (p50 as f32) / 1000.0,
+                        (p95 as f32) / 1000.0,
+                        (p99 as f32) / 1000.0,
+                        (max as f32) / 1000.0,
+                        over16,
+                        over32,
+                    );
+                }
+            }
+        }
+
         if self.render_diag_frames_to_log > 0 {
-            crate::jarvis_ios_line!("[JarvisIOS] render: app.update() leave");
+            let ms = elapsed.as_millis();
+            let mem = crate::ios_mem_probe::format_snapshot();
+            crate::jarvis_ios_line!("[JarvisIOS] render: app.update() leave ({ms}ms) {mem}");
             self.render_diag_frames_to_log -= 1;
+        } else if elapsed.as_millis() >= 32 && crate::debug_log::diag_logging_enabled() {
+            // Steady-state slow-frame detector — anything ≥2 display refreshes is a visible stall.
+            // Async logger keeps the channel send cheap, but the Mach trap behind format_snapshot()
+            // costs ~100 µs each — gate it behind `diag_logging_enabled` so QUIET/OFF skips it.
+            let mem = crate::ios_mem_probe::format_snapshot();
+            crate::jarvis_ios_line!(
+                "[JarvisIOS] render: SLOW frame {}ms (>=32ms) {}",
+                elapsed.as_millis(),
+                mem,
+            );
         }
     }
 

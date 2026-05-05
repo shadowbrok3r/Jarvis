@@ -1528,9 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_vrm1"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc1b87e238b8778d6a709bd7503d0486e35abc491d10c151b1c1b0cda1803a79"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "bevy",
@@ -2913,6 +2911,7 @@ dependencies = [
  "bevy_panorbit_camera",
  "bevy_vrm1",
  "blake3",
+ "libc",
  "raw-window-handle",
  "serde",
  "serde_json",

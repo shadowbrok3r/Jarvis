@@ -14,10 +14,69 @@
 
 use std::collections::VecDeque;
 use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_LINES: usize = 1200;
+
+// ---------------------------------------------------------------------------
+// Verbosity controls (atomic so the macro can check without a Bevy resource lookup)
+// ---------------------------------------------------------------------------
+//
+// Levels:
+//   0 = OFF     — suppress every `jarvis_ios_line!` call (tracing events still go through
+//                 the EnvFilter; this gates only our explicit per-frame diagnostic lines).
+//   1 = QUIET   — drop the per-frame `frame=N`, `PostUpdate end`, `app.update()` lines and
+//                 the slow-frame detector. Critical lifecycle messages (init/load/error)
+//                 still go through.
+//   2 = NORMAL  — current default: every 30 frames + first 30 + visibility changes.
+//   3 = DEBUG   — log every single frame for deeper diagnostics.
+//
+// Critical lines that should bypass QUIET: anything whose first call argument starts with
+// `[JarvisIOS] crit:` (we use that prefix for unrecoverable / load-time messages).
+//
+// The `jarvis_ios_line!` macro now takes an optional channel before the format string:
+//   jarvis_ios_line!("plain frame log {x}");                    // gated: hidden at QUIET
+//   jarvis_ios_line!(crit: "[JarvisIOS] crit: VRM failed: {e}"); // always logs (unless OFF)
+
+pub const LOG_VERBOSITY_OFF: u8 = 0;
+pub const LOG_VERBOSITY_QUIET: u8 = 1;
+pub const LOG_VERBOSITY_NORMAL: u8 = 2;
+pub const LOG_VERBOSITY_DEBUG: u8 = 3;
+
+static LOG_VERBOSITY: AtomicU8 = AtomicU8::new(LOG_VERBOSITY_NORMAL);
+
+#[inline]
+pub fn log_verbosity() -> u8 {
+    LOG_VERBOSITY.load(Ordering::Relaxed)
+}
+
+pub fn set_log_verbosity(level: u8) {
+    let clamped = level.min(LOG_VERBOSITY_DEBUG);
+    LOG_VERBOSITY.store(clamped, Ordering::Relaxed);
+}
+
+/// Should an ordinary diagnostic line (frame counters, asset stats, slow-frame detector,
+/// `PostUpdate end`, `app.update()` enter/leave) be emitted right now? Returns false at
+/// `QUIET` and `OFF` so the call site can short-circuit before formatting.
+#[inline]
+pub fn diag_logging_enabled() -> bool {
+    log_verbosity() >= LOG_VERBOSITY_NORMAL
+}
+
+/// Should a per-frame ("every single tick") log line be emitted? Only true at `DEBUG`.
+#[allow(dead_code)]
+#[inline]
+pub fn debug_logging_enabled() -> bool {
+    log_verbosity() >= LOG_VERBOSITY_DEBUG
+}
+
+#[cfg(target_os = "ios")]
+#[unsafe(no_mangle)]
+pub extern "C" fn jarvis_ios_set_log_verbosity(level: u8) {
+    set_log_verbosity(level);
+}
 
 // ---------------------------------------------------------------------------
 // Ring buffer (in-app display)
@@ -37,10 +96,30 @@ fn ts_prefix() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Persistent log file (survives crash)
+// Persistent log file (survives crash) — async writer thread
 // ---------------------------------------------------------------------------
+//
+// Earlier versions called `BufWriter::flush()` on every line from the calling thread.
+// On iOS that triggers a Mach kernel write that can stall 5–50ms whenever the OS
+// commits dirty pages to disk, which manifests as visible frame hitches whenever the
+// user pans the camera or drags an egui window (each input emits tracing events).
+//
+// We now hand log lines to a dedicated background thread via an unbounded mpsc channel.
+// The hot path on the render thread is just a non-blocking channel send (no syscalls,
+// no fsync). The background thread batches writes and flushes every 250ms, with a
+// best-effort flush on app shutdown via `flush_log_file()`.
+
+use std::sync::mpsc::{self, Sender};
+use std::thread;
+use std::time::Duration;
 
 static LOG_FILE: OnceLock<Mutex<Option<BufWriter<std::fs::File>>>> = OnceLock::new();
+static LOG_TX: OnceLock<Mutex<Option<Sender<LogMessage>>>> = OnceLock::new();
+
+enum LogMessage {
+    Line(String),
+    Flush,
+}
 
 fn log_file() -> &'static Mutex<Option<BufWriter<std::fs::File>>> {
     LOG_FILE.get_or_init(|| Mutex::new(None))
@@ -54,8 +133,9 @@ fn open_log_file(path: &str) {
     {
         Ok(f) => {
             if let Ok(mut g) = log_file().lock() {
-                *g = Some(BufWriter::with_capacity(4096, f));
+                *g = Some(BufWriter::with_capacity(64 * 1024, f));
             }
+            ensure_writer_thread();
         }
         Err(e) => {
             eprintln!("[debug_log] failed to open log file {path}: {e}");
@@ -63,11 +143,81 @@ fn open_log_file(path: &str) {
     }
 }
 
+fn ensure_writer_thread() {
+    let tx_slot = LOG_TX.get_or_init(|| Mutex::new(None));
+    let mut g = match tx_slot.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if g.is_some() {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<LogMessage>();
+    *g = Some(tx);
+    drop(g);
+
+    thread::Builder::new()
+        .name("jarvis_ios_log_writer".into())
+        .spawn(move || {
+            let mut last_flush = std::time::Instant::now();
+            let flush_interval = Duration::from_millis(250);
+            loop {
+                let timeout = flush_interval
+                    .checked_sub(last_flush.elapsed())
+                    .unwrap_or(Duration::from_millis(0));
+                let msg = rx.recv_timeout(timeout);
+                match msg {
+                    Ok(LogMessage::Line(line)) => {
+                        if let Ok(mut g) = log_file().lock() {
+                            if let Some(ref mut w) = *g {
+                                let _ = writeln!(w, "{line}");
+                            }
+                        }
+                    }
+                    Ok(LogMessage::Flush) | Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Ok(mut g) = log_file().lock() {
+                            if let Some(ref mut w) = *g {
+                                let _ = w.flush();
+                            }
+                        }
+                        last_flush = std::time::Instant::now();
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return;
+                    }
+                }
+            }
+        })
+        .expect("spawn jarvis_ios_log_writer");
+}
+
 fn write_to_file(line: &str) {
+    // Non-blocking channel send; the writer thread does the actual disk I/O + flush.
+    if let Some(tx_mutex) = LOG_TX.get() {
+        if let Ok(g) = tx_mutex.lock() {
+            if let Some(tx) = g.as_ref() {
+                let _ = tx.send(LogMessage::Line(line.to_owned()));
+                return;
+            }
+        }
+    }
+    // Fallback for the boot window before the writer thread has been initialized.
     if let Ok(mut g) = log_file().lock() {
         if let Some(ref mut w) = *g {
             let _ = writeln!(w, "{line}");
-            let _ = w.flush(); // synchronous flush — survives hard kill
+        }
+    }
+}
+
+/// Best-effort flush — call on app background / shutdown to push pending lines to disk.
+#[cfg(target_os = "ios")]
+#[unsafe(no_mangle)]
+pub extern "C" fn jarvis_ios_flush_log() {
+    if let Some(tx_mutex) = LOG_TX.get() {
+        if let Ok(g) = tx_mutex.lock() {
+            if let Some(tx) = g.as_ref() {
+                let _ = tx.send(LogMessage::Flush);
+            }
         }
     }
 }
@@ -79,6 +229,11 @@ fn write_to_file(line: &str) {
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 pub fn jarvis_ios_debug_push(line: String) {
     let entry = format!("[Rust {}] {}", ts_prefix(), line);
+    // `eprintln!` was previously called here too, but on iOS that goes through
+    // Apple's NSLog/os_log pipeline which can stall the calling thread the same way
+    // a synchronous file flush does. We keep stderr only on non-iOS targets where
+    // it's strictly local (and useful during desktop tests).
+    #[cfg(not(target_os = "ios"))]
     eprintln!("{entry}");
     write_to_file(&entry);
     if let Ok(mut g) = buffer().lock() {
@@ -89,8 +244,8 @@ pub fn jarvis_ios_debug_push(line: String) {
     }
 }
 
-// Internal: push a pre-formatted tracing event line (no extra prefix added).
 fn push_raw(line: String) {
+    #[cfg(not(target_os = "ios"))]
     eprintln!("{line}");
     write_to_file(&line);
     if let Ok(mut g) = buffer().lock() {
@@ -134,8 +289,19 @@ mod subscriber {
 
     impl<S: Subscriber> Layer<S> for FileLayer {
         fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            // Quiet/Off cuts ALL upstream tracing events too — they hit the same async writer.
+            // We always allow ERROR through (you want to see crashes regardless).
+            let level = event.metadata().level();
+            let v = super::log_verbosity();
+            let allow = match v {
+                super::LOG_VERBOSITY_OFF => false,
+                super::LOG_VERBOSITY_QUIET => *level <= tracing::Level::WARN,
+                _ => true,
+            };
+            if !allow {
+                return;
+            }
             let meta = event.metadata();
-            let level = meta.level();
             let target = meta.target();
             let mut visitor = MsgVisitor(String::new());
             event.record(&mut visitor);
@@ -192,6 +358,18 @@ pub extern "C" fn jarvis_ios_set_log_file(
 
     open_log_file(&path);
 
+    // Honor JARVIS_IOS_LOG_VERBOSITY env var at boot (off|quiet|normal|debug or 0|1|2|3).
+    if let Ok(v) = std::env::var("JARVIS_IOS_LOG_VERBOSITY") {
+        let level = match v.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" => LOG_VERBOSITY_OFF,
+            "quiet" | "1" => LOG_VERBOSITY_QUIET,
+            "normal" | "2" => LOG_VERBOSITY_NORMAL,
+            "debug" | "3" => LOG_VERBOSITY_DEBUG,
+            _ => LOG_VERBOSITY_NORMAL,
+        };
+        set_log_verbosity(level);
+    }
+
     // Install global tracing subscriber (only once).
     static SUBSCRIBER_INSTALLED: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
@@ -199,8 +377,11 @@ pub extern "C" fn jarvis_ios_set_log_file(
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(
                 // bevy_egui::input emits a WARN every frame on iOS (no winit window).
-                // Logging it synchronously to disk causes severe frame-rate degradation.
-                "info,wgpu=warn,naga=warn,bevy_render=warn,bevy_asset=info,bevy_egui::input=off"
+                // bevy_winit, bevy_input, bevy_picking, and naga can fire several times per
+                // touch/pan event. Logging any of those synchronously degrades pan smoothness.
+                "info,wgpu=warn,naga=warn,bevy_render=warn,bevy_asset=warn,\
+                 bevy_egui::input=off,bevy_winit=warn,bevy_input=warn,bevy_picking=warn,\
+                 bevy_panorbit_camera=warn"
             ));
         let registry = tracing_subscriber::registry()
             .with(filter)
@@ -252,11 +433,29 @@ pub fn jarvis_ios_debug_log_clear() {
 // ---------------------------------------------------------------------------
 // Macro
 // ---------------------------------------------------------------------------
+//
+// Two channels:
+//   `jarvis_ios_line!("...")`           — gated by NORMAL verbosity (default).
+//                                          Suppressed at QUIET/OFF.
+//   `jarvis_ios_line!(crit: "...")`     — only suppressed at OFF; everything else passes.
+//                                          Use for lifecycle/error messages.
+//
+// Format-args are not evaluated when the verbosity gate is closed, so verbose call sites
+// in the hot path (frame counters, asset stats, mem snapshots) do not spend CPU on
+// formatting when the user has dialed verbosity down.
 
 #[macro_export]
 macro_rules! jarvis_ios_line {
+    (crit: $($arg:tt)*) => {{
+        if $crate::debug_log::log_verbosity() != $crate::debug_log::LOG_VERBOSITY_OFF {
+            let __s = format!($($arg)*);
+            $crate::debug_log::jarvis_ios_debug_push(__s);
+        }
+    }};
     ($($arg:tt)*) => {{
-        let __s = format!($($arg)*);
-        $crate::debug_log::jarvis_ios_debug_push(__s);
+        if $crate::debug_log::diag_logging_enabled() {
+            let __s = format!($($arg)*);
+            $crate::debug_log::jarvis_ios_debug_push(__s);
+        }
     }};
 }

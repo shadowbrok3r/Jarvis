@@ -152,9 +152,51 @@ fn build_manifest_value(settings: &Settings, revision: u64) -> Value {
 
     // Any other `.vrm` / `.vrma` under `./assets/` so iOS can hot-swap models without changing
     // desktop `model_path` first (manifest previously only listed the active VRM + idle VRMA).
+    //
+    // Special case: when both `foo.vrm` and `foo.ios.vrm` exist, we only ship `foo.ios.vrm` —
+    // the iOS app's `resolve_ios_variant_path` will pick it up automatically when something
+    // requests `foo.vrm`. Saves 100+ MB of wasted sync bandwidth on heavy character VRMs.
     const MAX_SYNC_VRM: usize = 120;
     let mut seen_paths: HashSet<String> = assets.iter().map(|a| a.path.clone()).collect();
-    for rel in collect_assets_by_extensions(&root, &root, &["vrm", "vrma"], MAX_SYNC_VRM) {
+    let candidate_vrms = collect_assets_by_extensions(&root, &root, &["vrm", "vrma"], MAX_SYNC_VRM);
+    let ios_variant_set: HashSet<String> = candidate_vrms
+        .iter()
+        .filter(|p| p.to_ascii_lowercase().ends_with(".ios.vrm"))
+        .cloned()
+        .collect();
+    let supplanted_sources: HashSet<String> = ios_variant_set
+        .iter()
+        .filter_map(|ios_path| {
+            // Strip the trailing ".ios.vrm" (8 chars) and re-append ".vrm" to recover the source.
+            ios_path
+                .strip_suffix(".ios.vrm")
+                .or_else(|| ios_path.strip_suffix(".IOS.VRM"))
+                .map(|stem| format!("{stem}.vrm"))
+        })
+        .collect();
+
+    // If the ACTIVE model is supplanted by an .ios.vrm sibling, swap the manifest's `vrm` entry
+    // to point at the variant so iOS only downloads the slim copy.
+    if let Some(active) = assets.iter_mut().find(|a| a.role == "vrm") {
+        let candidate = active
+            .path
+            .strip_suffix(".vrm")
+            .or_else(|| active.path.strip_suffix(".VRM"))
+            .map(|stem| format!("{stem}.ios.vrm"));
+        if let Some(c) = candidate {
+            if ios_variant_set.contains(&c) {
+                seen_paths.remove(&active.path);
+                active.url = format!("/jarvis-ios/v1/asset/{c}");
+                active.path = c.clone();
+                seen_paths.insert(c);
+            }
+        }
+    }
+
+    for rel in candidate_vrms {
+        if supplanted_sources.contains(&rel) {
+            continue;
+        }
         if seen_paths.insert(rel.clone()) {
             let role = if rel
                 .rsplit_once('.')

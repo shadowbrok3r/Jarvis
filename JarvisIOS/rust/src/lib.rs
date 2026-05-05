@@ -17,6 +17,8 @@ mod ios_egui_ui;
 #[cfg(target_os = "ios")]
 mod ios_anim_json;
 #[cfg(target_os = "ios")]
+mod ios_mem_probe;
+#[cfg(target_os = "ios")]
 mod ios_bevy;
 
 /// Opaque pointers cross the bridge as `*mut u8` (Swift: `UnsafeMutableRawPointer`).

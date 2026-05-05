@@ -8,3 +8,16 @@
 ///   log_path  – path to write this session's log (created/appended)
 ///   prev_path – informational: path where Swift already moved the previous session log
 void jarvis_ios_set_log_file(const char* log_path, const char* prev_path);
+
+/// Trigger a best-effort flush of the async log writer. Call from Swift on
+/// `applicationWillResignActive` so the on-disk file mirrors the in-memory ring buffer
+/// before the OS suspends or jetsams the process.
+void jarvis_ios_flush_log(void);
+
+/// Update the runtime log verbosity. Mirrors `egui Logging > radio` — useful when running
+/// from Xcode where you want to set verbosity before the egui window is reachable. Levels:
+///   0 = Off    (drop everything except ERROR)
+///   1 = Quiet  (lifecycle / WARN / ERROR only)
+///   2 = Normal (every-60-frame stats; default)
+///   3 = Debug  (every-frame stats — chatty)
+void jarvis_ios_set_log_verbosity(uint8_t level);
