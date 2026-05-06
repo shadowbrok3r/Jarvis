@@ -33,3 +33,5 @@ JarvisIOS/RustLibs/**
 JarvisIOS/Sources/JarvisIOS/assets/*
 !JarvisIOS/Sources/JarvisIOS/assets/.gitkeep
 .dev
+
+AGENTS.md
