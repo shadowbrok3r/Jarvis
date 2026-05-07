@@ -203,6 +203,7 @@ async fn run_mcp_server(
             server_factory,
             session_manager,
             StreamableHttpServerConfig::default()
+                .disable_allowed_hosts()
                 .with_sse_keep_alive(Some(Duration::from_secs(15))),
         );
 
