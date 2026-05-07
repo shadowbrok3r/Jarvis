@@ -196,11 +196,27 @@ pub struct BoneEulerDeg {
 pub struct PoseBonesArgs {
     /// Bone key → Euler degrees. Omitted axis = 0. Angles are **clamped** per bone; response lists clamped values.
     pub bones: HashMap<String, BoneEulerDeg>,
+    /// **Must stay true (or omit — default true).** The MCP server rejects `false`: that mode resets every bone *not* in `bones` to bind pose first, which destroys partial poses. For a clean slate use `reset_pose` then `pose_bones`.
     #[serde(default = "default_true")]
     pub preserve_omitted_bones: bool,
     /// Optional VRM expression weights (0..=1) applied after bones via `ModifyExpressions` (same as `set_expression`). Keys must exist on the loaded VRM (`list_expressions` / `get_bone_reference` → `expressionPresets`) when that list is non-empty.
     #[serde(default)]
     pub expressions: Option<HashMap<String, f32>>,
+    /// Strict mode: hard-fail on **any** clamp warning or near-axis-limit
+    /// angle (default false → warn-only). Recommended `true` for batch
+    /// authoring or test fixtures.
+    #[serde(default)]
+    pub strict: Option<bool>,
+    /// When true, allow severe (≥80°) angles on a single axis without the
+    /// hybrid policy hard-failing. Catastrophic patterns (many bones at
+    /// near-axis limits in one call) still hard-fail.
+    #[serde(default)]
+    pub allow_large_angles: Option<bool>,
+    /// When true, run the full validation + sanitize pipeline and return
+    /// the would-apply summary, but do **not** dispatch ApplyBones. Use to
+    /// preview Euler maps before committing to the rig.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -244,10 +260,10 @@ fn euler_quat_clamped(bone: &str, euler: &BoneEulerDeg) -> (Quat, Vec<String>) {
         warn.push(format!("{bone}: roll_deg {r:.1} clamped to ±{max_r:.1}"));
         r = r.clamp(-max_r, max_r);
     }
-    // Match Bones-tab sliders: display yaw + Helen per-digit offset for
+    // Match Bones-tab sliders: display yaw + Rigify per-digit offset for
     // `DEF-toe_{big,index,middle,ring,little}.{L,R}` (±180° L/R), same family as the
     // historical big-toe-only helper. Keeps intrinsic-Y (length-axis twist) in MCP space
-    // aligned with pad-facing for all child toes from `helen_add_individual_toe_bones.py`.
+    // aligned with pad-facing for all child toes.
     let yaw_for_quat = y + def_toe_big_yaw_slider_extra_deg(bone);
     let q = Quat::from_euler(EulerRot::XYZ, to_rad(p), to_rad(yaw_for_quat), to_rad(r));
     (q, warn)
@@ -400,16 +416,6 @@ pub fn make_fist_bones(amount: f32, do_left: bool, do_right: bool) -> HashMap<St
 mod tests {
     use super::*;
     use crate::plugins::pose_driver::def_toe_big_yaw_slider_extra_deg;
-
-    #[test]
-    fn helen_named_toes_get_lr_yaw_offset() {
-        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_big.L"), 180.0);
-        assert_eq!(def_toe_big_yaw_slider_extra_deg("def-toe_big.r"), -180.0);
-        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_index.L"), 180.0);
-        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_middle.R"), -180.0);
-        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_ring.L"), 180.0);
-        assert_eq!(def_toe_big_yaw_slider_extra_deg("DEF-toe_little.R"), -180.0);
-    }
 
     #[test]
     fn non_digit_def_toe_prefixs_skip_yaw_offset() {

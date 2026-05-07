@@ -96,8 +96,8 @@ For anything beyond a single ad-hoc layer add, use **`set_layer_stack`** instead
 The `pose_hold` driver overlays a saved pose at full weight every frame, so it's the natural way to give every VRM a sane "arms relaxed at sides" foundation under the procedural layers. Authoring loop:
 
 1. **`load_vrm`** + wait one frame, then **`reset_pose`** to start from the rig's bind.
-2. **`pose_bones`** to sculpt arms-down (see [POSE_GUIDE → Building a custom arms-down rest pose](./POSE_GUIDE.md#building-a-custom-arms-down-rest-pose-per-vrm) for the mirror sign convention).
-3. **`capture_pose_views`** with `front`, `left`, `front_left` to verify the silhouette.
+2. **`pose_bones`** to sculpt arms-down (see [POSE_GUIDE → Arms-down rest](./POSE_GUIDE.md#arms-down-rest-quick-reference) for mirror `roll_deg` on upper arms).
+3. **`capture_pose_views`** with `front`, `left`, `front_left` to verify the silhouette (`output_dir` optional on the server).
 4. **`save_current_pose`** `{ name: "<vrm>_natural_rest", bones: ["leftShoulder","rightShoulder","leftUpperArm","rightUpperArm","leftLowerArm","rightLowerArm","leftHand","rightHand"], category: "idle" }` — only the arm chain, so the foundation doesn't freeze legs / hips when overlaid.
 5. **`set_layer_stack`** with `pose_hold(<vrm>_natural_rest)` as the bottom override layer + procedural deltas on top.
 
