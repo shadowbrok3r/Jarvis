@@ -17,23 +17,30 @@ pub mod graphics_advanced;
 pub mod home_assistant;
 pub mod network_trace;
 pub mod pose_controller;
+pub mod pose_tools_toolbar;
 pub mod rig_editor;
 pub mod sections;
 pub mod services;
 mod widgets;
+pub mod workspaces;
 
 pub use chat::ChatUiState;
 pub use pose_controller::{KimodoClientRes, PoseControllerUiState};
 
+use bevy::animation::AnimationPlayer;
 use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use bevy_vrm1::prelude::Vrma;
 
 use jarvis_avatar::act::Emotion;
 use jarvis_avatar::config::Settings;
 
 use crate::plugins::chat_pipeline_status::ChatPipelineStatus;
 use crate::plugins::jarvis_ios_hub::write_vrm_graphics_override;
+use crate::plugins::native_anim_player::ActiveNativeAnimation;
+use crate::plugins::pose_driver::PoseCommandSender;
+use crate::plugins::rig_editor::RigEditorState;
 use crate::plugins::traffic_log::TrafficChannel;
 
 pub struct DebugUiPlugin;
@@ -42,11 +49,15 @@ impl Plugin for DebugUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(EguiPlugin::default())
             .init_resource::<DebugUiState>()
+            .init_resource::<workspaces::ServiceHubUiState>()
+            .init_resource::<workspaces::GraphicsWorkspaceUiState>()
+            .init_resource::<workspaces::DiagnosticsUiState>()
             .add_systems(
                 Update,
                 (
+                    rig_editor::rig_editor_viewport_hover,
                     rig_editor::rig_editor_viewport_pick,
-                    rig_editor::rig_editor_alt_drag_twist,
+                    rig_editor::rig_editor_axis_drag,
                 )
                     .chain(),
             )
@@ -54,6 +65,7 @@ impl Plugin for DebugUiPlugin {
                 EguiPrimaryContextPass,
                 (
                     draw_menu_bar,
+                    pose_tools_toolbar::draw_pose_tools_toolbar,
                     draw_restore_defaults_modal,
                     draw_about_window,
                     chat::draw_chat_window,
@@ -72,11 +84,24 @@ impl Plugin for DebugUiPlugin {
                     anim_layers::draw_anim_layers_window,
                     emotion_mappings::draw_emotion_mappings_window,
                     home_assistant::draw_home_assistant_window,
-                    network_trace::draw_network_trace_window,
                 )
                     .chain(),
             )
-            .add_systems(EguiPrimaryContextPass, rig_editor::draw_rig_editor_window)
+            .add_systems(
+                EguiPrimaryContextPass,
+                network_trace::draw_network_trace_window
+                    .after(home_assistant::draw_home_assistant_window),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                (
+                    workspaces::draw_service_hub_window,
+                    workspaces::draw_graphics_workspace_window,
+                    workspaces::draw_diagnostics_workspace_window,
+                )
+                    .chain()
+                    .after(network_trace::draw_network_trace_window),
+            )
             .add_systems(
                 EguiPrimaryContextPass,
                 graphics_advanced::apply_mtoon_material_live_preview
@@ -94,9 +119,69 @@ impl Plugin for DebugUiPlugin {
                     apply::apply_exposure,
                     apply::apply_sun_light,
                     apply::apply_ground_material,
+                    spacebar_global_pause_toggle,
                 ),
             );
     }
+}
+
+/// Global Spacebar pause/play. Pauses the [`ActiveNativeAnimation`] sampler
+/// **and** every `AnimationPlayer` (idle VRMA) in one tap, then resumes them
+/// on the next press. Skipped while egui owns keyboard focus (so typing in
+/// any text field never triggers a global pause).
+fn spacebar_global_pause_toggle(
+    mut contexts: EguiContexts,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut active: ResMut<ActiveNativeAnimation>,
+    mut players_q: Query<&mut AnimationPlayer>,
+    mut state: ResMut<DebugUiState>,
+) {
+    if !keys.just_pressed(KeyCode::Space) {
+        return;
+    }
+    if matches!(contexts.ctx_mut(), Ok(ctx) if ctx.wants_keyboard_input()) {
+        return;
+    }
+
+    // Decide the unified target state. If the native player has any clip
+    // we follow its current pause state; otherwise we use whether any
+    // AnimationPlayer reports a non-paused active anim.
+    let any_player_playing = players_q.iter().any(|p| {
+        p.playing_animations()
+            .any(|(_id, anim)| !anim.is_paused())
+    });
+    let target_paused = if active.is_playing() {
+        !active.is_paused()
+    } else {
+        any_player_playing
+    };
+
+    // Sync native sampler.
+    if active.is_playing() && active.is_paused() != target_paused {
+        active.toggle_paused();
+    }
+
+    // Sync every AnimationPlayer.
+    let mut players_touched = 0usize;
+    for mut player in players_q.iter_mut() {
+        if target_paused {
+            player.pause_all();
+        } else {
+            player.resume_all();
+        }
+        players_touched += 1;
+    }
+
+    state.pose_controller.status = Some(format!(
+        "{} (space) — native:{} players:{}",
+        if target_paused { "Paused" } else { "Resumed" },
+        if active.is_playing() {
+            if active.is_paused() { "paused" } else { "playing" }
+        } else {
+            "—"
+        },
+        players_touched,
+    ));
 }
 
 /// Transient debug-UI state that does NOT round-trip through `config/user.toml`.
@@ -192,10 +277,16 @@ impl Default for LiveTestUiState {
 
 fn draw_menu_bar(
     mut contexts: EguiContexts,
+    mut commands: Commands,
     mut settings: ResMut<Settings>,
     mut state: ResMut<DebugUiState>,
     mut exit: MessageWriter<AppExit>,
     pipeline: Res<ChatPipelineStatus>,
+    rig: Res<RigEditorState>,
+    sender: Option<Res<PoseCommandSender>>,
+    mut active_anim: ResMut<ActiveNativeAnimation>,
+    vrma_q: Query<Entity, With<Vrma>>,
+    mut players_q: Query<&mut AnimationPlayer>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -212,6 +303,9 @@ fn draw_menu_bar(
         };
     }
 
+    let vrma_entities: Vec<Entity> = vrma_q.iter().collect();
+    let pose_controller_open = settings.ui.show_pose_controller;
+
     egui::TopBottomPanel::top("jarvis_menu_bar").show(ctx, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             file_menu(ui, &mut settings, &mut state, &mut exit);
@@ -219,13 +313,33 @@ fn draw_menu_bar(
             test_menu(ui, &mut settings);
             help_menu(ui, &mut state);
 
-            // Right-aligned: pipeline (ops), save hint, app id.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new("jarvis-avatar")
-                        .color(egui::Color32::GRAY)
-                        .small(),
+            // Pose-controller-only inline strip — transport buttons + rig
+            // hover hint live here so the user always sees `[edit] hover: …
+            // selected: … axis: X` and can hit Reset / Stop native / Stop
+            // idle / Resume idle no matter which workspace tab is open.
+            // Only render when the Pose Controller surface is enabled, so
+            // users running purely in chat / services mode keep a clean
+            // menu bar.
+            if pose_controller_open {
+                ui.separator();
+                pose_controller::transport_toolbar(
+                    ui,
+                    &mut state.pose_controller,
+                    sender.as_deref(),
+                    active_anim.as_mut(),
+                    &mut commands,
+                    &vrma_entities,
+                    &mut players_q,
+                    &mut settings.pose_controller,
                 );
+                ui.separator();
+                pose_controller::draw_rig_hover_hint(ui, &mut state.pose_controller, &rig);
+            }
+
+            // Right-aligned: playback indicator, pipeline (ops), save hint.
+            // Order matters: items added inside a `right_to_left` layout
+            // appear right-to-left, so the **first** widget is rightmost.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(msg) = &state.save_status {
                     ui.colored_label(egui::Color32::from_rgb(150, 200, 150), msg);
                 }
@@ -234,6 +348,9 @@ fn draw_menu_bar(
                         .small()
                         .color(egui::Color32::from_rgb(200, 215, 255)),
                 );
+                if pose_controller_open {
+                    pose_controller::playback_indicator(ui, &active_anim);
+                }
             });
         });
     });
@@ -271,7 +388,8 @@ fn file_menu(
             .clicked()
         {
             state.save_status = Some(match Settings::load() {
-                Ok(fresh) => {
+                Ok(mut fresh) => {
+                    fresh.migrate_workspace_visibility();
                     *settings = fresh;
                     "reloaded from disk".to_string()
                 }
@@ -297,29 +415,151 @@ fn file_menu(
 
 fn view_menu(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.menu_button("View", |ui| {
-        let u = &mut settings.ui;
-        ui.checkbox(&mut u.show_chat, "Chat");
+        ui.checkbox(&mut settings.ui.show_chat, "Chat");
         ui.separator();
-        ui.checkbox(&mut u.show_avatar, "Avatar");
-        ui.checkbox(&mut u.show_camera, "Camera");
-        ui.checkbox(&mut u.show_graphics, "Graphics / lights");
+
+        ui.label(egui::RichText::new("Workspaces").small().weak());
+        ui.checkbox(&mut settings.ui.show_pose_controller, "Pose Controller")
+            .on_hover_text(
+                "Library / Animation / Bones (+expressions) / Rig / Intent Lab. \
+                 Each tab can dock to its own side (left / right / bottom / floating) \
+                 from the global Pose Tools toolbar or the per-tab ⋮ menu.",
+            );
+        ui.checkbox(&mut settings.ui.show_service_hub, "Service Hub")
+            .on_hover_text(
+                "Tabbed view of Channel hub, Gateway, TTS, MCP, and the live \
+                 Services overview — replaces five floating windows.",
+            );
+        ui.checkbox(&mut settings.ui.show_graphics_workspace, "Graphics workspace")
+            .on_hover_text(
+                "Tabbed Lights / Advanced / Look-at view — Look-at no longer needs \
+                 its own floating window.",
+            );
+        ui.checkbox(&mut settings.ui.show_diagnostics_workspace, "Diagnostics")
+            .on_hover_text(
+                "Chat pipeline, avatar Y-axis stats, and a quick-jump to the \
+                 Network trace window.",
+            );
+
+        // ---- Pose Controller per-tab show/hide ----
+        if settings.ui.show_pose_controller {
+            ui.separator();
+            ui.label(egui::RichText::new("Pose Controller panels").small().weak());
+            pose_panel_visibility_menu(ui, settings);
+        }
+
         ui.separator();
-        ui.checkbox(&mut u.show_services, "Services (all)");
-        ui.checkbox(&mut u.show_channel_hub, "Channel hub");
-        ui.checkbox(&mut u.show_gateway, "Gateway (HTTP/SSE)");
-        ui.checkbox(&mut u.show_tts, "TTS (Kokoro)");
-        ui.checkbox(&mut u.show_look_at, "Look-at");
-        ui.checkbox(&mut u.show_mcp, "MCP");
+        ui.label(egui::RichText::new("Standalone panels").small().weak());
+        anim_layers_visibility_menu(ui, settings);
+        ui.checkbox(&mut settings.ui.show_avatar, "Avatar");
+        ui.checkbox(&mut settings.ui.show_camera, "Camera");
+        ui.checkbox(&mut settings.ui.show_emotion_mappings, "Emotion Mappings");
+        ui.checkbox(&mut settings.ui.show_home_assistant, "Home Assistant");
+        ui.checkbox(&mut settings.ui.show_graphics_advanced, "Graphics Advanced (legacy)");
+        ui.checkbox(&mut settings.ui.show_network_trace, "Network trace");
+
         ui.separator();
-        ui.checkbox(&mut u.show_pose_controller, "Pose Controller");
-        ui.checkbox(&mut u.show_rig_editor, "Rig editor (pick + springs)");
-        ui.checkbox(&mut u.show_graphics_advanced, "Graphics Advanced");
-        ui.checkbox(&mut u.show_anim_layers, "Animation Layers");
-        ui.checkbox(&mut u.show_emotion_mappings, "Emotion Mappings");
-        ui.separator();
-        ui.checkbox(&mut u.show_home_assistant, "Home Assistant");
-        ui.checkbox(&mut u.show_network_trace, "Network trace");
+        ui.menu_button("Legacy single-service windows", |ui| {
+            let u = &mut settings.ui;
+            ui.checkbox(&mut u.show_graphics, "Graphics / lights (legacy)");
+            ui.checkbox(&mut u.show_services, "Services (legacy)");
+            ui.checkbox(&mut u.show_channel_hub, "Channel hub (legacy)");
+            ui.checkbox(&mut u.show_gateway, "Gateway (legacy)");
+            ui.checkbox(&mut u.show_tts, "TTS (legacy)");
+            ui.checkbox(&mut u.show_look_at, "Look-at (legacy)");
+            ui.checkbox(&mut u.show_mcp, "MCP (legacy)");
+        });
     });
+}
+
+/// Per-Pose-Controller-tab show/hide rows — each row is `[ ☑ Tab ] [ side ▼ ]`.
+fn pose_panel_visibility_menu(ui: &mut egui::Ui, settings: &mut Settings) {
+    use pose_controller::PoseControllerTab;
+    let default_side = settings.ui.pose_controller_dock_side.clone();
+    for tab in PoseControllerTab::all() {
+        let key = tab.config_key().to_string();
+        let current = settings
+            .ui
+            .pose_controller_tab_dock_sides
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| default_side.clone());
+        let visible = current != "hidden";
+        ui.horizontal(|ui| {
+            let mut new_visible = visible;
+            if ui.checkbox(&mut new_visible, tab.label()).changed() {
+                if new_visible {
+                    settings.ui.pose_controller_tab_dock_sides.remove(&key);
+                } else {
+                    settings
+                        .ui
+                        .pose_controller_tab_dock_sides
+                        .insert(key.clone(), "hidden".to_string());
+                }
+            }
+            ui.menu_button(format!("{} ▼", side_label_for(&current)), |ui| {
+                let mut send = |ui: &mut egui::Ui, label: &str, target: &str| {
+                    let active = current == target;
+                    if ui
+                        .add_enabled(!active, egui::Button::new(label))
+                        .clicked()
+                    {
+                        settings
+                            .ui
+                            .pose_controller_tab_dock_sides
+                            .insert(key.clone(), target.to_string());
+                        ui.close();
+                    }
+                };
+                send(ui, "◀ Left", "left");
+                send(ui, "▶ Right", "right");
+                send(ui, "▼ Bottom", "bottom");
+                send(ui, "⬚ Floating", "floating");
+                ui.separator();
+                if ui.button("↺ Default side").clicked() {
+                    settings.ui.pose_controller_tab_dock_sides.remove(&key);
+                    ui.close();
+                }
+            });
+        });
+    }
+}
+
+/// Animation Layers show/hide + side picker — exposed under the View menu's
+/// "Standalone panels" group for parity with the per-tab pose menu.
+fn anim_layers_visibility_menu(ui: &mut egui::Ui, settings: &mut Settings) {
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut settings.ui.show_anim_layers, "Animation Layers");
+        let current = settings.ui.anim_layers_dock_side.clone();
+        ui.menu_button(format!("{} ▼", side_label_for(&current)), |ui| {
+            let mut button = |ui: &mut egui::Ui, label: &str, target: &str| {
+                let active = current == target;
+                if ui
+                    .add_enabled(!active, egui::Button::new(label))
+                    .clicked()
+                {
+                    settings.ui.anim_layers_dock_side = target.to_string();
+                    settings.ui.show_anim_layers = true;
+                    ui.close();
+                }
+            };
+            button(ui, "▼ Bottom (dopesheet)", "bottom");
+            button(ui, "◀ Left", "left");
+            button(ui, "▶ Right", "right");
+            button(ui, "⬚ Floating", "floating");
+        });
+    });
+}
+
+fn side_label_for(side: &str) -> &'static str {
+    match side {
+        "left" => "◀",
+        "right" => "▶",
+        "bottom" => "▼",
+        "floating" => "⬚",
+        "hidden" => "⊘",
+        _ => "—",
+    }
 }
 
 fn test_menu(ui: &mut egui::Ui, settings: &mut Settings) {
@@ -380,7 +620,8 @@ fn draw_restore_defaults_modal(
                     .clicked()
                 {
                     state.save_status = Some(match Settings::restore_defaults() {
-                        Ok(fresh) => {
+                        Ok(mut fresh) => {
+                            fresh.migrate_workspace_visibility();
                             *settings = fresh;
                             "restored defaults → reloaded".to_string()
                         }
@@ -405,19 +646,45 @@ fn draw_about_window(mut contexts: EguiContexts, mut state: ResMut<DebugUiState>
     egui::Window::new("About jarvis-avatar")
         .collapsible(false)
         .resizable(false)
+        .default_width(440.0)
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.label("Native Rust Bevy VRM client for IronClaw.");
-            ui.separator();
-            ui.label("Keybinds:");
-            ui.monospace("  LMB drag     orbit camera");
-            ui.monospace("  MMB drag     pan camera");
-            ui.monospace("  scroll       zoom");
-            ui.monospace("  Ctrl+Enter   (chat) send message");
-            ui.separator();
-            ui.label("Config files:");
-            ui.monospace("  config/default.toml   factory defaults");
-            ui.monospace("  config/user.toml      your overrides");
+            egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
+                ui.label("Native Rust Bevy VRM client for IronClaw.");
+                ui.separator();
+
+                ui.label("Keybinds:");
+                ui.monospace("  LMB drag     orbit camera");
+                ui.monospace("  MMB drag     pan camera");
+                ui.monospace("  scroll       zoom");
+                ui.monospace("  Ctrl+Enter   (chat) send message");
+                ui.monospace("  RMB on bone  pick a bone (rig edit mode)");
+                ui.monospace("  Shift+drag   precision (rig handle / bone slider)");
+                ui.separator();
+
+                ui.label("Pose Controller tips:");
+                ui.small(
+                    "• Right-click a bone row to reset that bone to rest.\n\
+                     • Pop tabs out into floating windows from the tab bar (📌).\n\
+                     • Switch the dock side or undock the whole panel from the\n  workspace header (Left / Right / Float).\n\
+                     • Mirror modes: realtime toggle in the Rig tab + per-chain\n  one-shot mirror actions (arm / leg / side / all paired).\n\
+                     • Bone-list slider Shift = 0.1× sensitivity for fine tuning.",
+                );
+                ui.separator();
+
+                ui.label("Workspaces (Phase-5 consolidation):");
+                ui.small(
+                    "• Service Hub — Channel hub, Gateway, TTS, MCP and the live\n  Services overview in one tabbed window.\n\
+                     • Graphics workspace — Lights, Advanced shortcut, Look-at.\n\
+                     • Diagnostics — pipeline status, avatar Y-axis stats, jump\n  to Network trace.\n\
+                     • The legacy single-service windows still work; toggle them\n  in View → \"Legacy single-service windows\".",
+                );
+                ui.separator();
+
+                ui.label("Config files:");
+                ui.monospace("  config/default.toml   factory defaults");
+                ui.monospace("  config/user.toml      your overrides");
+            });
         });
     state.show_about = open;
 }

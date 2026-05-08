@@ -1,746 +1,1109 @@
-//! **Rig editor** window: viewport bone picking + euler controls, axis gizmo
-//! (drawn in-world by [`crate::plugins::rig_editor`]), and VRMC spring joint
-//! tuning (`SpringJointProps`).
+//! **Rig editor** — now hosted as a tab inside the Pose Controller window.
+//!
+//! Provides:
+//! * viewport hover (over deforming bones only),
+//! * click-to-select via LMB in edit mode,
+//! * RGB axis rings around the selected joint with hover-pick,
+//! * axis-aware drag rotation (no longer hardcoded to local Z),
+//! * VRMC spring joint / collider tuning panels.
+//!
+//! The tab is rendered by [`rig_tab`] from
+//! [`crate::plugins::debug_ui::pose_controller::draw_pose_controller_window`].
+//! The viewport interaction systems live here as well so they can update
+//! [`super::DebugUiState`] without a `plugins` ↔ `debug_ui` cycle.
 
 use std::collections::HashMap;
 
+use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, egui};
-use bevy_vrm1::prelude::{ColliderShape, SpringJointProps, SpringNodeRegistry, Vrm, VrmPath};
+use bevy_vrm1::prelude::{
+    ColliderShape, RestGlobalTransform, SpringJointProps, SpringNodeRegistry, Vrm, VrmPath,
+};
 
 use jarvis_avatar::config::Settings;
 
+use crate::plugins::mirror::{MirrorChain, MirrorState, chain_bones, mirror_quat, resolve_pair};
 use crate::plugins::pose_driver::{
-    BoneSnapshotHandle, IndexedBones, PoseCommand, PoseCommandSender,
+    BoneSnapshotHandle, IndexedBones, PoseCommand, PoseCommandSender, is_vrm_humanoid_bone,
 };
-use crate::plugins::rig_editor::RigEditorState;
+use crate::plugins::rig_editor::{
+    HoverSource, RigEditAxis, RigEditorState, axis_handle_angle, axis_handle_world,
+    bone_bind_world_rot,
+};
 use crate::plugins::spring_preset;
 
-pub fn draw_rig_editor_window(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<Settings>,
-    mut rig: ResMut<RigEditorState>,
-    mut debug: ResMut<super::DebugUiState>,
-    indexed: Option<Res<IndexedBones>>,
-    sender: Option<Res<PoseCommandSender>>,
-    vrm_q: Query<(&VrmPath, &Name, Option<&SpringNodeRegistry>), With<Vrm>>,
-    mut springs: Query<(Entity, Option<&Name>, &mut SpringJointProps)>,
-    mut colliders: Query<(Entity, Option<&Name>, &mut ColliderShape)>,
+/// Bundled `SystemParam` so the Pose Controller window can pull in the rig
+/// editor's resources without blowing past Bevy's per-system parameter limit.
+#[derive(SystemParam)]
+pub struct RigTabSystemParam<'w, 's> {
+    pub rig: ResMut<'w, RigEditorState>,
+    pub mirror: ResMut<'w, MirrorState>,
+    pub vrm_q: Query<
+        'w,
+        's,
+        (
+            &'static VrmPath,
+            &'static Name,
+            Option<&'static SpringNodeRegistry>,
+        ),
+        With<Vrm>,
+    >,
+    pub springs: Query<'w, 's, (Entity, Option<&'static Name>, &'static mut SpringJointProps)>,
+    pub colliders: Query<'w, 's, (Entity, Option<&'static Name>, &'static mut ColliderShape)>,
+}
+
+/// Pose Controller "Rig" tab — viewport / select / spring panels in one body.
+///
+/// Reusing the existing `pc.bone_euler` map and shared `apply_euler` path means
+/// edits made via the in-world axis rings stay in sync with the Bones tab
+/// sliders (and DEF-toe yaw cosmetic still applies via
+/// `send_apply_bones_euler_deg`).
+pub fn rig_tab(
+    ui: &mut egui::Ui,
+    pc: &mut super::pose_controller::PoseControllerUiState,
+    settings: &mut Settings,
+    sender: Option<&PoseCommandSender>,
+    indexed: Option<&IndexedBones>,
+    rig_params: &mut RigTabSystemParam,
 ) {
-    if !settings.ui.show_rig_editor {
-        return;
+    // Disjoint field borrows so the closure captured by `ScrollArea` can also
+    // see `springs`/`colliders` without a re-borrow conflict on `rig_params`.
+    let RigTabSystemParam {
+        rig,
+        mirror,
+        vrm_q,
+        springs,
+        colliders,
+    } = rig_params;
+    let rig: &mut RigEditorState = rig;
+    let mirror: &mut MirrorState = mirror;
+
+    ui.horizontal(|ui| {
+        ui.toggle_value(&mut rig.edit_mode, "Edit mode")
+            .on_hover_text(
+                "Master toggle for viewport hover and axis-ring drag.\n\
+                 • LMB on an axis ring → rotate around that axis.\n\
+                 • RMB on a bone → select it (LMB never selects a bone).\n\
+                 • Off = standard orbit / pan / zoom only.",
+            );
+        ui.separator();
+        ui.toggle_value(&mut rig.twist_drag_enabled, "Drag-rotate")
+            .on_hover_text(
+                "When on (and a bone is selected), LMB-drag on an axis ring rotates \
+                 the bone around that ring's axis. Alt+LMB anywhere uses the active \
+                 axis below as a fallback.",
+            );
+        ui.separator();
+        ui.toggle_value(&mut rig.invert_drag_direction, "Invert drag")
+            .on_hover_text(
+                "When on, dragging right rotates negatively (so the visible bone \
+                 follows the cursor in the opposite convention). Use this if drag \
+                 feels reversed for the way you read the rings.",
+            );
+        ui.separator();
+        ui.label("Axis:");
+        for axis in [RigEditAxis::X, RigEditAxis::Y, RigEditAxis::Z] {
+            let selected = rig.active_axis == axis;
+            let label = egui::RichText::new(axis.label()).color(srgb_to_egui(axis.base_color()));
+            if ui.selectable_label(selected, label).clicked() {
+                rig.active_axis = axis;
+            }
+        }
+    });
+    ui.small(
+        "Mesh hover / RMB-pick is limited to VRM humanoid bones. Extra deform \
+         bones (e.g. DEF-toes, ribbon-twist) can still be picked manually from \
+         the Bones tab list. Axis rings are color-coded: X red, Y green, Z \
+         blue — and they're drawn in the bone's effective rotation frame \
+         (parent_world · parent_rest_world⁻¹) so dragging always rotates \
+         around the ring you see, even on arms / hands / fingers whose parent \
+         bind isn't identity.",
+    );
+    ui.small(
+        "Only the colored handles on each ring are interactive — drag a \
+         handle to rotate around its axis. Each handle slides around its \
+         ring as you rotate, showing accumulated rotation visually.",
+    );
+
+    ui.add(egui::Slider::new(&mut rig.pick_radius_m, 0.02..=0.40).text("bone pick radius (m)"));
+    ui.add(
+        egui::Slider::new(&mut rig.gizmo_radius_m, 0.02..=0.30).text("axis ring radius (m)"),
+    );
+    ui.add(
+        egui::Slider::new(&mut rig.axis_pick_radius_px, 6.0..=48.0)
+            .text("axis handle pick radius (px)"),
+    );
+    ui.add(
+        egui::Slider::new(&mut rig.twist_drag_sensitivity, 0.05..=1.5)
+            .text("drag sensitivity (°/px)"),
+    );
+
+    ui.collapsing("Bone pick circle", |ui| {
+        ui.small(
+            "Camera-facing circle drawn at hovered / selected bone joints. \
+             Radius and opacity affect both hover and selection markers.",
+        );
+        ui.add(
+            egui::Slider::new(&mut rig.bone_pick_marker_radius_m, 0.005..=0.080)
+                .text("circle radius (m)"),
+        );
+        ui.add(
+            egui::Slider::new(&mut rig.bone_pick_marker_alpha, 0.0..=1.0).text("opacity"),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Hover color");
+            color_picker_rgb(ui, &mut rig.bone_pick_hover_color, "rig_hover_color");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Select color");
+            color_picker_rgb(ui, &mut rig.bone_pick_select_color, "rig_select_color");
+        });
+    });
+
+    ui.separator();
+    mirror_panel(ui, pc, sender, mirror);
+
+    ui.collapsing("Axis ring opacity & precision", |ui| {
+        ui.small(
+            "Visual hierarchy: ring outlines stay translucent so the colored \
+             handles read as the actual click targets. When you hover one \
+             axis, the other two dim to keep your focus on the active one.\n\n\
+             Hold Shift while dragging in the viewport (or while editing in \
+             the bone list) for precision adjustments.",
+        );
+        ui.add(
+            egui::Slider::new(&mut rig.ring_alpha, 0.05..=1.0).text("ring outline opacity"),
+        );
+        ui.add(
+            egui::Slider::new(&mut rig.handle_alpha, 0.05..=1.0).text("handle dot opacity"),
+        );
+        ui.add(
+            egui::Slider::new(&mut rig.ring_dim_factor, 0.0..=1.0)
+                .text("non-hovered axis dim"),
+        );
+        ui.add(
+            egui::Slider::new(&mut rig.shift_precision_factor, 0.02..=1.0)
+                .text("Shift precision factor"),
+        );
+    });
+
+    if let Some(msg) = &rig.last_pick_message {
+        ui.small(msg);
     }
-    let Ok(ctx) = contexts.ctx_mut() else {
+
+    ui.separator();
+    ui.label(egui::RichText::new("Selected bone").strong());
+    match rig.selected_bone.clone() {
+        None => {
+            ui.label(egui::RichText::new("(none)").italics());
+            ui.small("Click a bone in the 3D view (Edit mode on), or hover a row in the Bones tab.");
+        }
+        Some(bone) => {
+            ui.horizontal(|ui| {
+                ui.monospace(&bone);
+                let in_index = indexed.is_some_and(|i| i.contains(&bone));
+                if !in_index {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 140, 120),
+                        "not in bone index — writes will be dropped",
+                    );
+                }
+                if ui
+                    .small_button("Focus camera")
+                    .on_hover_text("Move the orbit camera focus onto this bone now.")
+                    .clicked()
+                {
+                    rig.pending_focus_camera_to_bone = Some(bone.clone());
+                }
+                if ui
+                    .small_button("Reveal in list")
+                    .on_hover_text("Switch to the Bones tab and scroll this bone into view.")
+                    .clicked()
+                {
+                    rig.pending_scroll_to_bone = Some(bone.clone());
+                }
+            });
+
+            // Per-axis sliders driven from `pc.bone_euler` so any drag in the
+            // viewport stays mirrored in the same euler buffer the Bones tab
+            // shows.
+            let mut current = pc
+                .bone_euler
+                .get(&bone)
+                .copied()
+                .unwrap_or([0.0, 0.0, 0.0]);
+            let mut changed = false;
+            for axis in [RigEditAxis::X, RigEditAxis::Y, RigEditAxis::Z] {
+                ui.horizontal(|ui| {
+                    let label = egui::RichText::new(axis.label())
+                        .color(srgb_to_egui(axis.base_color()))
+                        .strong();
+                    ui.label(label);
+                    let idx = axis.as_idx();
+                    if ui
+                        .add(egui::Slider::new(&mut current[idx], -180.0..=180.0).suffix("°"))
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+            }
+            if changed {
+                pc.bone_euler.insert(bone.clone(), current);
+                if let Some(s) = sender {
+                    super::pose_controller::send_apply_bones_euler_deg_mirrored(
+                        s,
+                        &bone,
+                        current,
+                        Some(mirror),
+                    );
+                    pc.status = Some(format!(
+                        "rig editor: {} ({:.1}°, {:.1}°, {:.1}°)",
+                        bone, current[0], current[1], current[2]
+                    ));
+                }
+            }
+            ui.small(
+                "RGB axis rings show the rotation plane for each local axis. \
+                 Hover one to pick that axis without using the toggle above.",
+            );
+        }
+    }
+
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            spring_panels(ui, settings, rig, vrm_q, springs, colliders);
+        });
+}
+
+/// Mirror controls — realtime toggle, per-bone "mirror selected to other
+/// side" button, and per-chain dropdown. All actions push through the same
+/// `PoseCommand::ApplyBones` event the bone-list and viewport drag use, so
+/// mirrored writes share retarget / spring reset / animation-layer paths.
+fn mirror_panel(
+    ui: &mut egui::Ui,
+    pc: &mut super::pose_controller::PoseControllerUiState,
+    sender: Option<&PoseCommandSender>,
+    mirror: &mut MirrorState,
+) {
+    ui.horizontal(|ui| {
+        ui.toggle_value(&mut mirror.realtime, "Realtime mirror")
+            .on_hover_text(
+                "When on, every bone-list slider drag and rig-handle rotation \
+                 also writes the mirrored value to the partner bone (e.g. \
+                 leftUpperArm + rightUpperArm). Rotation is reflected across \
+                 the rig's sagittal plane in normalized humanoid space.",
+            );
+
+        if let Some(name) = pc.mirror_chain_status.clone() {
+            ui.separator();
+            ui.colored_label(
+                egui::Color32::from_rgb(140, 200, 220),
+                egui::RichText::new(name).small(),
+            );
+        }
+    });
+
+    ui.horizontal(|ui| {
+        let selected = pc.bone_euler.is_empty();
+        let _ = selected;
+        // Per-bone mirror — operates on whichever bone the rig editor's
+        // selected_bone resolves to (synced with bone list, viewport pick).
+        let label = match (pc.bone_euler.is_empty(), pc.bone_search.is_empty()) {
+            (true, _) => "Mirror selected → partner".into(),
+            (false, _) => format!("Mirror {} entries → partner", pc.bone_euler.len()),
+        };
+        let mirror_one = ui
+            .button("Mirror current selection")
+            .on_hover_text(
+                "Snapshot the currently selected bone's rotation and apply \
+                 the mirrored value to the partner (no realtime needed).",
+            )
+            .clicked();
+        if mirror_one {
+            mirror_one_bone(pc, sender, mirror);
+        }
+        let _ = label;
+    });
+
+    egui::ComboBox::from_id_salt("rig_mirror_chain_pick")
+        .width(220.0)
+        .selected_text("Mirror chain →")
+        .show_ui(ui, |ui| {
+            for chain in [
+                MirrorChain::LeftArm,
+                MirrorChain::RightArm,
+                MirrorChain::LeftLeg,
+                MirrorChain::RightLeg,
+                MirrorChain::LeftHand,
+                MirrorChain::RightHand,
+                MirrorChain::LeftSide,
+                MirrorChain::RightSide,
+                MirrorChain::AllPaired,
+            ] {
+                if ui.button(chain.label()).clicked() {
+                    mirror_chain_action(pc, sender, chain);
+                    pc.mirror_chain_status = Some(format!("Mirrored chain: {}", chain.label()));
+                }
+            }
+        });
+}
+
+/// Mirror the rig editor's currently selected bone (or, if none, the first
+/// non-zero bone in `bone_euler`) onto its partner. Honors the existing
+/// `bone_euler` cache so the slider mirror stays consistent.
+pub(super) fn mirror_one_bone(
+    pc: &mut super::pose_controller::PoseControllerUiState,
+    sender: Option<&PoseCommandSender>,
+    mirror: &mut MirrorState,
+) {
+    let selected = pc
+        .bone_euler
+        .iter()
+        .find(|(_, v)| v.iter().any(|d| d.abs() > 1.0e-3))
+        .map(|(k, _)| k.clone());
+    let Some(bone) = selected else {
+        pc.status = Some("mirror: no edited bone to mirror".into());
         return;
     };
+    let deg = pc.bone_euler.get(&bone).copied().unwrap_or([0.0, 0.0, 0.0]);
+    // Convert primary deg → quat (uses the same DEF-toe yaw cosmetic the bone
+    // write path applies), then mirror, then re-decompose to Euler so the
+    // partner's slider buffer also updates.
+    let q = bone_euler_to_quat(&bone, deg);
+    let Some((partner, mirrored_q_arr)) = MirrorState::one_shot_partner(
+        &bone,
+        [q.x, q.y, q.z, q.w],
+    ) else {
+        pc.status = Some(format!("mirror: '{bone}' has no partner"));
+        return;
+    };
+    let mirrored_q = Quat::from_xyzw(
+        mirrored_q_arr[0],
+        mirrored_q_arr[1],
+        mirrored_q_arr[2],
+        mirrored_q_arr[3],
+    );
+    let (ex, ey, ez) = mirrored_q.to_euler(EulerRot::XYZ);
+    let mirrored_deg = [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()];
+    pc.bone_euler.insert(partner.clone(), mirrored_deg);
+    if let Some(s) = sender {
+        super::pose_controller::send_apply_bones_euler_deg(s, &partner, mirrored_deg);
+        pc.status = Some(format!("mirror: {bone} → {partner}"));
+    }
+    let _ = mirror;
+}
 
-    let mut open = settings.ui.show_rig_editor;
-    egui::Window::new("Rig editor")
-        .default_size([420.0, 520.0])
-        .resizable(true)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.label(egui::RichText::new("Viewport").strong());
+pub(super) fn mirror_chain_action(
+    pc: &mut super::pose_controller::PoseControllerUiState,
+    sender: Option<&PoseCommandSender>,
+    chain: MirrorChain,
+) {
+    let bones = chain_bones(chain);
+    let mut updates: HashMap<String, [f32; 4]> = HashMap::new();
+    let mut status_count = 0usize;
+    for src_bone in bones {
+        let Some(deg) = pc.bone_euler.get(src_bone).copied() else {
+            continue;
+        };
+        let q = bone_euler_to_quat(src_bone, deg);
+        let Some((partner, mirrored)) = MirrorState::one_shot_partner(
+            src_bone,
+            [q.x, q.y, q.z, q.w],
+        ) else {
+            // Center-line bones (hips, spine, …) under `chain_bones` — apply
+            // the mirrored quaternion to themselves so a chain mirror is
+            // idempotent.
+            if matches!(resolve_pair(src_bone), super::super::mirror::MirrorPair::Same(_)) {
+                let m = mirror_quat(q);
+                updates.insert(src_bone.to_string(), [m.x, m.y, m.z, m.w]);
+                status_count += 1;
+            }
+            continue;
+        };
+        // Update slider buffer for the partner so list/sliders match the new
+        // pose.
+        let mirrored_q = Quat::from_xyzw(mirrored[0], mirrored[1], mirrored[2], mirrored[3]);
+        let (ex, ey, ez) = mirrored_q.to_euler(EulerRot::XYZ);
+        pc.bone_euler.insert(
+            partner.clone(),
+            [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()],
+        );
+        updates.insert(partner, mirrored);
+        status_count += 1;
+    }
+    if updates.is_empty() {
+        pc.status = Some(format!("mirror chain: nothing to mirror in {}", chain.label()));
+        return;
+    }
+    if let Some(s) = sender {
+        s.send(PoseCommand::ApplyBones {
+            bones: updates,
+            preserve_omitted_bones: true,
+            blend_weight: Some(1.0),
+            transition_seconds: Some(0.0),
+        });
+        pc.status = Some(format!(
+            "mirror chain {}: {} bone(s) updated",
+            chain.label(),
+            status_count
+        ));
+    }
+}
+
+/// Replicate the same DEF-toe cosmetic + Euler conversion the bone-list write
+/// path uses, so mirrored bones land in the same normalized space as edits.
+fn bone_euler_to_quat(bone: &str, deg: [f32; 3]) -> Quat {
+    use crate::plugins::pose_driver::def_toe_big_yaw_slider_extra_deg;
+    let yaw_extra = def_toe_big_yaw_slider_extra_deg(bone);
+    Quat::from_euler(
+        EulerRot::XYZ,
+        deg[0].to_radians(),
+        (deg[1] + yaw_extra).to_radians(),
+        deg[2].to_radians(),
+    )
+}
+
+fn srgb_to_egui(c: Color) -> egui::Color32 {
+    let srgba = c.to_srgba();
+    egui::Color32::from_rgb(
+        (srgba.red.clamp(0.0, 1.0) * 255.0) as u8,
+        (srgba.green.clamp(0.0, 1.0) * 255.0) as u8,
+        (srgba.blue.clamp(0.0, 1.0) * 255.0) as u8,
+    )
+}
+
+/// Inline `[f32; 3]` sRGB color picker — egui's `color_edit_button_rgb`
+/// works on a fixed `&mut [f32; 3]`. Wrapped so the rig tab can show an
+/// interactive swatch + a small hex display next to a label.
+fn color_picker_rgb(ui: &mut egui::Ui, color: &mut [f32; 3], _id_salt: &str) {
+    ui.color_edit_button_rgb(color);
+    let r = (color[0].clamp(0.0, 1.0) * 255.0) as u8;
+    let g = (color[1].clamp(0.0, 1.0) * 255.0) as u8;
+    let b = (color[2].clamp(0.0, 1.0) * 255.0) as u8;
+    ui.monospace(format!("#{r:02x}{g:02x}{b:02x}"));
+}
+
+// ---------- Spring joint / collider sub-panels (carried over verbatim) -------
+
+fn spring_panels(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    rig: &mut RigEditorState,
+    vrm_q: &Query<
+        (
+            &VrmPath,
+            &Name,
+            Option<&SpringNodeRegistry>,
+        ),
+        With<Vrm>,
+    >,
+    springs: &mut Query<(Entity, Option<&Name>, &mut SpringJointProps)>,
+    colliders: &mut Query<(Entity, Option<&Name>, &mut ColliderShape)>,
+) {
+    ui.collapsing("VRMC spring joints", |ui| {
+        ui.label(
+            "Per-joint solver weights from the loaded VRM. Names come from the glTF \
+             node `Name` when present.",
+        );
+
+        let vrm_row = vrm_q.iter().next();
+        let (logical_vrm_path, vrm_key, vrm_display_name, joint_chain_map) =
+            if let Some((vrm_path, vrm_name, maybe_reg)) = vrm_row {
+                let logical = spring_preset::logical_vrm_path(
+                    Some(vrm_path.0.as_path()),
+                    settings.avatar.model_path.as_str(),
+                );
+                let key = spring_preset::vrm_preset_key(&logical);
+                let jp = maybe_reg
+                    .map(spring_preset::joint_to_spring_chain)
+                    .unwrap_or_default();
+                (logical, key, vrm_name.as_str().to_string(), jp)
+            } else {
+                (String::new(), String::new(), String::new(), Vec::new())
+            };
+
+        ui.collapsing("Spring / collider preset (per VRM)", |ui| {
+            ui.label(egui::RichText::new("VRM key (filename stem)").strong());
+            ui.monospace(if vrm_key.is_empty() {
+                "(no VRM entity)".into()
+            } else {
+                format!(
+                    "{vrm_key}.toml  ← under {}",
+                    spring_preset::SPRING_PRESETS_DIR
+                )
+            });
+            ui.small(format!(
+                "Logical path: {}  ·  Display name: {}",
+                if logical_vrm_path.is_empty() {
+                    "—"
+                } else {
+                    logical_vrm_path.as_str()
+                },
+                if vrm_display_name.is_empty() {
+                    "—"
+                } else {
+                    vrm_display_name.as_str()
+                }
+            ));
             ui.checkbox(
-                &mut rig.viewport_pick_enabled,
-                "Right-click picks bone (3D view, when egui is not using the pointer)",
-            );
-            ui.checkbox(
-                &mut rig.twist_drag_enabled,
-                "Alt + LMB drag twists selected bone (local Z, degrees)",
+                &mut settings.avatar.auto_load_spring_preset,
+                "Auto-load matching preset on VRM init (if file exists)",
             );
             ui.small(
-                "While Alt+LMB is active in the 3D view, orbit (LMB drag) is paused so the viewport does not spin.",
+                "Uses FNV-1a hex over the logical VRM path — see module docs in \
+                 spring_preset.rs.",
             );
-            ui.add(egui::Slider::new(&mut rig.pick_radius_m, 0.03..=0.45).text("pick radius (m)"));
-            ui.add(
-                egui::Slider::new(&mut rig.twist_drag_sensitivity, 0.05..=1.5)
-                    .text("twist drag sensitivity"),
-            );
-            if let Some(msg) = &rig.last_pick_message {
-                ui.small(msg);
-            }
-            ui.separator();
-
-            ui.label(egui::RichText::new("Selected bone").strong());
-            match &rig.selected_bone {
-                None => {
-                    ui.label(egui::RichText::new("(none)").italics());
-                }
-                Some(bone) => {
-                    ui.monospace(bone);
-                    let in_index = indexed.as_ref().is_some_and(|i| i.contains(bone));
-                    if !in_index {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(220, 140, 120),
-                            "not in bone index — writes may be ignored",
-                        );
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !vrm_key.is_empty(),
+                        egui::Button::new("Export preset for this VRM…"),
+                    )
+                    .clicked()
+                {
+                    let path = spring_preset::default_preset_path_for_logical_path(
+                        vrm_row.map(|(p, _, _)| p.0.as_path()),
+                        settings.avatar.model_path.as_str(),
+                    );
+                    let joints: Vec<spring_preset::PresetJoint> = springs
+                        .iter()
+                        .filter_map(|(_, name, p)| {
+                            let n = name?;
+                            Some(spring_preset::PresetJoint {
+                                name: n.as_str().to_string(),
+                                stiffness: p.stiffness,
+                                drag_force: p.drag_force,
+                                gravity_power: p.gravity_power,
+                                hit_radius: p.hit_radius,
+                                gravity_dir: [
+                                    p.gravity_dir.x,
+                                    p.gravity_dir.y,
+                                    p.gravity_dir.z,
+                                ],
+                            })
+                        })
+                        .collect();
+                    let cols: Vec<spring_preset::PresetCollider> = colliders
+                        .iter()
+                        .filter_map(|(_, name, shape)| {
+                            let n = name?;
+                            Some(spring_preset::PresetCollider {
+                                name: n.as_str().to_string(),
+                                shape: spring_preset::PresetColliderShapeV1::from(shape),
+                            })
+                        })
+                        .collect();
+                    let snap = spring_preset::build_spring_preset_file(
+                        vrm_key.clone(),
+                        logical_vrm_path.clone(),
+                        vrm_display_name.clone(),
+                        joints,
+                        cols,
+                    );
+                    match spring_preset::save_preset_file(&path, &snap) {
+                        Ok(()) => {
+                            rig.spring_ui.preset_status =
+                                Some(format!("Exported {}", path.display()));
+                        }
+                        Err(e) => rig.spring_ui.preset_status = Some(e),
                     }
-                    let mut x = debug
-                        .pose_controller
-                        .bone_euler
-                        .get(bone)
-                        .map(|e| e[0])
-                        .unwrap_or(0.0);
-                    let mut y = debug
-                        .pose_controller
-                        .bone_euler
-                        .get(bone)
-                        .map(|e| e[1])
-                        .unwrap_or(0.0);
-                    let mut z = debug
-                        .pose_controller
-                        .bone_euler
-                        .get(bone)
-                        .map(|e| e[2])
-                        .unwrap_or(0.0);
-                    ui.horizontal(|ui| {
-                        ui.label("X");
-                        if ui
-                            .add(egui::Slider::new(&mut x, -180.0..=180.0).suffix("°"))
-                            .changed()
-                        {
-                            let e = {
-                                let entry = debug
-                                    .pose_controller
-                                    .bone_euler
-                                    .entry(bone.clone())
-                                    .or_insert([0.0, 0.0, 0.0]);
-                                entry[0] = x;
-                                *entry
-                            };
-                            if let Some(s) = sender.as_deref() {
-                                apply_euler(bone, e, s, &mut debug.pose_controller.status);
-                            }
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Y");
-                        if ui
-                            .add(egui::Slider::new(&mut y, -180.0..=180.0).suffix("°"))
-                            .changed()
-                        {
-                            let e = {
-                                let entry = debug
-                                    .pose_controller
-                                    .bone_euler
-                                    .entry(bone.clone())
-                                    .or_insert([0.0, 0.0, 0.0]);
-                                entry[1] = y;
-                                *entry
-                            };
-                            if let Some(s) = sender.as_deref() {
-                                apply_euler(bone, e, s, &mut debug.pose_controller.status);
-                            }
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Z");
-                        if ui
-                            .add(egui::Slider::new(&mut z, -180.0..=180.0).suffix("°"))
-                            .changed()
-                        {
-                            let e = {
-                                let entry = debug
-                                    .pose_controller
-                                    .bone_euler
-                                    .entry(bone.clone())
-                                    .or_insert([0.0, 0.0, 0.0]);
-                                entry[2] = z;
-                                *entry
-                            };
-                            if let Some(s) = sender.as_deref() {
-                                apply_euler(bone, e, s, &mut debug.pose_controller.status);
-                            }
-                        }
-                    });
-                    ui.small("RGB axis lines are drawn at this joint in the 3D view.");
                 }
-            }
-
-            ui.separator();
-            ui.collapsing("VRMC spring joints", |ui| {
-                ui.label(
-                    "Per-joint solver weights from the loaded VRM. Names come from the glTF \
-                     node `Name` when present.",
-                );
-
-                let vrm_row = vrm_q.iter().next();
-                let (logical_vrm_path, vrm_key, vrm_display_name, joint_chain_map) =
-                    if let Some((vrm_path, vrm_name, maybe_reg)) = vrm_row {
-                        let logical = spring_preset::logical_vrm_path(
-                            Some(vrm_path.0.as_path()),
+                if ui
+                    .add_enabled(
+                        !vrm_key.is_empty(),
+                        egui::Button::new("Import default file"),
+                    )
+                    .on_hover_text(format!(
+                        "Load {}",
+                        spring_preset::default_preset_path_for_logical_path(
+                            vrm_row.map(|(p, _, _)| p.0.as_path()),
                             settings.avatar.model_path.as_str(),
-                        );
-                        let key = spring_preset::vrm_preset_key(&logical);
-                        let jp = maybe_reg
-                            .map(spring_preset::joint_to_spring_chain)
-                            .unwrap_or_default();
-                        (logical, key, vrm_name.as_str().to_string(), jp)
-                    } else {
-                        (String::new(), String::new(), String::new(), Vec::new())
-                    };
-
-                ui.collapsing("Spring / collider preset (per VRM)", |ui| {
-                    ui.label(egui::RichText::new("VRM key (filename stem)").strong());
-                    ui.monospace(if vrm_key.is_empty() {
-                        "(no VRM entity)".into()
-                    } else {
-                        format!("{vrm_key}.toml  ← under {}", spring_preset::SPRING_PRESETS_DIR)
-                    });
-                    ui.small(format!(
-                        "Logical path: {}  ·  Display name: {}",
-                        if logical_vrm_path.is_empty() {
-                            "—"
-                        } else {
-                            logical_vrm_path.as_str()
-                        },
-                        if vrm_display_name.is_empty() {
-                            "—"
-                        } else {
-                            vrm_display_name.as_str()
-                        }
-                    ));
-                    ui.checkbox(
-                        &mut settings.avatar.auto_load_spring_preset,
-                        "Auto-load matching preset on VRM init (if file exists)",
+                        )
+                        .display()
+                    ))
+                    .clicked()
+                {
+                    let path = spring_preset::default_preset_path_for_logical_path(
+                        vrm_row.map(|(p, _, _)| p.0.as_path()),
+                        settings.avatar.model_path.as_str(),
                     );
-                    ui.small(
-                        "Uses FNV-1a hex over the logical VRM path — see module docs in \
-                         spring_preset.rs.",
-                    );
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !vrm_key.is_empty(),
-                                egui::Button::new("Export preset for this VRM…"),
-                            )
-                            .clicked()
-                        {
-                            let path = spring_preset::default_preset_path_for_logical_path(
-                                vrm_row.map(|(p, _, _)| p.0.as_path()),
-                                settings.avatar.model_path.as_str(),
-                            );
-                            let joints: Vec<spring_preset::PresetJoint> = springs
-                                .iter()
-                                .filter_map(|(_, name, p)| {
-                                    let n = name?;
-                                    Some(spring_preset::PresetJoint {
-                                        name: n.as_str().to_string(),
-                                        stiffness: p.stiffness,
-                                        drag_force: p.drag_force,
-                                        gravity_power: p.gravity_power,
-                                        hit_radius: p.hit_radius,
-                                        gravity_dir: [p.gravity_dir.x, p.gravity_dir.y, p.gravity_dir.z],
-                                    })
-                                })
-                                .collect();
-                            let cols: Vec<spring_preset::PresetCollider> = colliders
-                                .iter()
-                                .filter_map(|(_, name, shape)| {
-                                    let n = name?;
-                                    Some(spring_preset::PresetCollider {
-                                        name: n.as_str().to_string(),
-                                        shape: spring_preset::PresetColliderShapeV1::from(shape),
-                                    })
-                                })
-                                .collect();
-                            let snap = spring_preset::build_spring_preset_file(
-                                vrm_key.clone(),
-                                logical_vrm_path.clone(),
-                                vrm_display_name.clone(),
-                                joints,
-                                cols,
-                            );
-                            match spring_preset::save_preset_file(&path, &snap) {
-                                Ok(()) => {
-                                    rig.spring_ui.preset_status =
-                                        Some(format!("Exported {}", path.display()));
-                                }
-                                Err(e) => rig.spring_ui.preset_status = Some(e),
-                            }
+                    match spring_preset::load_preset_file(&path) {
+                        Ok(preset) => {
+                            let (jh, jm, ch, cm) =
+                                spring_preset::apply_spring_preset(&preset, springs, colliders);
+                            rig.spring_ui.preset_status = Some(format!(
+                                "Imported {} — joints {}/{} ok, colliders {}/{} ok",
+                                path.display(),
+                                jh,
+                                jh + jm,
+                                ch,
+                                ch + cm
+                            ));
                         }
-                        if ui
-                            .add_enabled(!vrm_key.is_empty(), egui::Button::new("Import default file"))
-                            .on_hover_text(format!(
-                                "Load {}",
-                                spring_preset::default_preset_path_for_logical_path(
-                                    vrm_row.map(|(p, _, _)| p.0.as_path()),
-                                    settings.avatar.model_path.as_str(),
-                                )
-                                .display()
-                            ))
-                            .clicked()
-                        {
-                            let path = spring_preset::default_preset_path_for_logical_path(
-                                vrm_row.map(|(p, _, _)| p.0.as_path()),
-                                settings.avatar.model_path.as_str(),
-                            );
-                            match spring_preset::load_preset_file(&path) {
-                                Ok(preset) => {
-                                    let (jh, jm, ch, cm) = spring_preset::apply_spring_preset(
-                                        &preset,
-                                        &mut springs,
-                                        &mut colliders,
-                                    );
-                                    rig.spring_ui.preset_status = Some(format!(
-                                        "Imported {} — joints {}/{} ok, colliders {}/{} ok",
-                                        path.display(),
-                                        jh,
-                                        jh + jm,
-                                        ch,
-                                        ch + cm
-                                    ));
-                                }
-                                Err(e) => rig.spring_ui.preset_status = Some(e),
-                            }
-                        }
-                        if ui.button("Import from file…").clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("TOML preset", &["toml"])
-                                .pick_file()
-                            {
-                                match spring_preset::load_preset_file(&path) {
-                                    Ok(preset) => {
-                                        let (jh, jm, ch, cm) = spring_preset::apply_spring_preset(
-                                            &preset,
-                                            &mut springs,
-                                            &mut colliders,
-                                        );
-                                        let warn = if !vrm_key.is_empty() && preset.vrm_key != vrm_key
-                                        {
-                                            format!(" (preset key {} ≠ current {})", preset.vrm_key, vrm_key)
-                                        } else {
-                                            String::new()
-                                        };
-                                        rig.spring_ui.preset_status = Some(format!(
-                                            "Imported {}{} — joints {}/{} ok, colliders {}/{} ok",
-                                            path.display(),
-                                            warn,
-                                            jh,
-                                            jh + jm,
-                                            ch,
-                                            ch + cm
-                                        ));
-                                    }
-                                    Err(e) => rig.spring_ui.preset_status = Some(e),
-                                }
-                            }
-                        }
-                    });
-                    if let Some(msg) = &rig.spring_ui.preset_status {
-                        ui.small(egui::RichText::new(msg).italics());
+                        Err(e) => rig.spring_ui.preset_status = Some(e),
                     }
-                });
-
-                let joint_filter_lc = rig.spring_ui.joint_filter.to_lowercase();
-                ui.horizontal(|ui| {
-                    ui.label("Filter");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut rig.spring_ui.joint_filter)
-                            .desired_width(160.0)
-                            .hint_text("substring…"),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Group by");
-                    egui::ComboBox::from_id_salt("rig_spring_joint_group_mode")
-                        .width(160.0)
-                        .selected_text(match rig.spring_ui.joint_group_mode {
-                            0 => "All",
-                            1 => "Bone name prefix",
-                            2 => "VRMC spring chain",
-                            _ => "All",
-                        })
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_label(rig.spring_ui.joint_group_mode == 0, "All").clicked()
-                            {
-                                rig.spring_ui.joint_group_mode = 0;
-                            }
-                            if ui
-                                .selectable_label(rig.spring_ui.joint_group_mode == 1, "Bone name prefix")
-                                .clicked()
-                            {
-                                rig.spring_ui.joint_group_mode = 1;
-                            }
-                            if ui
-                                .selectable_label(rig.spring_ui.joint_group_mode == 2, "VRMC spring chain")
-                                .clicked()
-                            {
-                                rig.spring_ui.joint_group_mode = 2;
-                            }
-                        });
-                });
-                if rig.spring_ui.joint_group_mode == 1 {
-                    let mut prefixes: Vec<String> = springs
-                        .iter()
-                        .filter_map(|(_, n, _)| n.map(|x| spring_preset::bone_name_prefix(x.as_str())))
-                        .collect();
-                    prefixes.sort();
-                    prefixes.dedup();
-                    prefixes.insert(0, "(all)".to_string());
-                    if !prefixes.contains(&rig.spring_ui.joint_group_value) {
-                        rig.spring_ui.joint_group_value = "(all)".to_string();
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Prefix");
-                        egui::ComboBox::from_id_salt("rig_spring_joint_prefix_pick")
-                            .width(200.0)
-                            .selected_text(rig.spring_ui.joint_group_value.clone())
-                            .show_ui(ui, |ui| {
-                                for p in &prefixes {
-                                    if ui
-                                        .selectable_value(
-                                            &mut rig.spring_ui.joint_group_value,
-                                            p.clone(),
-                                            p,
-                                        )
-                                        .clicked()
-                                    {}
-                                }
-                            });
-                    });
-                } else if rig.spring_ui.joint_group_mode == 2 {
-                    let mut chains: Vec<String> = joint_chain_map
-                        .iter()
-                        .map(|(_, c)| c.clone())
-                        .collect();
-                    chains.sort();
-                    chains.dedup();
-                    chains.insert(0, "(all)".to_string());
-                    if !chains.contains(&rig.spring_ui.joint_group_value) {
-                        rig.spring_ui.joint_group_value = "(all)".to_string();
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Spring");
-                        egui::ComboBox::from_id_salt("rig_spring_joint_chain_pick")
-                            .width(200.0)
-                            .selected_text(rig.spring_ui.joint_group_value.clone())
-                            .show_ui(ui, |ui| {
-                                for c in &chains {
-                                    if ui
-                                        .selectable_value(
-                                            &mut rig.spring_ui.joint_group_value,
-                                            c.clone(),
-                                            c,
-                                        )
-                                        .clicked()
-                                    {}
-                                }
-                            });
-                    });
                 }
-
-                let mut rows: Vec<(Entity, Option<String>)> = Vec::new();
-                for (e, name, _props) in springs.iter() {
-                    rows.push((e, name.map(|n| n.as_str().to_string())));
-                }
-                rows.sort_by(|a, b| {
-                    let la = a.1.as_deref().unwrap_or("");
-                    let lb = b.1.as_deref().unwrap_or("");
-                    la.cmp(lb)
-                });
-                egui::ScrollArea::vertical()
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        if rows.is_empty() {
-                            ui.label("No spring joints on this model.");
-                            return;
-                        }
-                        let mut shown = 0usize;
-                        for (entity, label) in &rows {
-                            if !spring_row_visible(
-                                label,
-                                &joint_filter_lc,
-                                rig.spring_ui.joint_group_mode,
-                                &rig.spring_ui.joint_group_value,
-                                &joint_chain_map,
-                            ) {
-                                continue;
-                            }
-                            shown += 1;
-                            ui.group(|ui| {
-                                ui.label(
-                                    egui::RichText::new(label.as_deref().unwrap_or("(unnamed)"))
-                                        .monospace(),
+                if ui.button("Import from file…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("TOML preset", &["toml"])
+                        .pick_file()
+                    {
+                        match spring_preset::load_preset_file(&path) {
+                            Ok(preset) => {
+                                let (jh, jm, ch, cm) = spring_preset::apply_spring_preset(
+                                    &preset, springs, colliders,
                                 );
-                                ui.small(format!("entity {entity:?}"));
-                                if let Ok((_, _, mut p)) = springs.get_mut(*entity) {
-                                    ui.horizontal(|ui| {
-                                        ui.label("stiffness");
-                                        ui.add(egui::Slider::new(&mut p.stiffness, 0.0..=10.0));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("drag");
-                                        ui.add(egui::Slider::new(&mut p.drag_force, 0.0..=1.0));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("gravity power");
-                                        ui.add(egui::Slider::new(&mut p.gravity_power, -2.0..=4.0));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("hit radius");
-                                        ui.add(egui::Slider::new(&mut p.hit_radius, 0.0..=0.5));
-                                    });
-                                    ui.label("gravity dir (model space)");
-                                    ui.horizontal(|ui| {
-                                        ui.label("x");
-                                        ui.add(egui::DragValue::new(&mut p.gravity_dir.x).speed(0.02));
-                                        ui.label("y");
-                                        ui.add(egui::DragValue::new(&mut p.gravity_dir.y).speed(0.02));
-                                        ui.label("z");
-                                        ui.add(egui::DragValue::new(&mut p.gravity_dir.z).speed(0.02));
-                                    });
-                                    if ui.button("normalize gravity dir").clicked() {
-                                        let v = p.gravity_dir;
-                                        let len = v.length();
-                                        if len > 1e-6 {
-                                            p.gravity_dir = v / len;
-                                        }
-                                    }
-                                }
-                            });
+                                let warn = if !vrm_key.is_empty() && preset.vrm_key != vrm_key {
+                                    format!(
+                                        " (preset key {} ≠ current {})",
+                                        preset.vrm_key, vrm_key
+                                    )
+                                } else {
+                                    String::new()
+                                };
+                                rig.spring_ui.preset_status = Some(format!(
+                                    "Imported {}{} — joints {}/{} ok, colliders {}/{} ok",
+                                    path.display(),
+                                    warn,
+                                    jh,
+                                    jh + jm,
+                                    ch,
+                                    ch + cm
+                                ));
+                            }
+                            Err(e) => rig.spring_ui.preset_status = Some(e),
                         }
-                        if shown == 0 {
-                            ui.label("No joints match filter / category.");
-                        }
-                    });
-            });
-
-            ui.separator();
-            ui.collapsing("VRMC spring colliders", |ui| {
-                ui.label(
-                    "Collider shapes on spring-bone nodes (sphere / capsule). Radius scales with \
-                     parent node scale in the solver.",
-                );
-
-                let vrm_row = vrm_q.iter().next();
-                let collider_chain_map = vrm_row
-                    .and_then(|(_, _, reg)| reg)
-                    .map(spring_preset::collider_to_spring_chain)
-                    .unwrap_or_default();
-
-                let collider_filter_lc = rig.spring_ui.collider_filter.to_lowercase();
-                ui.horizontal(|ui| {
-                    ui.label("Filter");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut rig.spring_ui.collider_filter)
-                            .desired_width(160.0)
-                            .hint_text("substring…"),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Group by");
-                    egui::ComboBox::from_id_salt("rig_spring_collider_group_mode")
-                        .width(160.0)
-                        .selected_text(match rig.spring_ui.collider_group_mode {
-                            0 => "All",
-                            1 => "Shape kind",
-                            2 => "VRMC spring chain",
-                            _ => "All",
-                        })
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(rig.spring_ui.collider_group_mode == 0, "All")
-                                .clicked()
-                            {
-                                rig.spring_ui.collider_group_mode = 0;
-                            }
-                            if ui
-                                .selectable_label(rig.spring_ui.collider_group_mode == 1, "Shape kind")
-                                .clicked()
-                            {
-                                rig.spring_ui.collider_group_mode = 1;
-                            }
-                            if ui
-                                .selectable_label(
-                                    rig.spring_ui.collider_group_mode == 2,
-                                    "VRMC spring chain",
-                                )
-                                .clicked()
-                            {
-                                rig.spring_ui.collider_group_mode = 2;
-                            }
-                        });
-                });
-                if rig.spring_ui.collider_group_mode == 1 {
-                    let kinds = ["(all)", "Sphere", "Capsule"];
-                    if !kinds.contains(&rig.spring_ui.collider_group_value.as_str()) {
-                        rig.spring_ui.collider_group_value = "(all)".to_string();
                     }
-                    ui.horizontal(|ui| {
-                        ui.label("Shape");
-                        egui::ComboBox::from_id_salt("rig_spring_collider_shape_pick")
-                            .width(120.0)
-                            .selected_text(rig.spring_ui.collider_group_value.clone())
-                            .show_ui(ui, |ui| {
-                                for k in kinds {
-                                    if ui
-                                        .selectable_value(
-                                            &mut rig.spring_ui.collider_group_value,
-                                            k.to_string(),
-                                            k,
-                                        )
-                                        .clicked()
-                                    {}
-                                }
-                            });
-                    });
-                } else if rig.spring_ui.collider_group_mode == 2 {
-                    let mut chains: Vec<String> = collider_chain_map
-                        .iter()
-                        .map(|(_, c)| c.clone())
-                        .collect();
-                    chains.sort();
-                    chains.dedup();
-                    chains.insert(0, "(all)".to_string());
-                    if !chains.contains(&rig.spring_ui.collider_group_value) {
-                        rig.spring_ui.collider_group_value = "(all)".to_string();
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Spring");
-                        egui::ComboBox::from_id_salt("rig_spring_collider_chain_pick")
-                            .width(200.0)
-                            .selected_text(rig.spring_ui.collider_group_value.clone())
-                            .show_ui(ui, |ui| {
-                                for c in &chains {
-                                    if ui
-                                        .selectable_value(
-                                            &mut rig.spring_ui.collider_group_value,
-                                            c.clone(),
-                                            c,
-                                        )
-                                        .clicked()
-                                    {}
-                                }
-                            });
-                    });
                 }
-
-                let mut rows: Vec<(Entity, Option<String>, ColliderShape)> = Vec::new();
-                for (e, name, shape) in colliders.iter() {
-                    rows.push((e, name.map(|n| n.as_str().to_string()), *shape));
-                }
-                rows.sort_by(|a, b| {
-                    let la = a.1.as_deref().unwrap_or("");
-                    let lb = b.1.as_deref().unwrap_or("");
-                    la.cmp(lb)
-                });
-                egui::ScrollArea::vertical()
-                    .max_height(200.0)
-                    .show(ui, |ui| {
-                        if rows.is_empty() {
-                            ui.label("No collider shapes on entities in the world.");
-                            return;
-                        }
-                        let mut shown = 0usize;
-                        for (entity, label, shape_snap) in &rows {
-                            if !collider_row_visible(
-                                label,
-                                &collider_filter_lc,
-                                rig.spring_ui.collider_group_mode,
-                                &rig.spring_ui.collider_group_value,
-                                &collider_chain_map,
-                                shape_snap,
-                            ) {
-                                continue;
-                            }
-                            shown += 1;
-                            ui.group(|ui| {
-                                ui.label(
-                                    egui::RichText::new(label.as_deref().unwrap_or("(unnamed)"))
-                                        .monospace(),
-                                );
-                                ui.small(format!("entity {entity:?}"));
-                                if let Ok((_, _, mut shape)) = colliders.get_mut(*entity) {
-                                    match &mut *shape {
-                                        ColliderShape::Sphere(sphere) => {
-                                            ui.label(egui::RichText::new("Sphere").strong());
-                                            ui.horizontal(|ui| {
-                                                ui.label("offset");
-                                                ui.add(
-                                                    egui::DragValue::new(&mut sphere.offset[0])
-                                                        .speed(0.002)
-                                                        .prefix("x "),
-                                                );
-                                                ui.add(
-                                                    egui::DragValue::new(&mut sphere.offset[1])
-                                                        .speed(0.002)
-                                                        .prefix("y "),
-                                                );
-                                                ui.add(
-                                                    egui::DragValue::new(&mut sphere.offset[2])
-                                                        .speed(0.002)
-                                                        .prefix("z "),
-                                                );
-                                            });
-                                            ui.horizontal(|ui| {
-                                                ui.label("radius");
-                                                ui.add(egui::Slider::new(
-                                                    &mut sphere.radius,
-                                                    0.0..=0.35,
-                                                ));
-                                            });
-                                        }
-                                        ColliderShape::Capsule(capsule) => {
-                                            ui.label(egui::RichText::new("Capsule").strong());
-                                            ui.horizontal(|ui| {
-                                                ui.label("offset");
-                                                ui.add(
-                                                    egui::DragValue::new(&mut capsule.offset[0])
-                                                        .speed(0.002)
-                                                        .prefix("x "),
-                                                );
-                                                ui.add(
-                                                    egui::DragValue::new(&mut capsule.offset[1])
-                                                        .speed(0.002)
-                                                        .prefix("y "),
-                                                );
-                                                ui.add(
-                                                    egui::DragValue::new(&mut capsule.offset[2])
-                                                        .speed(0.002)
-                                                        .prefix("z "),
-                                                );
-                                            });
-                                            ui.horizontal(|ui| {
-                                                ui.label("tail");
-                                                ui.add(
-                                                    egui::DragValue::new(&mut capsule.tail[0])
-                                                        .speed(0.002)
-                                                        .prefix("x "),
-                                                );
-                                                ui.add(
-                                                    egui::DragValue::new(&mut capsule.tail[1])
-                                                        .speed(0.002)
-                                                        .prefix("y "),
-                                                );
-                                                ui.add(
-                                                    egui::DragValue::new(&mut capsule.tail[2])
-                                                        .speed(0.002)
-                                                        .prefix("z "),
-                                                );
-                                            });
-                                            ui.horizontal(|ui| {
-                                                ui.label("radius");
-                                                ui.add(egui::Slider::new(
-                                                    &mut capsule.radius,
-                                                    0.0..=0.35,
-                                                ));
-                                            });
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                        if shown == 0 {
-                            ui.label("No colliders match filter / category.");
-                        }
-                    });
             });
+            if let Some(msg) = &rig.spring_ui.preset_status {
+                ui.small(egui::RichText::new(msg).italics());
+            }
         });
-    settings.ui.show_rig_editor = open;
+
+        let joint_filter_lc = rig.spring_ui.joint_filter.to_lowercase();
+        ui.horizontal(|ui| {
+            ui.label("Filter");
+            ui.add(
+                egui::TextEdit::singleline(&mut rig.spring_ui.joint_filter)
+                    .desired_width(160.0)
+                    .hint_text("substring…"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Group by");
+            egui::ComboBox::from_id_salt("rig_spring_joint_group_mode")
+                .width(160.0)
+                .selected_text(match rig.spring_ui.joint_group_mode {
+                    0 => "All",
+                    1 => "Bone name prefix",
+                    2 => "VRMC spring chain",
+                    _ => "All",
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(rig.spring_ui.joint_group_mode == 0, "All")
+                        .clicked()
+                    {
+                        rig.spring_ui.joint_group_mode = 0;
+                    }
+                    if ui
+                        .selectable_label(
+                            rig.spring_ui.joint_group_mode == 1,
+                            "Bone name prefix",
+                        )
+                        .clicked()
+                    {
+                        rig.spring_ui.joint_group_mode = 1;
+                    }
+                    if ui
+                        .selectable_label(
+                            rig.spring_ui.joint_group_mode == 2,
+                            "VRMC spring chain",
+                        )
+                        .clicked()
+                    {
+                        rig.spring_ui.joint_group_mode = 2;
+                    }
+                });
+        });
+        if rig.spring_ui.joint_group_mode == 1 {
+            let mut prefixes: Vec<String> = springs
+                .iter()
+                .filter_map(|(_, n, _)| n.map(|x| spring_preset::bone_name_prefix(x.as_str())))
+                .collect();
+            prefixes.sort();
+            prefixes.dedup();
+            prefixes.insert(0, "(all)".to_string());
+            if !prefixes.contains(&rig.spring_ui.joint_group_value) {
+                rig.spring_ui.joint_group_value = "(all)".to_string();
+            }
+            ui.horizontal(|ui| {
+                ui.label("Prefix");
+                egui::ComboBox::from_id_salt("rig_spring_joint_prefix_pick")
+                    .width(200.0)
+                    .selected_text(rig.spring_ui.joint_group_value.clone())
+                    .show_ui(ui, |ui| {
+                        for p in &prefixes {
+                            if ui
+                                .selectable_value(
+                                    &mut rig.spring_ui.joint_group_value,
+                                    p.clone(),
+                                    p,
+                                )
+                                .clicked()
+                            {}
+                        }
+                    });
+            });
+        } else if rig.spring_ui.joint_group_mode == 2 {
+            let mut chains: Vec<String> =
+                joint_chain_map.iter().map(|(_, c)| c.clone()).collect();
+            chains.sort();
+            chains.dedup();
+            chains.insert(0, "(all)".to_string());
+            if !chains.contains(&rig.spring_ui.joint_group_value) {
+                rig.spring_ui.joint_group_value = "(all)".to_string();
+            }
+            ui.horizontal(|ui| {
+                ui.label("Spring");
+                egui::ComboBox::from_id_salt("rig_spring_joint_chain_pick")
+                    .width(200.0)
+                    .selected_text(rig.spring_ui.joint_group_value.clone())
+                    .show_ui(ui, |ui| {
+                        for c in &chains {
+                            if ui
+                                .selectable_value(
+                                    &mut rig.spring_ui.joint_group_value,
+                                    c.clone(),
+                                    c,
+                                )
+                                .clicked()
+                            {}
+                        }
+                    });
+            });
+        }
+
+        let mut rows: Vec<(Entity, Option<String>)> = Vec::new();
+        for (e, name, _props) in springs.iter() {
+            rows.push((e, name.map(|n| n.as_str().to_string())));
+        }
+        rows.sort_by(|a, b| {
+            let la = a.1.as_deref().unwrap_or("");
+            let lb = b.1.as_deref().unwrap_or("");
+            la.cmp(lb)
+        });
+        egui::ScrollArea::vertical()
+            .max_height(220.0)
+            .show(ui, |ui| {
+                if rows.is_empty() {
+                    ui.label("No spring joints on this model.");
+                    return;
+                }
+                let mut shown = 0usize;
+                for (entity, label) in &rows {
+                    if !spring_row_visible(
+                        label,
+                        &joint_filter_lc,
+                        rig.spring_ui.joint_group_mode,
+                        &rig.spring_ui.joint_group_value,
+                        &joint_chain_map,
+                    ) {
+                        continue;
+                    }
+                    shown += 1;
+                    ui.group(|ui| {
+                        ui.label(
+                            egui::RichText::new(label.as_deref().unwrap_or("(unnamed)"))
+                                .monospace(),
+                        );
+                        ui.small(format!("entity {entity:?}"));
+                        if let Ok((_, _, mut p)) = springs.get_mut(*entity) {
+                            ui.horizontal(|ui| {
+                                ui.label("stiffness");
+                                ui.add(egui::Slider::new(&mut p.stiffness, 0.0..=10.0));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("drag");
+                                ui.add(egui::Slider::new(&mut p.drag_force, 0.0..=1.0));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("gravity power");
+                                ui.add(egui::Slider::new(&mut p.gravity_power, -2.0..=4.0));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("hit radius");
+                                ui.add(egui::Slider::new(&mut p.hit_radius, 0.0..=0.5));
+                            });
+                            ui.label("gravity dir (model space)");
+                            ui.horizontal(|ui| {
+                                ui.label("x");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.gravity_dir.x).speed(0.02),
+                                );
+                                ui.label("y");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.gravity_dir.y).speed(0.02),
+                                );
+                                ui.label("z");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.gravity_dir.z).speed(0.02),
+                                );
+                            });
+                            if ui.button("normalize gravity dir").clicked() {
+                                let v = p.gravity_dir;
+                                let len = v.length();
+                                if len > 1e-6 {
+                                    p.gravity_dir = v / len;
+                                }
+                            }
+                        }
+                    });
+                }
+                if shown == 0 {
+                    ui.label("No joints match filter / category.");
+                }
+            });
+    });
+
+    ui.separator();
+    ui.collapsing("VRMC spring colliders", |ui| {
+        ui.label(
+            "Collider shapes on spring-bone nodes (sphere / capsule). Radius scales with \
+             parent node scale in the solver.",
+        );
+
+        let vrm_row = vrm_q.iter().next();
+        let collider_chain_map = vrm_row
+            .and_then(|(_, _, reg)| reg)
+            .map(spring_preset::collider_to_spring_chain)
+            .unwrap_or_default();
+
+        let collider_filter_lc = rig.spring_ui.collider_filter.to_lowercase();
+        ui.horizontal(|ui| {
+            ui.label("Filter");
+            ui.add(
+                egui::TextEdit::singleline(&mut rig.spring_ui.collider_filter)
+                    .desired_width(160.0)
+                    .hint_text("substring…"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Group by");
+            egui::ComboBox::from_id_salt("rig_spring_collider_group_mode")
+                .width(160.0)
+                .selected_text(match rig.spring_ui.collider_group_mode {
+                    0 => "All",
+                    1 => "Shape kind",
+                    2 => "VRMC spring chain",
+                    _ => "All",
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(rig.spring_ui.collider_group_mode == 0, "All")
+                        .clicked()
+                    {
+                        rig.spring_ui.collider_group_mode = 0;
+                    }
+                    if ui
+                        .selectable_label(
+                            rig.spring_ui.collider_group_mode == 1,
+                            "Shape kind",
+                        )
+                        .clicked()
+                    {
+                        rig.spring_ui.collider_group_mode = 1;
+                    }
+                    if ui
+                        .selectable_label(
+                            rig.spring_ui.collider_group_mode == 2,
+                            "VRMC spring chain",
+                        )
+                        .clicked()
+                    {
+                        rig.spring_ui.collider_group_mode = 2;
+                    }
+                });
+        });
+        if rig.spring_ui.collider_group_mode == 1 {
+            let kinds = ["(all)", "Sphere", "Capsule"];
+            if !kinds.contains(&rig.spring_ui.collider_group_value.as_str()) {
+                rig.spring_ui.collider_group_value = "(all)".to_string();
+            }
+            ui.horizontal(|ui| {
+                ui.label("Shape");
+                egui::ComboBox::from_id_salt("rig_spring_collider_shape_pick")
+                    .width(120.0)
+                    .selected_text(rig.spring_ui.collider_group_value.clone())
+                    .show_ui(ui, |ui| {
+                        for k in kinds {
+                            if ui
+                                .selectable_value(
+                                    &mut rig.spring_ui.collider_group_value,
+                                    k.to_string(),
+                                    k,
+                                )
+                                .clicked()
+                            {}
+                        }
+                    });
+            });
+        } else if rig.spring_ui.collider_group_mode == 2 {
+            let mut chains: Vec<String> =
+                collider_chain_map.iter().map(|(_, c)| c.clone()).collect();
+            chains.sort();
+            chains.dedup();
+            chains.insert(0, "(all)".to_string());
+            if !chains.contains(&rig.spring_ui.collider_group_value) {
+                rig.spring_ui.collider_group_value = "(all)".to_string();
+            }
+            ui.horizontal(|ui| {
+                ui.label("Spring");
+                egui::ComboBox::from_id_salt("rig_spring_collider_chain_pick")
+                    .width(200.0)
+                    .selected_text(rig.spring_ui.collider_group_value.clone())
+                    .show_ui(ui, |ui| {
+                        for c in &chains {
+                            if ui
+                                .selectable_value(
+                                    &mut rig.spring_ui.collider_group_value,
+                                    c.clone(),
+                                    c,
+                                )
+                                .clicked()
+                            {}
+                        }
+                    });
+            });
+        }
+
+        let mut rows: Vec<(Entity, Option<String>, ColliderShape)> = Vec::new();
+        for (e, name, shape) in colliders.iter() {
+            rows.push((e, name.map(|n| n.as_str().to_string()), *shape));
+        }
+        rows.sort_by(|a, b| {
+            let la = a.1.as_deref().unwrap_or("");
+            let lb = b.1.as_deref().unwrap_or("");
+            la.cmp(lb)
+        });
+        egui::ScrollArea::vertical()
+            .max_height(200.0)
+            .show(ui, |ui| {
+                if rows.is_empty() {
+                    ui.label("No collider shapes on entities in the world.");
+                    return;
+                }
+                let mut shown = 0usize;
+                for (entity, label, shape_snap) in &rows {
+                    if !collider_row_visible(
+                        label,
+                        &collider_filter_lc,
+                        rig.spring_ui.collider_group_mode,
+                        &rig.spring_ui.collider_group_value,
+                        &collider_chain_map,
+                        shape_snap,
+                    ) {
+                        continue;
+                    }
+                    shown += 1;
+                    ui.group(|ui| {
+                        ui.label(
+                            egui::RichText::new(label.as_deref().unwrap_or("(unnamed)"))
+                                .monospace(),
+                        );
+                        ui.small(format!("entity {entity:?}"));
+                        if let Ok((_, _, mut shape)) = colliders.get_mut(*entity) {
+                            match &mut *shape {
+                                ColliderShape::Sphere(sphere) => {
+                                    ui.label(egui::RichText::new("Sphere").strong());
+                                    ui.horizontal(|ui| {
+                                        ui.label("offset");
+                                        ui.add(
+                                            egui::DragValue::new(&mut sphere.offset[0])
+                                                .speed(0.002)
+                                                .prefix("x "),
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(&mut sphere.offset[1])
+                                                .speed(0.002)
+                                                .prefix("y "),
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(&mut sphere.offset[2])
+                                                .speed(0.002)
+                                                .prefix("z "),
+                                        );
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("radius");
+                                        ui.add(egui::Slider::new(
+                                            &mut sphere.radius,
+                                            0.0..=0.35,
+                                        ));
+                                    });
+                                }
+                                ColliderShape::Capsule(capsule) => {
+                                    ui.label(egui::RichText::new("Capsule").strong());
+                                    ui.horizontal(|ui| {
+                                        ui.label("offset");
+                                        ui.add(
+                                            egui::DragValue::new(&mut capsule.offset[0])
+                                                .speed(0.002)
+                                                .prefix("x "),
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(&mut capsule.offset[1])
+                                                .speed(0.002)
+                                                .prefix("y "),
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(&mut capsule.offset[2])
+                                                .speed(0.002)
+                                                .prefix("z "),
+                                        );
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("tail");
+                                        ui.add(
+                                            egui::DragValue::new(&mut capsule.tail[0])
+                                                .speed(0.002)
+                                                .prefix("x "),
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(&mut capsule.tail[1])
+                                                .speed(0.002)
+                                                .prefix("y "),
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(&mut capsule.tail[2])
+                                                .speed(0.002)
+                                                .prefix("z "),
+                                        );
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("radius");
+                                        ui.add(egui::Slider::new(
+                                            &mut capsule.radius,
+                                            0.0..=0.35,
+                                        ));
+                                    });
+                                }
+                            }
+                        }
+                    });
+                }
+                if shown == 0 {
+                    ui.label("No colliders match filter / category.");
+                }
+            });
+    });
 }
 
 fn spring_row_visible(
@@ -809,33 +1172,7 @@ fn collider_row_visible(
     }
 }
 
-fn apply_euler(
-    bone: &str,
-    euler_deg: [f32; 3],
-    sender: &PoseCommandSender,
-    status: &mut Option<String>,
-) {
-    let q = Quat::from_euler(
-        EulerRot::XYZ,
-        euler_deg[0].to_radians(),
-        euler_deg[1].to_radians(),
-        euler_deg[2].to_radians(),
-    );
-    let mut bones = HashMap::new();
-    bones.insert(bone.to_string(), [q.x, q.y, q.z, q.w]);
-    sender.send(PoseCommand::ApplyBones {
-        bones,
-        preserve_omitted_bones: true,
-        blend_weight: Some(1.0),
-        transition_seconds: Some(0.0),
-    });
-    *status = Some(format!(
-        "rig editor: {} ({:.1}°, {:.1}°, {:.1}°)",
-        bone, euler_deg[0], euler_deg[1], euler_deg[2]
-    ));
-}
-
-// ---------- Viewport pick + twist (live here to touch DebugUiState) ----------
+// ---------- Viewport pick / hover / axis-drag ----------------------------------
 
 fn ray_closest_point(ray: &Ray3d, point: Vec3) -> Vec3 {
     let d = ray.direction.as_vec3();
@@ -891,6 +1228,200 @@ fn seed_bone_euler_from_snapshot(
     }
 }
 
+/// Project a world-space point through the camera and return its viewport
+/// (screen) coordinates, if it's in front of the camera.
+fn world_to_viewport(cam: &Camera, cam_gt: &GlobalTransform, p: Vec3) -> Option<Vec2> {
+    cam.world_to_viewport(cam_gt, p).ok()
+}
+
+/// Pixel distance from `cursor_px` to the projected position of an axis
+/// drag handle. Only the handle (a single point on the ring at
+/// `axis_handle_angle(axis, current_euler_deg)`) is interactive — the ring
+/// outline is purely visual feedback. This gives clear "click here to grab"
+/// semantics and prevents the user from accidentally rotating a bone by
+/// brushing past the ring outline.
+fn axis_handle_pixel_distance(
+    cam: &Camera,
+    cam_gt: &GlobalTransform,
+    centre: Vec3,
+    frame_rot: Quat,
+    axis: RigEditAxis,
+    radius: f32,
+    current_euler_deg: [f32; 3],
+    cursor_px: Vec2,
+) -> Option<f32> {
+    let angle = axis_handle_angle(axis, current_euler_deg);
+    let world = axis_handle_world(centre, frame_rot, axis, radius, angle);
+    let proj = world_to_viewport(cam, cam_gt, world)?;
+    Some(proj.distance(cursor_px))
+}
+
+/// Continuous viewport hover system — runs every frame in edit mode (when egui
+/// does not want the pointer). Updates [`RigEditorState::hovered_bone`] and
+/// [`RigEditorState::hovered_axis`] so the gizmo and Pose Controller hint can
+/// react.
+pub(crate) fn rig_editor_viewport_hover(
+    mut contexts: EguiContexts,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    cam_q: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    child_of: Query<&ChildOf>,
+    gtf_q: Query<&GlobalTransform>,
+    rest_gtf_q: Query<&RestGlobalTransform>,
+    indexed: Option<Res<IndexedBones>>,
+    debug: Res<super::DebugUiState>,
+    mut rig: ResMut<RigEditorState>,
+) {
+    if !rig.edit_mode {
+        // Stale hover state would otherwise keep highlighting bones while the
+        // user is no longer in edit mode.
+        if rig.hovered_source == HoverSource::Viewport {
+            rig.hovered_bone = None;
+            rig.hovered_source = HoverSource::None;
+            rig.hovered_axis = None;
+        }
+        return;
+    }
+    // Don't fight an active drag — the drag-axis path uses motion deltas only.
+    if rig.dragging_axis.is_some() {
+        return;
+    }
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    if ctx.wants_pointer_input() {
+        if rig.hovered_source == HoverSource::Viewport {
+            rig.hovered_bone = None;
+            rig.hovered_source = HoverSource::None;
+            rig.hovered_axis = None;
+        }
+        return;
+    }
+    // While the user is mid-orbit (LMB without intent to pick a bone) we
+    // suppress hover updates so the highlight doesn't flicker across bones.
+    if mouse.pressed(MouseButton::Left) && rig.hovered_axis.is_none() {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok((cam, cam_gt)) = cam_q.single() else {
+        return;
+    };
+    let Ok(ray) = cam.viewport_to_world(cam_gt, cursor) else {
+        return;
+    };
+    let Some(indexed) = indexed else {
+        return;
+    };
+    if indexed.is_empty() {
+        return;
+    }
+
+    // 1) Axis HANDLE hover (only when a bone is selected). The rings are
+    // drawn in the bone's effective rotation frame (see `bone_bind_world_rot`)
+    // and the handles slide around them as the bone is rotated, so hover
+    // hit-testing must use the same frame + the bone's current Euler.
+    let mut new_axis: Option<RigEditAxis> = None;
+    if let Some(sel) = rig.selected_bone.as_deref()
+        && let Some(entity) = indexed.entity(sel)
+        && let Ok(gtf) = gtf_q.get(entity)
+    {
+        let centre = gtf.translation();
+        let frame_rot = bone_bind_world_rot(entity, &gtf_q, &rest_gtf_q, &child_of);
+        let euler = debug
+            .pose_controller
+            .bone_euler
+            .get(sel)
+            .copied()
+            .unwrap_or([0.0, 0.0, 0.0]);
+        let max_px = rig.axis_pick_radius_px.max(1.0);
+        let mut best: Option<(RigEditAxis, f32)> = None;
+        for axis in [RigEditAxis::X, RigEditAxis::Y, RigEditAxis::Z] {
+            let Some(d) = axis_handle_pixel_distance(
+                cam,
+                cam_gt,
+                centre,
+                frame_rot,
+                axis,
+                rig.gizmo_radius_m,
+                euler,
+                cursor,
+            ) else {
+                continue;
+            };
+            if d > max_px {
+                continue;
+            }
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((axis, d));
+            }
+        }
+        new_axis = best.map(|(a, _)| a);
+    }
+    if rig.hovered_axis != new_axis {
+        rig.hovered_axis = new_axis;
+    }
+
+    // If the cursor is over an axis ring, the bone hover should stay on the
+    // currently selected bone (so the highlight doesn't shift to a neighbor),
+    // and we MUST short-circuit before the bone-pick block — otherwise an
+    // off-axis bone behind the ring could steal hover and prime a stray pick
+    // for the next click.
+    if rig.hovered_axis.is_some() {
+        return;
+    }
+
+    // 2) Bone hover (mesh raycast against humanoid bones only — extras like
+    // DEF-toes or twist bones can still be selected from the Bones tab list).
+    let r = rig.pick_radius_m.max(0.02);
+    let mut best: Option<(f32, String)> = None;
+    for (name, entity) in &indexed.entities {
+        if !is_vrm_humanoid_bone(name) {
+            continue;
+        }
+        let Ok(gtf) = gtf_q.get(*entity) else {
+            continue;
+        };
+        let p = gtf.translation();
+        let mut d = dist_ray_point(&ray, p);
+        if let Ok(co) = child_of.get(*entity) {
+            if let Ok(parent_gtf) = gtf_q.get(co.parent()) {
+                let p0 = parent_gtf.translation();
+                d = d.min(dist_ray_segment(&ray, p0, p));
+            }
+        }
+        if d > r {
+            continue;
+        }
+        if best.as_ref().map(|(bd, _)| d < *bd).unwrap_or(true) {
+            best = Some((d, name.clone()));
+        }
+    }
+    let new_hover = best.map(|(_, n)| n);
+    if rig.hovered_bone != new_hover {
+        rig.hovered_bone = new_hover;
+        rig.hovered_source = if rig.hovered_bone.is_some() {
+            HoverSource::Viewport
+        } else {
+            HoverSource::None
+        };
+    }
+}
+
+/// Edit-mode click handling.
+///
+/// * LMB on an axis ring → start a sticky axis-drag (caught by `axis_drag`).
+/// * LMB anywhere else → no bone selection (we deliberately reserve LMB for
+///   axis rings + orbit), so the user can never miss a ring and accidentally
+///   reselect a different finger.
+/// * RMB → pick the nearest **humanoid** bone under the cursor. Extras (e.g.
+///   DEF-toes, twist bones) are list-only — see the Bones tab for those.
+/// * Camera focus is **not** triggered here. List-click in edit mode is the
+///   only path that snaps the orbit camera (see `pose_controller::bone_row`).
 pub(crate) fn rig_editor_viewport_pick(
     mut contexts: EguiContexts,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -903,12 +1434,36 @@ pub(crate) fn rig_editor_viewport_pick(
     mut rig: ResMut<RigEditorState>,
     mut debug: ResMut<super::DebugUiState>,
 ) {
-    if !rig.viewport_pick_enabled {
+    if !rig.edit_mode {
         return;
     }
+
+    // Sticky drag start: if the user just pressed LMB while an axis was
+    // hovered, capture the drag for the rest of this LMB press. Always
+    // returns early so the LMB never falls through to bone selection.
+    if mouse.just_pressed(MouseButton::Left) {
+        if let Some(axis) = rig.hovered_axis {
+            rig.dragging_axis = Some(axis);
+            rig.active_axis = axis;
+        }
+        return;
+    }
+    if mouse.just_released(MouseButton::Left) {
+        rig.dragging_axis = None;
+        return;
+    }
+
+    // RMB is the only way to pick a bone from the viewport. Anything else
+    // (LMB on empty space, drags, releases) falls through above.
     if !mouse.just_pressed(MouseButton::Right) {
         return;
     }
+    // If a ring is under the cursor, never let the click also select a bone
+    // behind it — same anti-snag rule as during LMB axis grabs.
+    if rig.hovered_axis.is_some() {
+        return;
+    }
+
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -942,6 +1497,10 @@ pub(crate) fn rig_editor_viewport_pick(
     let r = rig.pick_radius_m.max(0.02);
     let mut best: Option<(f32, String)> = None;
     for (name, entity) in &indexed.entities {
+        // Mesh-pick is humanoid-only by user request — extras stay list-only.
+        if !is_vrm_humanoid_bone(name) {
+            continue;
+        }
         let Ok(gtf) = gtf_q.get(*entity) else {
             continue;
         };
@@ -972,37 +1531,60 @@ pub(crate) fn rig_editor_viewport_pick(
                 &mut debug.pose_controller.bone_euler,
             );
             rig.last_pick_message = Some(format!("picked '{name}' (ray dist {d:.3} m)"));
+            rig.pending_scroll_to_bone = Some(name);
+            // NOTE: deliberately *no* `pending_focus_camera_to_bone` here — the
+            // user asked that viewport picks never snap the camera; only list
+            // clicks (in edit mode) do.
         }
         None => {
             rig.last_pick_message = Some(format!(
-                "no bone within {:.2} m of pointer — increase pick radius?",
+                "no humanoid bone within {:.2} m of pointer — increase pick radius?",
                 r
             ));
         }
     }
 }
 
-pub(crate) fn rig_editor_alt_drag_twist(
+/// LMB drag (with or without Alt) on the selected bone rotates around the
+/// active / dragged axis.
+///
+/// **Why axis-angle composition instead of `euler[axis] += delta`:** the
+/// pose driver applies bone rotation as `Quat::from_euler(XYZ, x, y, z)`,
+/// which is intrinsic XYZ. That means once the bone has any prior rotation,
+/// adding to a single euler component no longer produces a clean rotation
+/// around the *visible* ring's axis — the X rotation happens before Y and
+/// Z, so the Y/Z axes drift relative to the gizmo. We instead compose
+/// `current_q * Quat::from_axis_angle(local_axis, theta)` (post-multiply
+/// = bone-local rotation) and re-decompose to XYZ. Combined with the
+/// "ring frame = current bone world rotation" gizmo (see
+/// [`crate::plugins::rig_editor::bone_bind_world_rot`]), this makes every
+/// ring stay visually glued to the bone — dragging X spins the X ring
+/// around its own normal, not around some hidden parent axis.
+pub(crate) fn rig_editor_axis_drag(
     mut contexts: EguiContexts,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     accum_motion: Res<AccumulatedMouseMotion>,
     sender: Option<Res<PoseCommandSender>>,
     rig: Res<RigEditorState>,
+    mirror: Res<MirrorState>,
     mut debug: ResMut<super::DebugUiState>,
 ) {
-    if !rig.twist_drag_enabled {
+    if !rig.edit_mode || !rig.twist_drag_enabled {
         return;
     }
     let Some(bone) = rig.selected_bone.clone() else {
         return;
     };
-    if !keys.pressed(KeyCode::AltLeft) && !keys.pressed(KeyCode::AltRight) {
-        return;
-    }
     if !mouse.pressed(MouseButton::Left) {
         return;
     }
+    let alt_held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    let axis = match rig.dragging_axis {
+        Some(a) => a,
+        None if alt_held => rig.active_axis,
+        None => return,
+    };
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -1017,13 +1599,52 @@ pub(crate) fn rig_editor_alt_drag_twist(
     if dx.abs() < f32::EPSILON {
         return;
     }
+    let dir = if rig.invert_drag_direction { -1.0 } else { 1.0 };
+    // Shift = Blender-style precision modifier. Multiplying degrees-per-pixel
+    // by `shift_precision_factor` (default 0.15) gives ≈7× finer control
+    // without forcing the user to crank the global sensitivity slider down.
+    let shift_held = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let precision = if shift_held {
+        rig.shift_precision_factor.clamp(0.01, 1.0)
+    } else {
+        1.0
+    };
+    let delta_deg = dx * rig.twist_drag_sensitivity * dir * precision;
 
     let euler = debug
         .pose_controller
         .bone_euler
         .entry(bone.clone())
         .or_insert([0.0, 0.0, 0.0]);
-    euler[2] += dx * rig.twist_drag_sensitivity;
+
+    // Compose the new rotation in the **bone-local** frame (post-multiply)
+    // so the ring stays glued to the bone — drag rotates around the bone's
+    // current local axis, not around a fixed parent/bind axis. Then
+    // re-decompose to euler XYZ for the slider mirror.
+    let current_q = Quat::from_euler(
+        EulerRot::XYZ,
+        euler[0].to_radians(),
+        euler[1].to_radians(),
+        euler[2].to_radians(),
+    );
+    let delta_q = Quat::from_axis_angle(axis.unit(), delta_deg.to_radians());
+    let new_q = (current_q * delta_q).normalize();
+    let (nx, ny, nz) = new_q.to_euler(EulerRot::XYZ);
+    euler[0] = nx.to_degrees();
+    euler[1] = ny.to_degrees();
+    euler[2] = nz.to_degrees();
+
     let e = *euler;
-    apply_euler(&bone, e, sender, &mut debug.pose_controller.status);
+    super::pose_controller::send_apply_bones_euler_deg_mirrored(sender, &bone, e, Some(&mirror));
+    debug.pose_controller.status = Some(format!(
+        "rig editor (drag {}{}): {} → ({:.1}°, {:.1}°, {:.1}°) Δ{} {:+.1}°",
+        if rig.invert_drag_direction { "inv" } else { "fwd" },
+        if mirror.realtime { "+mir" } else { "" },
+        bone,
+        e[0],
+        e[1],
+        e[2],
+        axis.label(),
+        delta_deg,
+    ));
 }

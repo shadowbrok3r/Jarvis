@@ -15,6 +15,8 @@ Argument shapes must match **`tools/list`** (and the client's cached tool JSON).
 3. **Raw `pose_bones`** (Euler degrees) — only when no semantic tool fits. Always pass `dry_run: true` first if you are unsure of an axis or sign.
 4. **Raw `set_bones`** (quaternions) — last resort, mostly for replaying numeric data.
 
+**Per-VRM axis direction:** the avatar host loads `config/semantic_intent_calibration/<hex>.toml` (same key idea as spring presets). Operators tune signs in-app (**Pose Controller → Intent Lab**). If semantic intents move the wrong way on a given `.vrm`, the operator flips the relevant sign and saves — remote MCP callers then get corrected motion without changing prompts.
+
 ## Hybrid safety policy
 
 `pose_bones` and `set_bones` reject:

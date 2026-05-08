@@ -105,40 +105,135 @@ pub fn draw_anim_layers_window(
 
     let available_bones = available_bone_names(indexed.as_deref());
 
-    let mut open = settings.ui.show_anim_layers;
-    egui::Window::new("Animation Layers")
-        .default_size([680.0, 520.0])
-        .min_width(540.0)
-        .resizable(true)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            handle.with_write(|stack| {
-                top_bar(ui, &mut state.anim_layers, stack, rest.as_deref());
-                ui.separator();
-                layer_sets_bar(
-                    ui,
-                    &mut state.anim_layers,
-                    stack,
-                    layer_sets.as_deref(),
-                    library.as_deref(),
-                );
-                ui.separator();
-                layer_list(ui, &mut state.anim_layers, stack, &available_bones);
-                ui.separator();
-                add_layer_bar(ui, &mut state.anim_layers, stack, library.as_deref());
-                if let Some(msg) = &state.anim_layers.status {
-                    ui.add_space(4.0);
-                    ui.colored_label(egui::Color32::from_rgb(160, 200, 160), msg);
+    let dock_side = settings.ui.anim_layers_dock_side.clone();
+    let bottom_h = settings.ui.anim_layers_bottom_height.max(160.0);
+
+    // Collected during render and applied after the egui borrow scope
+    // closes — the closure captures `state.anim_layers` and `handle`
+    // mutably, so we can't also touch `settings` from inside it.
+    let mut requested_dock_side: Option<String> = None;
+    let mut new_height: Option<f32> = None;
+    let mut window_open = settings.ui.show_anim_layers;
+
+    let mut render = |ui: &mut egui::Ui| {
+        anim_layers_dock_header(ui, &dock_side, &mut requested_dock_side);
+        ui.separator();
+        handle.with_write(|stack| {
+            top_bar(ui, &mut state.anim_layers, stack, rest.as_deref());
+            ui.separator();
+            layer_sets_bar(
+                ui,
+                &mut state.anim_layers,
+                stack,
+                layer_sets.as_deref(),
+                library.as_deref(),
+            );
+            ui.separator();
+            layer_list(ui, &mut state.anim_layers, stack, &available_bones);
+            ui.separator();
+            add_layer_bar(ui, &mut state.anim_layers, stack, library.as_deref());
+            if let Some(msg) = &state.anim_layers.status {
+                ui.add_space(4.0);
+                ui.colored_label(egui::Color32::from_rgb(160, 200, 160), msg);
+            }
+            if let Some(store) = layer_sets.as_deref() {
+                let guard = store.inner.read();
+                if let Some(err) = &guard.last_error {
+                    ui.colored_label(egui::Color32::from_rgb(220, 120, 120), err);
                 }
-                if let Some(store) = layer_sets.as_deref() {
-                    let guard = store.inner.read();
-                    if let Some(err) = &guard.last_error {
-                        ui.colored_label(egui::Color32::from_rgb(220, 120, 120), err);
-                    }
-                }
-            });
+            }
         });
-    settings.ui.show_anim_layers = open;
+    };
+
+    match dock_side.as_str() {
+        "bottom" => {
+            let resp = egui::TopBottomPanel::bottom("anim_layers_bottom_panel")
+                .resizable(true)
+                .default_height(bottom_h)
+                .min_height(160.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            render(ui);
+                        });
+                });
+            new_height = Some(resp.response.rect.height());
+        }
+        "left" => {
+            egui::SidePanel::left("anim_layers_left_panel")
+                .resizable(true)
+                .default_width(540.0)
+                .min_width(360.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            render(ui);
+                        });
+                });
+        }
+        "right" => {
+            egui::SidePanel::right("anim_layers_right_panel")
+                .resizable(true)
+                .default_width(540.0)
+                .min_width(360.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            render(ui);
+                        });
+                });
+        }
+        _ => {
+            egui::Window::new("Animation Layers")
+                .default_size([680.0, 520.0])
+                .min_width(540.0)
+                .resizable(true)
+                .open(&mut window_open)
+                .show(ctx, |ui| {
+                    render(ui);
+                });
+        }
+    }
+
+    if dock_side == "floating" {
+        settings.ui.show_anim_layers = window_open;
+    }
+    if let Some(side) = requested_dock_side {
+        settings.ui.anim_layers_dock_side = side;
+    }
+    if let Some(h) = new_height {
+        if (h - settings.ui.anim_layers_bottom_height).abs() > 1.0 {
+            settings.ui.anim_layers_bottom_height = h;
+        }
+    }
+}
+
+/// Tiny header row inside the Animation Layers panel — lets users pick
+/// which side the panel docks to without going through the global
+/// toolbar.
+fn anim_layers_dock_header(
+    ui: &mut egui::Ui,
+    current: &str,
+    requested_dock_side: &mut Option<String>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Animation Layers").strong());
+        ui.separator();
+        ui.label(egui::RichText::new("Dock:").small().weak());
+        let mut button = |ui: &mut egui::Ui, label: &str, target: &str| {
+            let selected = current == target;
+            if ui.selectable_label(selected, label).clicked() && !selected {
+                *requested_dock_side = Some(target.to_string());
+            }
+        };
+        button(ui, "Bottom", "bottom");
+        button(ui, "Left", "left");
+        button(ui, "Right", "right");
+        button(ui, "Float", "floating");
+    });
 }
 
 /// Build a sorted, de-duplicated bone list for dropdowns. Prefers the
@@ -173,7 +268,7 @@ fn top_bar(
             );
         ui.separator();
         if ui
-            .button("▶ Play all")
+            .button("Play all")
             .on_hover_text("Set every layer's playing flag to true")
             .clicked()
         {
@@ -183,7 +278,7 @@ fn top_bar(
             ui_state.status = Some("all layers playing".into());
         }
         if ui
-            .button("⏸ Pause all")
+            .button("Pause all")
             .on_hover_text("Set every layer's playing flag to false")
             .clicked()
         {
@@ -249,7 +344,7 @@ fn layer_sets_bar(
             });
         let has_pick = !ui_state.picked_set.is_empty();
         if ui
-            .add_enabled(has_pick, egui::Button::new("↺ Load"))
+            .add_enabled(has_pick, egui::Button::new("Load"))
             .on_hover_text("Replace the current stack with the selected set")
             .clicked()
         {
@@ -266,7 +361,7 @@ fn layer_sets_bar(
             }
         }
         if ui
-            .add_enabled(has_pick, egui::Button::new("🗑 Delete"))
+            .add_enabled(has_pick, egui::Button::new("Delete"))
             .on_hover_text("Remove the selected set (save to persist)")
             .clicked()
         {
@@ -284,7 +379,7 @@ fn layer_sets_bar(
         );
         let can_save = !ui_state.new_set_name.trim().is_empty();
         if ui
-            .add_enabled(can_save, egui::Button::new("💾 Save current"))
+            .add_enabled(can_save, egui::Button::new("Save current"))
             .on_hover_text("Snapshot every layer above into this set")
             .clicked()
         {
@@ -295,7 +390,7 @@ fn layer_sets_bar(
             ui_state.status = Some(format!("saved '{name}' (click Persist to disk)"));
         }
         if ui
-            .button("↧ Persist")
+            .button("Persist")
             .on_hover_text("Flush all saved sets to config/anim_layer_sets.json")
             .clicked()
         {
@@ -309,7 +404,7 @@ fn layer_sets_bar(
             ui_state.status = Some(msg);
         }
         if ui
-            .button("⟳ Reload")
+            .button("Reload")
             .on_hover_text("Drop in-memory sets and re-read from disk")
             .clicked()
         {
@@ -408,24 +503,24 @@ fn layer_row(
                         .show_value(true),
                 );
                 ui.separator();
-                let icon = if layer.playing { "⏸" } else { "▶" };
+                let icon = if layer.playing { "Pause" } else { "Play" };
                 if ui.button(icon).on_hover_text("play / pause").clicked() {
                     layer.playing = !layer.playing;
                 }
-                if ui.button("⏹").on_hover_text("rewind").clicked() {
+                if ui.button("Rewind").on_hover_text("rewind").clicked() {
                     layer.time = 0.0;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("✖️").on_hover_text("delete layer").clicked() {
+                    if ui.button("Del").on_hover_text("delete layer").clicked() {
                         action = Some(LayerAction::Delete);
                     }
-                    if ui.button("▼").on_hover_text("move down").clicked() {
+                    if ui.button("v").on_hover_text("move down").clicked() {
                         action = Some(LayerAction::MoveDown);
                     }
-                    if ui.button("▲").on_hover_text("move up").clicked() {
+                    if ui.button("^").on_hover_text("move up").clicked() {
                         action = Some(LayerAction::MoveUp);
                     }
-                    let expand_icon = if expanded { "▾" } else { "▸" };
+                    let expand_icon = if expanded { "-" } else { "+" };
                     if ui
                         .small_button(expand_icon)
                         .on_hover_text("expand / collapse driver params")

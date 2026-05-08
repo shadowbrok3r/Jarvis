@@ -22,6 +22,7 @@ fn main() {
     dotenvy::dotenv().ok();
 
     let mut settings = Settings::load().expect("load config/default.toml (cwd = crate root)");
+    settings.migrate_workspace_visibility();
     if let Ok(t) = std::env::var("IRONCLAW_TOKEN") {
         if !t.is_empty() {
             settings.ironclaw.auth_token = t;
@@ -79,6 +80,7 @@ fn main() {
             plugins::tts::TtsPlugin,
             plugins::pose_driver::PoseDriverPlugin,
             plugins::pose_capture::PoseCapturePlugin,
+            plugins::intent_calibration::IntentCalibrationPlugin,
             mcp::plugin::McpPlugin,
         ))
         .add_plugins((

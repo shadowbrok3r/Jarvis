@@ -111,14 +111,14 @@ fn toolbar(ui: &mut egui::Ui, _state: &mut EmotionMappingsUiState, map: &mut Emo
         ui.label(egui::RichText::new(format!("{} mappings", map.inner.mappings.len())).monospace());
         ui.separator();
         if ui
-            .button("💾 Save")
+            .button("Save")
             .on_hover_text(format!("write → {}", map.inner.path.display()))
             .clicked()
         {
             map.save();
         }
         if ui
-            .button("⟳ Reload")
+            .button("Reload")
             .on_hover_text("discard unsaved edits")
             .clicked()
         {
@@ -317,7 +317,7 @@ fn mappings_table(
                                 .fixed_decimals(2)
                                 .suffix(" s"),
                         );
-                        if ui.button("✖️").on_hover_text("delete").clicked() {
+                        if ui.button("Delete").on_hover_text("delete").clicked() {
                             to_remove = Some(label);
                         }
                         ui.end_row();

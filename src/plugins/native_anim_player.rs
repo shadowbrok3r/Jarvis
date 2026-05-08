@@ -37,12 +37,17 @@ impl Plugin for NativeAnimPlayerPlugin {
 /// Active keyframe-driven animation. `frame_index` advances on a fixed clock
 /// (`1.0 / animation.fps`) and wraps when `looping` is true, or pauses on the
 /// last frame for `hold_duration_secs` otherwise.
+///
+/// `paused` is a global hold flag — when true, [`tick_active_animation`]
+/// returns early so the rig stays on whatever frame was last applied.
+/// Spacebar in the menu bar toggles this.
 #[derive(Resource, Default)]
 pub struct ActiveNativeAnimation {
     inner: Option<ActiveClip>,
     /// Last known frame applied — prevents repeated `ApplyBones` bursts when
     /// the frame clock advances less than one frame between ticks.
     last_applied_frame: Option<usize>,
+    paused: bool,
 }
 
 struct ActiveClip {
@@ -94,6 +99,23 @@ impl ActiveNativeAnimation {
     pub fn stop(&mut self) {
         self.inner = None;
         self.last_applied_frame = None;
+        self.paused = false;
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Flip the pause flag. Returns the new state. When there's no active
+    /// clip the flag is reset to `false` so a future `start()` begins
+    /// playing immediately.
+    pub fn toggle_paused(&mut self) -> bool {
+        if self.inner.is_none() {
+            self.paused = false;
+            return false;
+        }
+        self.paused = !self.paused;
+        self.paused
     }
 }
 
@@ -105,6 +127,9 @@ fn tick_active_animation(
     let Some(sender) = sender else {
         return;
     };
+    if active.paused {
+        return;
+    }
     let Some(clip) = active.inner.as_mut() else {
         return;
     };

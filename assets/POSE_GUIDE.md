@@ -59,6 +59,10 @@ Each compiles to a tiny, bounded Euler map and goes through the same sanitize / 
 
 **`arms_down_rest`** — `{ amount?: 0..=1, dry_run? }` (default 0.85). Mirror-symmetric: `leftUpperArm.roll_deg = -k`, `rightUpperArm.roll_deg = +k`, plus a soft elbow pitch and mild shoulder lift on both sides.
 
+**Per-VRM calibration:** bind pose / bone roll in the `.vrm` changes which way “positive pitch” points. The shipped defaults match airi-style rigs; if **`raise_leg` forward** moves the thigh the wrong way on your export, open the in-app **Pose Controller → Intent Lab** tab, flip the **forward pitch** sign (or dial the slider negative), **Save for this VRM**, then retry MCP — calibration files live under `config/semantic_intent_calibration/<key>.toml` (same hex key scheme as spring presets). MCP semantic tools load those signs automatically.
+
+**Widen Stance:** “spread with yaw” on thighs is still raw **`pose_bones`** (easy to twist inward/outward). Prefer **`raise_leg` `direction: \"outward\"`** for abduction — it uses **`roll_deg`**, not yaw — then calibrate **outward roll** sign in Intent Lab if needed.
+
 All three return a `compiledEuler` map so you can inspect (or copy/tweak) the underlying values. Use `dry_run: true` when you want the map without applying it.
 
 After a semantic intent, **always** capture `left`, `right`, and `back` to confirm the silhouette.

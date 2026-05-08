@@ -12,6 +12,77 @@ use jarvis_avatar::config::Settings;
 
 use crate::plugins::service_status::{ServiceId, ServiceState, ServiceStatus};
 
+pub fn services_panel(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    status: Option<&ServiceStatus>,
+) {
+    ui.label("Live connection state for every external service the avatar talks to.");
+    ui.separator();
+
+    let Some(status) = status else {
+        ui.colored_label(
+            egui::Color32::from_rgb(235, 85, 100),
+            "ServiceStatus resource is missing — is ServiceStatusPlugin registered?",
+        );
+        return;
+    };
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::Grid::new("services_grid")
+            .num_columns(4)
+            .spacing([14.0, 6.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.strong("Status");
+                ui.strong("Service");
+                ui.strong("Endpoint");
+                ui.strong("Detail");
+                ui.end_row();
+
+                for id in ServiceId::ALL {
+                    let entry = status.get(*id);
+                    let state = entry.map(|e| e.state).unwrap_or(ServiceState::Unknown);
+                    let endpoint = entry.map(|e| e.endpoint.as_str()).unwrap_or("");
+                    let detail = entry.map(|e| e.detail.as_str()).unwrap_or("");
+
+                    ui.horizontal(|ui| {
+                        status_dot(ui, state);
+                        ui.label(
+                            egui::RichText::new(state.short())
+                                .small()
+                                .color(state.color()),
+                        );
+                    });
+                    ui.label(id.label());
+                    ui.monospace(if endpoint.is_empty() { "—" } else { endpoint });
+                    ui.label(
+                        egui::RichText::new(if detail.is_empty() { "—" } else { detail })
+                            .small(),
+                    );
+                    ui.end_row();
+                }
+            });
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            let u = &mut settings.ui;
+            if ui.button("Channel hub config…").clicked() {
+                u.show_channel_hub = true;
+            }
+            if ui.button("Gateway config…").clicked() {
+                u.show_gateway = true;
+            }
+            if ui.button("TTS config…").clicked() {
+                u.show_tts = true;
+            }
+            if ui.button("MCP config…").clicked() {
+                u.show_mcp = true;
+            }
+        });
+    });
+}
+
 pub fn draw_services_window(
     mut contexts: EguiContexts,
     mut settings: ResMut<Settings>,
@@ -28,70 +99,7 @@ pub fn draw_services_window(
         .default_height(360.0)
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.label("Live connection state for every external service the avatar talks to.");
-            ui.separator();
-
-            let Some(status) = status.as_ref() else {
-                ui.colored_label(
-                    egui::Color32::from_rgb(235, 85, 100),
-                    "ServiceStatus resource is missing — is ServiceStatusPlugin registered?",
-                );
-                return;
-            };
-
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("services_grid")
-                    .num_columns(4)
-                    .spacing([14.0, 6.0])
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.strong("Status");
-                        ui.strong("Service");
-                        ui.strong("Endpoint");
-                        ui.strong("Detail");
-                        ui.end_row();
-
-                        for id in ServiceId::ALL {
-                            let entry = status.get(*id);
-                            let state = entry.map(|e| e.state).unwrap_or(ServiceState::Unknown);
-                            let endpoint = entry.map(|e| e.endpoint.as_str()).unwrap_or("");
-                            let detail = entry.map(|e| e.detail.as_str()).unwrap_or("");
-
-                            ui.horizontal(|ui| {
-                                status_dot(ui, state);
-                                ui.label(
-                                    egui::RichText::new(state.short())
-                                        .small()
-                                        .color(state.color()),
-                                );
-                            });
-                            ui.label(id.label());
-                            ui.monospace(if endpoint.is_empty() { "—" } else { endpoint });
-                            ui.label(
-                                egui::RichText::new(if detail.is_empty() { "—" } else { detail })
-                                    .small(),
-                            );
-                            ui.end_row();
-                        }
-                    });
-
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    let u = &mut settings.ui;
-                    if ui.button("Channel hub config…").clicked() {
-                        u.show_channel_hub = true;
-                    }
-                    if ui.button("Gateway config…").clicked() {
-                        u.show_gateway = true;
-                    }
-                    if ui.button("TTS config…").clicked() {
-                        u.show_tts = true;
-                    }
-                    if ui.button("MCP config…").clicked() {
-                        u.show_mcp = true;
-                    }
-                });
-            });
+            services_panel(ui, &mut settings, status.as_deref());
         });
     settings.ui.show_services = open;
 }

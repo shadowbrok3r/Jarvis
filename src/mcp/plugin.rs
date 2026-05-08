@@ -10,7 +10,8 @@
 //! `PostUpdate` tick.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -32,9 +33,13 @@ use jarvis_avatar::paths::expand_home;
 use jarvis_avatar::pose_library::PoseLibrary;
 
 use super::{build_a2f_client, JarvisMcpServer, KimodoDefaults};
+use super::semantic_intent_calibration::SemanticIntentCalibrationStore;
 use crate::plugins::anim_layer_sets::LayerSetsStore;
 use crate::plugins::anim_layers::LayerStackHandle;
 use crate::plugins::channel_server::HubBroadcast;
+use crate::plugins::intent_calibration::{
+    SemanticIntentCalibrationHandle, SemanticIntentModelPath,
+};
 use crate::plugins::pose_capture::CaptureCommandSender;
 use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommandSender, PoseDriverPlugin};
 use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
@@ -58,6 +63,8 @@ fn start_mcp_server(
     pose_tx: Option<Res<PoseCommandSender>>,
     capture_tx: Option<Res<CaptureCommandSender>>,
     snapshot: Option<Res<BoneSnapshotHandle>>,
+    intent_model_path: Option<Res<SemanticIntentModelPath>>,
+    intent_calibration: Option<Res<SemanticIntentCalibrationHandle>>,
     traffic: Option<Res<TrafficLogSink>>,
     layer_stack: Option<Res<LayerStackHandle>>,
     layer_sets: Option<Res<LayerSetsStore>>,
@@ -123,6 +130,19 @@ fn start_mcp_server(
     let layer_stack_val = layer_stack.clone();
     let layer_sets_val = layer_sets.clone();
 
+    let semantic_model_path = intent_model_path
+        .map(|r| r.0.clone())
+        .unwrap_or_else(|| {
+            Arc::new(RwLock::new(settings.avatar.model_path.clone()))
+        });
+    let semantic_calibration = intent_calibration
+        .map(|r| r.0.clone())
+        .unwrap_or_else(|| {
+            Arc::new(RwLock::new(SemanticIntentCalibrationStore::load_dir(Path::new(
+                "config/semantic_intent_calibration",
+            ))))
+        });
+
     thread::Builder::new()
         .name("jarvis-mcp".into())
         .spawn(move || {
@@ -155,6 +175,8 @@ fn start_mcp_server(
                     traffic.clone(),
                     layer_stack_val,
                     layer_sets_val,
+                    semantic_model_path,
+                    semantic_calibration,
                 ),
                 traffic,
             ));

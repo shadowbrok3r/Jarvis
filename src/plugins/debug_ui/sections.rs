@@ -195,6 +195,14 @@ fn queue_avatar_vrm_load(
     }
 }
 
+pub fn draw_avatar_y_diag_inline(
+    ui: &mut egui::Ui,
+    stats: &AvatarDebugStats,
+    target_y: f32,
+) {
+    y_diagnostics_readout(ui, stats, target_y);
+}
+
 fn y_diagnostics_readout(ui: &mut egui::Ui, stats: &AvatarDebugStats, target_y: f32) {
     ui.label("Y-axis diagnostics (this frame):");
     egui::Grid::new("avatar_y_diag_grid")
@@ -335,6 +343,69 @@ pub fn draw_camera_window(
 
 // ---------- Graphics ----------------------------------------------------------
 
+pub fn draw_basic_graphics_inline(ui: &mut egui::Ui, settings: &mut Settings) {
+    let g = &mut settings.graphics;
+
+    let mut samples = g.msaa_samples as i32;
+    ui.add(egui::Slider::new(&mut samples, 0..=8).text("msaa_samples"))
+        .on_hover_text(
+            "0/1 = off; 2/4/8 = multisample. SSAO auto-disables while MSAA >= 2.",
+        );
+    g.msaa_samples = samples.clamp(0, 8) as u32;
+    if g.msaa_samples >= 2 {
+        g.advanced.ssao_enabled = false;
+    }
+    ui.checkbox(&mut g.hdr, "hdr")
+        .on_hover_text("Restart required to attach/detach HDR on the camera.");
+
+    ui.separator();
+    ui.label("present_mode")
+        .on_hover_text("Swapchain policy. Fifo is classic VSync.");
+    egui::ComboBox::from_id_salt("graphics_present_mode")
+        .selected_text(g.present_mode.clone())
+        .show_ui(ui, |ui| {
+            for mode in [
+                "Fifo",
+                "AutoVsync",
+                "AutoNoVsync",
+                "FifoRelaxed",
+                "Mailbox",
+                "Immediate",
+            ] {
+                ui.selectable_value(&mut g.present_mode, mode.to_string(), mode);
+            }
+        });
+
+    ui.separator();
+    ui.add(egui::Slider::new(&mut g.exposure_ev100, -6.0..=17.0).text("exposure_ev100"));
+
+    ui.separator();
+    ui.label("Ambient");
+    ui.add(
+        egui::Slider::new(&mut g.ambient_brightness, 0.0..=5.0).text("ambient_brightness"),
+    );
+    rgba_row(ui, &mut g.ambient_color);
+
+    ui.separator();
+    ui.label("Directional");
+    ui.add(
+        egui::Slider::new(&mut g.directional_illuminance, 0.0..=200_000.0)
+            .logarithmic(true)
+            .text("illuminance"),
+    );
+    ui.checkbox(&mut g.directional_shadows, "shadows_enabled");
+    ui.label("position");
+    vec3_row(ui, "sun_pos", &mut g.directional_position, -50.0..=50.0);
+    ui.label("look_at");
+    vec3_row(ui, "sun_look", &mut g.directional_look_at, -50.0..=50.0);
+
+    ui.separator();
+    ui.checkbox(&mut g.show_ground_plane, "show_ground_plane");
+    ui.add(egui::Slider::new(&mut g.ground_size, 1.0..=400.0).text("ground_size"));
+    ui.label("ground_color");
+    rgb_row(ui, &mut g.ground_base_color);
+}
+
 pub fn draw_graphics_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
     if !settings.ui.show_graphics {
         return;
@@ -347,66 +418,7 @@ pub fn draw_graphics_window(mut contexts: EguiContexts, mut settings: ResMut<Set
         .default_width(360.0)
         .open(&mut open)
         .show(ctx, |ui| {
-            let g = &mut settings.graphics;
-
-            let mut samples = g.msaa_samples as i32;
-            ui.add(egui::Slider::new(&mut samples, 0..=8).text("msaa_samples"))
-                .on_hover_text(
-                    "0/1 = off; 2/4/8 = multisample. SSAO auto-disables while MSAA >= 2.",
-                );
-            g.msaa_samples = samples.clamp(0, 8) as u32;
-            if g.msaa_samples >= 2 {
-                g.advanced.ssao_enabled = false;
-            }
-            ui.checkbox(&mut g.hdr, "hdr")
-                .on_hover_text("Restart required to attach/detach HDR on the camera.");
-
-            ui.separator();
-            ui.label("present_mode")
-                .on_hover_text("Swapchain policy. Fifo is classic VSync.");
-            egui::ComboBox::from_id_salt("graphics_present_mode")
-                .selected_text(g.present_mode.clone())
-                .show_ui(ui, |ui| {
-                    for mode in [
-                        "Fifo",
-                        "AutoVsync",
-                        "AutoNoVsync",
-                        "FifoRelaxed",
-                        "Mailbox",
-                        "Immediate",
-                    ] {
-                        ui.selectable_value(&mut g.present_mode, mode.to_string(), mode);
-                    }
-                });
-
-            ui.separator();
-            ui.add(egui::Slider::new(&mut g.exposure_ev100, -6.0..=17.0).text("exposure_ev100"));
-
-            ui.separator();
-            ui.label("Ambient");
-            ui.add(
-                egui::Slider::new(&mut g.ambient_brightness, 0.0..=5.0).text("ambient_brightness"),
-            );
-            rgba_row(ui, &mut g.ambient_color);
-
-            ui.separator();
-            ui.label("Directional");
-            ui.add(
-                egui::Slider::new(&mut g.directional_illuminance, 0.0..=200_000.0)
-                    .logarithmic(true)
-                    .text("illuminance"),
-            );
-            ui.checkbox(&mut g.directional_shadows, "shadows_enabled");
-            ui.label("position");
-            vec3_row(ui, "sun_pos", &mut g.directional_position, -50.0..=50.0);
-            ui.label("look_at");
-            vec3_row(ui, "sun_look", &mut g.directional_look_at, -50.0..=50.0);
-
-            ui.separator();
-            ui.checkbox(&mut g.show_ground_plane, "show_ground_plane");
-            ui.add(egui::Slider::new(&mut g.ground_size, 1.0..=400.0).text("ground_size"));
-            ui.label("ground_color");
-            rgb_row(ui, &mut g.ground_base_color);
+            draw_basic_graphics_inline(ui, &mut settings);
         });
     settings.ui.show_graphics = open;
 }
@@ -551,6 +563,17 @@ pub fn draw_live_test_window(
 
 // ---------- Channel hub (IronClaw protocol) -----------------------------------
 
+pub fn channel_hub_panel(ui: &mut egui::Ui, settings: &mut Settings) {
+    let i = &mut settings.ironclaw;
+    ui.label("We HOST the IronClaw-style WS hub. Peers connect to ws://<this-host>/ws.");
+    ui.label("bind_address (restart to rebind):");
+    ui.text_edit_singleline(&mut i.bind_address);
+    ui.label("auth_token (empty = accept any peer):");
+    ui.text_edit_singleline(&mut i.auth_token);
+    ui.label("module_name (identity on envelopes we publish):");
+    ui.text_edit_singleline(&mut i.module_name);
+}
+
 pub fn draw_channel_hub_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
     if !settings.ui.show_channel_hub {
         return;
@@ -563,19 +586,48 @@ pub fn draw_channel_hub_window(mut contexts: EguiContexts, mut settings: ResMut<
         .default_width(360.0)
         .open(&mut open)
         .show(ctx, |ui| {
-            let i = &mut settings.ironclaw;
-            ui.label("We HOST the IronClaw-style WS hub. Peers connect to ws://<this-host>/ws.");
-            ui.label("bind_address (restart to rebind):");
-            ui.text_edit_singleline(&mut i.bind_address);
-            ui.label("auth_token (empty = accept any peer):");
-            ui.text_edit_singleline(&mut i.auth_token);
-            ui.label("module_name (identity on envelopes we publish):");
-            ui.text_edit_singleline(&mut i.module_name);
+            channel_hub_panel(ui, &mut settings);
         });
     settings.ui.show_channel_hub = open;
 }
 
 // ---------- Gateway -----------------------------------------------------------
+
+pub fn gateway_panel(ui: &mut egui::Ui, settings: &mut Settings) {
+    let g = &mut settings.gateway;
+    ui.label("IronClaw gateway (used by the chat client; SSE + thread CRUD).");
+    ui.label("base_url (no trailing slash; restart to apply):");
+    ui.text_edit_singleline(&mut g.base_url);
+    ui.label("auth_token (override IRONCLAW_GATEWAY_TOKEN env; restart to apply):");
+    ui.text_edit_singleline(&mut g.auth_token);
+    ui.label("default_thread_id (empty = use whatever the gateway returns active):");
+    ui.text_edit_singleline(&mut g.default_thread_id);
+
+    let mut t = g.request_timeout_ms as i64;
+    if ui
+        .add(
+            egui::DragValue::new(&mut t)
+                .speed(50)
+                .range(1_000..=120_000)
+                .prefix("timeout_ms "),
+        )
+        .changed()
+    {
+        g.request_timeout_ms = t.max(1_000) as u64;
+    }
+    let mut h = g.history_limit as i64;
+    if ui
+        .add(
+            egui::DragValue::new(&mut h)
+                .speed(1)
+                .range(1..=500)
+                .prefix("history_limit "),
+        )
+        .changed()
+    {
+        g.history_limit = h.max(1) as u32;
+    }
+}
 
 pub fn draw_gateway_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
     if !settings.ui.show_gateway {
@@ -589,44 +641,36 @@ pub fn draw_gateway_window(mut contexts: EguiContexts, mut settings: ResMut<Sett
         .default_width(360.0)
         .open(&mut open)
         .show(ctx, |ui| {
-            let g = &mut settings.gateway;
-            ui.label("IronClaw gateway (used by the chat client; SSE + thread CRUD).");
-            ui.label("base_url (no trailing slash; restart to apply):");
-            ui.text_edit_singleline(&mut g.base_url);
-            ui.label("auth_token (override IRONCLAW_GATEWAY_TOKEN env; restart to apply):");
-            ui.text_edit_singleline(&mut g.auth_token);
-            ui.label("default_thread_id (empty = use whatever the gateway returns active):");
-            ui.text_edit_singleline(&mut g.default_thread_id);
-
-            let mut t = g.request_timeout_ms as i64;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut t)
-                        .speed(50)
-                        .range(1_000..=120_000)
-                        .prefix("timeout_ms "),
-                )
-                .changed()
-            {
-                g.request_timeout_ms = t.max(1_000) as u64;
-            }
-            let mut h = g.history_limit as i64;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut h)
-                        .speed(1)
-                        .range(1..=500)
-                        .prefix("history_limit "),
-                )
-                .changed()
-            {
-                g.history_limit = h.max(1) as u32;
-            }
+            gateway_panel(ui, &mut settings);
         });
     settings.ui.show_gateway = open;
 }
 
 // ---------- TTS ---------------------------------------------------------------
+
+pub fn tts_panel(ui: &mut egui::Ui, settings: &mut Settings) {
+    let t = &mut settings.tts;
+    ui.checkbox(&mut t.enabled, "enabled");
+    ui.label("kokoro_url:");
+    ui.text_edit_singleline(&mut t.kokoro_url);
+    ui.label("voice:");
+    ui.text_edit_singleline(&mut t.voice);
+    ui.label("response_format (wav | pcm | mp3 | …):");
+    ui.text_edit_singleline(&mut t.response_format);
+    ui.checkbox(&mut t.stream, "stream (leave off for one-shot WAV/PCM)");
+    let mut sr = t.pcm_sample_rate as i64;
+    if ui
+        .add(
+            egui::DragValue::new(&mut sr)
+                .speed(100)
+                .range(8000..=48_000)
+                .prefix("pcm_sample_rate "),
+        )
+        .changed()
+    {
+        t.pcm_sample_rate = sr.clamp(8000, 48_000) as u32;
+    }
+}
 
 pub fn draw_tts_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
     if !settings.ui.show_tts {
@@ -640,32 +684,19 @@ pub fn draw_tts_window(mut contexts: EguiContexts, mut settings: ResMut<Settings
         .default_width(320.0)
         .open(&mut open)
         .show(ctx, |ui| {
-            let t = &mut settings.tts;
-            ui.checkbox(&mut t.enabled, "enabled");
-            ui.label("kokoro_url:");
-            ui.text_edit_singleline(&mut t.kokoro_url);
-            ui.label("voice:");
-            ui.text_edit_singleline(&mut t.voice);
-            ui.label("response_format (wav | pcm | mp3 | …):");
-            ui.text_edit_singleline(&mut t.response_format);
-            ui.checkbox(&mut t.stream, "stream (leave off for one-shot WAV/PCM)");
-            let mut sr = t.pcm_sample_rate as i64;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut sr)
-                        .speed(100)
-                        .range(8000..=48_000)
-                        .prefix("pcm_sample_rate "),
-                )
-                .changed()
-            {
-                t.pcm_sample_rate = sr.clamp(8000, 48_000) as u32;
-            }
+            tts_panel(ui, &mut settings);
         });
     settings.ui.show_tts = open;
 }
 
 // ---------- Look-at -----------------------------------------------------------
+
+pub fn look_at_panel(ui: &mut egui::Ui, settings: &mut Settings) {
+    ui.add(
+        egui::Slider::new(&mut settings.look_at.idle_return_speed, 0.0..=20.0)
+            .text("idle_return_speed"),
+    );
+}
 
 pub fn draw_look_at_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
     if !settings.ui.show_look_at {
@@ -679,15 +710,114 @@ pub fn draw_look_at_window(mut contexts: EguiContexts, mut settings: ResMut<Sett
         .default_width(320.0)
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.add(
-                egui::Slider::new(&mut settings.look_at.idle_return_speed, 0.0..=20.0)
-                    .text("idle_return_speed"),
-            );
+            look_at_panel(ui, &mut settings);
         });
     settings.ui.show_look_at = open;
 }
 
 // ---------- MCP / Pose / A2F / Kimodo -----------------------------------------
+
+pub fn mcp_panel(ui: &mut egui::Ui, settings: &mut Settings) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.label(
+            "RMCP streamable-HTTP server exposing the pose / A2F / Kimodo tools\n\
+             to IronClaw (and any other MCP client). Changes marked (restart) take\n\
+             effect on the next launch.",
+        );
+
+        ui.separator();
+        ui.label("MCP server:");
+        ui.checkbox(&mut settings.mcp.enabled, "enabled (restart)");
+        ui.horizontal(|ui| {
+            ui.label("bind_address (restart):");
+            ui.text_edit_singleline(&mut settings.mcp.bind_address);
+        });
+        ui.horizontal(|ui| {
+            ui.label("path (restart):");
+            ui.text_edit_singleline(&mut settings.mcp.path);
+        });
+        ui.horizontal(|ui| {
+            ui.label("bearer auth_token (restart, empty = none):");
+            ui.text_edit_singleline(&mut settings.mcp.auth_token);
+        });
+        ui.colored_label(
+            egui::Color32::from_rgb(160, 200, 240),
+            format!(
+                "URL: http://{}{}{}",
+                settings.mcp.bind_address,
+                if settings.mcp.path.starts_with('/') { "" } else { "/" },
+                settings.mcp.path,
+            ),
+        );
+
+        ui.separator();
+        ui.label("Audio2Face-3D:");
+        ui.checkbox(&mut settings.a2f.enabled, "enabled (restart)");
+        ui.checkbox(
+            &mut settings.a2f.apply_from_tts,
+            "apply_from_tts — Kokoro → A2F → face clip after each chat utterance (restart)",
+        );
+        ui.horizontal(|ui| {
+            ui.label("gRPC endpoint:");
+            ui.text_edit_singleline(&mut settings.a2f.endpoint);
+        });
+        ui.horizontal(|ui| {
+            ui.label("health URL:");
+            ui.text_edit_singleline(&mut settings.a2f.health_url);
+        });
+        ui.horizontal(|ui| {
+            ui.label("function_id (match A2F --function-id, e.g. Claire):");
+            ui.text_edit_singleline(&mut settings.a2f.function_id);
+        });
+        ui.label(
+            "Tip: run the `a2f_status` MCP tool to probe `/v1/health/ready` and\n\
+             confirm the gRPC stream can be opened. Test Kokoro→A2F with MCP `a2f_from_text`.",
+        );
+
+        ui.separator();
+        ui.label("Kimodo defaults:");
+        let mut dur = settings.kimodo.default_duration_sec;
+        if ui
+            .add(egui::Slider::new(&mut dur, 0.5..=20.0).text("default_duration_sec"))
+            .changed()
+        {
+            settings.kimodo.default_duration_sec = dur;
+        }
+        let mut steps = settings.kimodo.default_steps as i32;
+        if ui
+            .add(egui::Slider::new(&mut steps, 10..=500).text("default_steps"))
+            .changed()
+        {
+            settings.kimodo.default_steps = steps.max(1) as u32;
+        }
+        let mut to = settings.kimodo.generate_timeout_sec as i64;
+        if ui
+            .add(egui::Slider::new(&mut to, 10..=600).text("generate_timeout_sec"))
+            .changed()
+        {
+            settings.kimodo.generate_timeout_sec = to.max(1) as u64;
+        }
+        ui.label(
+            "Kimodo connects to our channel hub as a WS peer and consumes\n\
+             `kimodo:generate` envelopes; see kimodo-motion-service.py.",
+        );
+
+        ui.separator();
+        ui.label("Pose / animation library (shared with the Node pose-controller):");
+        ui.horizontal(|ui| {
+            ui.label("poses_dir:");
+            ui.text_edit_singleline(&mut settings.pose_library.poses_dir);
+        });
+        ui.horizontal(|ui| {
+            ui.label("animations_dir:");
+            ui.text_edit_singleline(&mut settings.pose_library.animations_dir);
+        });
+        ui.label(
+            "Poses are re-read from disk on every MCP tool call, so edits made\n\
+             here apply immediately without a reload button.",
+        );
+    });
+}
 
 pub fn draw_mcp_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
     if !settings.ui.show_mcp {
@@ -701,109 +831,7 @@ pub fn draw_mcp_window(mut contexts: EguiContexts, mut settings: ResMut<Settings
         .default_width(380.0)
         .open(&mut open)
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.label(
-                    "RMCP streamable-HTTP server exposing the pose / A2F / Kimodo tools\n\
-                     to IronClaw (and any other MCP client). Changes marked (restart) take\n\
-                     effect on the next launch.",
-                );
-
-                ui.separator();
-                ui.label("MCP server:");
-                ui.checkbox(&mut settings.mcp.enabled, "enabled (restart)");
-                ui.horizontal(|ui| {
-                    ui.label("bind_address (restart):");
-                    ui.text_edit_singleline(&mut settings.mcp.bind_address);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("path (restart):");
-                    ui.text_edit_singleline(&mut settings.mcp.path);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("bearer auth_token (restart, empty = none):");
-                    ui.text_edit_singleline(&mut settings.mcp.auth_token);
-                });
-                ui.colored_label(
-                    egui::Color32::from_rgb(160, 200, 240),
-                    format!(
-                        "URL: http://{}{}{}",
-                        settings.mcp.bind_address,
-                        if settings.mcp.path.starts_with('/') { "" } else { "/" },
-                        settings.mcp.path,
-                    ),
-                );
-
-                ui.separator();
-                ui.label("Audio2Face-3D:");
-                ui.checkbox(&mut settings.a2f.enabled, "enabled (restart)");
-                ui.checkbox(
-                    &mut settings.a2f.apply_from_tts,
-                    "apply_from_tts — Kokoro → A2F → face clip after each chat utterance (restart)",
-                );
-                ui.horizontal(|ui| {
-                    ui.label("gRPC endpoint:");
-                    ui.text_edit_singleline(&mut settings.a2f.endpoint);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("health URL:");
-                    ui.text_edit_singleline(&mut settings.a2f.health_url);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("function_id (match A2F --function-id, e.g. Claire):");
-                    ui.text_edit_singleline(&mut settings.a2f.function_id);
-                });
-                ui.label(
-                    "Tip: run the `a2f_status` MCP tool to probe `/v1/health/ready` and\n\
-                     confirm the gRPC stream can be opened. Test Kokoro→A2F with MCP `a2f_from_text`.",
-                );
-
-                ui.separator();
-                ui.label("Kimodo defaults:");
-                let mut dur = settings.kimodo.default_duration_sec;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut dur, 0.5..=20.0).text("default_duration_sec"),
-                    )
-                    .changed()
-                {
-                    settings.kimodo.default_duration_sec = dur;
-                }
-                let mut steps = settings.kimodo.default_steps as i32;
-                if ui
-                    .add(egui::Slider::new(&mut steps, 10..=500).text("default_steps"))
-                    .changed()
-                {
-                    settings.kimodo.default_steps = steps.max(1) as u32;
-                }
-                let mut to = settings.kimodo.generate_timeout_sec as i64;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut to, 10..=600).text("generate_timeout_sec"),
-                    )
-                    .changed()
-                {
-                    settings.kimodo.generate_timeout_sec = to.max(1) as u64;
-                }
-                ui.label(
-                    "Kimodo connects to our channel hub as a WS peer and consumes\n\
-                     `kimodo:generate` envelopes; see kimodo-motion-service.py.",
-                );
-
-                ui.separator();
-                ui.label("Pose / animation library (shared with the Node pose-controller):");
-                ui.horizontal(|ui| {
-                    ui.label("poses_dir:");
-                    ui.text_edit_singleline(&mut settings.pose_library.poses_dir);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("animations_dir:");
-                    ui.text_edit_singleline(&mut settings.pose_library.animations_dir);
-                });
-                ui.label(
-                    "Poses are re-read from disk on every MCP tool call, so edits made\n\
-                     here apply immediately without a reload button.",
-                );
-            });
+            mcp_panel(ui, &mut settings);
         });
     settings.ui.show_mcp = open;
 }

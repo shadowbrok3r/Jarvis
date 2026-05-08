@@ -143,7 +143,7 @@ fn thread_sidebar(
         ui.label(egui::RichText::new("Threads").strong());
         ui.with_layout(Layout::right_to_left(egui::Align::Max), |ui| {
             if ui
-                .add_enabled(gateway.is_some(), egui::Button::new("⟳"))
+                .add_enabled(gateway.is_some(), egui::Button::new("Refresh"))
                 .on_hover_text("refresh thread list")
                 .clicked()
             {
@@ -555,7 +555,7 @@ fn attachment_strip(ui: &mut egui::Ui, state: &mut DebugUiState) {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!("🖼 {}", att.name));
-                    if ui.button("✕").on_hover_text("remove").clicked() {
+                    if ui.button("X").on_hover_text("remove").clicked() {
                         remove = Some(idx);
                     }
                 });

@@ -91,6 +91,39 @@ pub struct UiSettings {
     pub show_mcp: bool,
     #[serde(default)]
     pub show_pose_controller: bool,
+    /// Default side panel for any Pose Controller tab without a per-tab
+    /// override in [`Self::pose_controller_tab_dock_sides`]. Allowed values:
+    /// `"left"`, `"right"`, `"bottom"`, `"floating"`, or `"hidden"`. The
+    /// default is `"right"` — the pre-Phase-4 layout.
+    #[serde(default = "default_pose_dock_side")]
+    pub pose_controller_dock_side: String,
+    /// Saved width (px) of any docked Pose Controller side panel. Persisted
+    /// so users don't have to re-resize on every launch. Applies to whichever
+    /// side panel is rendered (left or right).
+    #[serde(default = "default_pose_dock_width")]
+    pub pose_controller_dock_width: f32,
+    /// Saved height (px) of the docked bottom panel for any Pose Controller
+    /// tab assigned to `"bottom"`.
+    #[serde(default = "default_pose_dock_bottom_height")]
+    pub pose_controller_dock_bottom_height: f32,
+    /// Whitelist of tab ids the user has popped out into their own floating
+    /// windows. Kept for backward compatibility — the new per-tab dock sides
+    /// map below replaces this when present. Each id matches
+    /// `PoseControllerTab::config_key()`.
+    #[serde(default)]
+    pub pose_controller_undocked_tabs: Vec<String>,
+    /// Per-tab dock side override. Keys are `PoseControllerTab::config_key()`
+    /// values; values are one of `"left"`, `"right"`, `"bottom"`,
+    /// `"floating"`, or `"hidden"`. Tabs not in this map fall back to
+    /// [`Self::pose_controller_dock_side`].
+    #[serde(default)]
+    pub pose_controller_tab_dock_sides: std::collections::HashMap<String, String>,
+    /// Where the global Pose Tools toolbar (edit-mode toggle, axis selector,
+    /// mirror controls, panel show/hide buttons) renders. Currently always
+    /// `"top"` — kept as a string for forward compatibility with a `"none"`
+    /// option that hides the toolbar entirely.
+    #[serde(default = "default_pose_tools_toolbar_pos")]
+    pub pose_tools_toolbar_pos: String,
     /// Viewport bone pick, euler gizmo helpers, and VRMC spring joint tuning.
     #[serde(default)]
     pub show_rig_editor: bool,
@@ -102,6 +135,14 @@ pub struct UiSettings {
     /// layer with per-layer enable / weight / play controls.
     #[serde(default)]
     pub show_anim_layers: bool,
+    /// Where Animation Layers renders: `"bottom"` (dopesheet-style bottom
+    /// panel — the default), `"floating"` (legacy `egui::Window`), or
+    /// `"left"` / `"right"` for side docking.
+    #[serde(default = "default_anim_layers_dock_side")]
+    pub anim_layers_dock_side: String,
+    /// Saved height (px) of the bottom Animation Layers panel.
+    #[serde(default = "default_anim_layers_bottom_height")]
+    pub anim_layers_bottom_height: f32,
     /// Emotion Mappings editor — bind `[ACT emotion="x"]` labels to VRM
     /// expressions / animations.
     #[serde(default)]
@@ -112,6 +153,18 @@ pub struct UiSettings {
     /// Raw traffic log (WS / SSE / HTTP) per external service.
     #[serde(default)]
     pub show_network_trace: bool,
+    /// Phase-5 consolidation: unified Service Hub workspace combining
+    /// Channel hub / Gateway / TTS / MCP / Services rows in tabs.
+    #[serde(default)]
+    pub show_service_hub: bool,
+    /// Phase-5 consolidation: unified Graphics workspace combining basic
+    /// lights, advanced post-process / MToon, and look-at controls.
+    #[serde(default)]
+    pub show_graphics_workspace: bool,
+    /// Phase-5 consolidation: unified Diagnostics workspace combining
+    /// avatar Y-diagnostics summary, network trace, and pipeline status.
+    #[serde(default)]
+    pub show_diagnostics_workspace: bool,
 }
 
 impl Default for UiSettings {
@@ -128,13 +181,24 @@ impl Default for UiSettings {
             show_look_at: false,
             show_mcp: false,
             show_pose_controller: false,
+            pose_controller_dock_side: default_pose_dock_side(),
+            pose_controller_dock_width: default_pose_dock_width(),
+            pose_controller_dock_bottom_height: default_pose_dock_bottom_height(),
+            pose_controller_undocked_tabs: Vec::new(),
+            pose_controller_tab_dock_sides: std::collections::HashMap::new(),
+            pose_tools_toolbar_pos: default_pose_tools_toolbar_pos(),
             show_rig_editor: false,
             show_graphics_advanced: false,
             show_services: true,
             show_anim_layers: false,
+            anim_layers_dock_side: default_anim_layers_dock_side(),
+            anim_layers_bottom_height: default_anim_layers_bottom_height(),
             show_emotion_mappings: false,
             show_home_assistant: false,
             show_network_trace: false,
+            show_service_hub: false,
+            show_graphics_workspace: false,
+            show_diagnostics_workspace: false,
         }
     }
 }
@@ -468,6 +532,30 @@ pub struct TtsSettings {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_pose_dock_side() -> String {
+    "right".to_string()
+}
+
+fn default_pose_dock_width() -> f32 {
+    520.0
+}
+
+fn default_pose_dock_bottom_height() -> f32 {
+    280.0
+}
+
+fn default_pose_tools_toolbar_pos() -> String {
+    "top".to_string()
+}
+
+fn default_anim_layers_dock_side() -> String {
+    "bottom".to_string()
+}
+
+fn default_anim_layers_bottom_height() -> f32 {
+    260.0
 }
 
 fn default_tts_response_format() -> String {
@@ -965,5 +1053,38 @@ impl Settings {
             Err(e) => return Err(e.to_string()),
         }
         Self::load().map_err(|e| e.to_string())
+    }
+
+    /// One-shot migration from the pre-Phase-5 single-window UI to the new
+    /// consolidated workspaces. Runs at startup. When the user already had any
+    /// of the legacy single-service windows open in their `user.toml` and
+    /// none of the matching workspace toggles are explicitly set, opens the
+    /// workspace instead so they don't lose their entry point. Idempotent —
+    /// only fires when the workspace flags are still default-false AND a
+    /// related legacy flag is true. Does not close legacy windows; users can
+    /// uncheck them from the View menu's "Legacy single-service windows"
+    /// submenu when they're comfortable with the new workspaces.
+    pub fn migrate_workspace_visibility(&mut self) {
+        let u = &mut self.ui;
+
+        if !u.show_service_hub
+            && (u.show_channel_hub
+                || u.show_gateway
+                || u.show_tts
+                || u.show_mcp
+                || u.show_services)
+        {
+            u.show_service_hub = true;
+        }
+
+        if !u.show_graphics_workspace
+            && (u.show_graphics || u.show_graphics_advanced || u.show_look_at)
+        {
+            u.show_graphics_workspace = true;
+        }
+
+        if !u.show_diagnostics_workspace && u.show_network_trace {
+            u.show_diagnostics_workspace = true;
+        }
     }
 }

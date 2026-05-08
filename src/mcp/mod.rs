@@ -14,13 +14,14 @@
 
 pub mod plugin;
 mod anim_layer_mcp;
-mod pose_authoring;
-mod pose_intents;
-mod pose_safety;
+pub mod pose_authoring;
+pub mod pose_intents;
+pub mod pose_safety;
+pub mod semantic_intent_calibration;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -61,6 +62,7 @@ use pose_intents::{
     RaiseLegArgs,
 };
 use pose_safety::{is_arm_bone, is_leg_bone, PoseSafetyReport};
+use semantic_intent_calibration::{SemanticIntentCalibration, SemanticIntentCalibrationStore};
 
 use crate::plugins::anim_layer_sets::LayerSetsStore;
 use crate::plugins::anim_layers::LayerStackHandle;
@@ -84,6 +86,9 @@ pub struct JarvisMcpServer {
     pub traffic: Option<TrafficLogSink>,
     pub layer_stack: LayerStackHandle,
     pub layer_sets: LayerSetsStore,
+    /// Matches `[avatar].model_path` — drives which per-VRM semantic calibration applies.
+    pub semantic_model_path: Arc<RwLock<String>>,
+    pub semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -109,6 +114,8 @@ impl JarvisMcpServer {
         traffic: Option<TrafficLogSink>,
         layer_stack: LayerStackHandle,
         layer_sets: LayerSetsStore,
+        semantic_model_path: Arc<RwLock<String>>,
+        semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
     ) -> Self {
         Self::with_kimodo(
             pose_tx,
@@ -124,6 +131,8 @@ impl JarvisMcpServer {
             traffic,
             layer_stack,
             layer_sets,
+            semantic_model_path,
+            semantic_calibration,
         )
     }
 
@@ -145,6 +154,8 @@ impl JarvisMcpServer {
         traffic: Option<TrafficLogSink>,
         layer_stack: LayerStackHandle,
         layer_sets: LayerSetsStore,
+        semantic_model_path: Arc<RwLock<String>>,
+        semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
     ) -> Self {
         Self {
             pose_tx,
@@ -160,8 +171,16 @@ impl JarvisMcpServer {
             traffic,
             layer_stack,
             layer_sets,
+            semantic_model_path,
+            semantic_calibration,
             tool_router: Self::tool_router(),
         }
+    }
+
+    fn resolved_semantic_calibration(&self) -> SemanticIntentCalibration {
+        let path = self.semantic_model_path.read().unwrap();
+        let key = crate::plugins::vrm_preset_key(&path);
+        self.semantic_calibration.read().unwrap().get(&key)
     }
 }
 
@@ -965,24 +984,27 @@ impl JarvisMcpServer {
     #[tool(description = "Semantic intent: lift one leg from the hip. REQUIRED `side` (\"left\" or \"right\") and `amount` (0..=1). Optional `direction` (\"forward\" default — hip flex via positive `pitch_deg` on the upper leg; or \"outward\" — hip abduction via mirrored `roll_deg`). Compiles to a single safe upper-leg Euler that never exceeds bounded limits. `dry_run=true` returns the would-apply map without dispatching. PREFER THIS OVER raw pose_bones for any 'raise leg' agent intent.")]
     async fn raise_leg(&self, Parameters(args): Parameters<RaiseLegArgs>) -> CallToolResult {
         let dry_run = args.dry_run.unwrap_or(false);
-        let bones = compile_raise_leg(&args);
+        let cal = self.resolved_semantic_calibration();
+        let bones = compile_raise_leg(&args, &cal);
         self.apply_intent_bones("raise_leg", &bones, dry_run, true, false)
     }
 
-    #[tool(description = "Semantic intent: bend one knee. REQUIRED `side` (\"left\" or \"right\") and `amount` (0..=1, where 1 ≈ 70° flex). Compiles to a single bounded `*LowerLeg` pitch that uses the airi-family safe direction (positive pitch_deg = forward knee bend, no hyperextension). `dry_run=true` previews the map. PREFER THIS OVER raw pose_bones for knee bends.")]
+    #[tool(description = "Semantic intent: bend one knee. REQUIRED `side` (\"left\" or \"right\") and `amount` (0..=1, where 1 ≈ 70° flex). Compiles to a single bounded `*LowerLeg` pitch (× per-VRM calibration from Intent Lab / config). `dry_run=true` previews the map. PREFER THIS OVER raw pose_bones for knee bends.")]
     async fn bend_knee(&self, Parameters(args): Parameters<BendKneeArgs>) -> CallToolResult {
         let dry_run = args.dry_run.unwrap_or(false);
-        let bones = compile_bend_knee(&args);
+        let cal = self.resolved_semantic_calibration();
+        let bones = compile_bend_knee(&args, &cal);
         self.apply_intent_bones("bend_knee", &bones, dry_run, true, false)
     }
 
-    #[tool(description = "Semantic intent: drop both arms into a natural rest at the sides. Optional `amount` (0..=1, default 0.85) controls how strongly the arms hug the torso. Mirror-symmetric: left = -roll, right = +roll, plus a soft elbow pitch and mild shoulder lift. `dry_run=true` previews. PREFER THIS OVER raw pose_bones for any 'arms down' / 'rest pose' / 'idle stance' agent intent.")]
+    #[tool(description = "Semantic intent: drop both arms into a natural rest at the sides. Optional `amount` (0..=1, default 0.85). Mirror-symmetric upper-arm roll + elbow pitch + shoulders (× per-VRM calibration). `dry_run=true` previews. PREFER THIS OVER raw pose_bones for arms-down / idle stance intents.")]
     async fn arms_down_rest(
         &self,
         Parameters(args): Parameters<ArmsDownRestArgs>,
     ) -> CallToolResult {
         let dry_run = args.dry_run.unwrap_or(false);
-        let bones = compile_arms_down_rest(&args);
+        let cal = self.resolved_semantic_calibration();
+        let bones = compile_arms_down_rest(&args, &cal);
         self.apply_intent_bones("arms_down_rest", &bones, dry_run, false, true)
     }
 
@@ -1800,6 +1822,11 @@ impl JarvisMcpServer {
             })
             .collect();
 
+        let semantic_vrm_key = {
+            let path = self.semantic_model_path.read().unwrap();
+            crate::plugins::vrm_preset_key(&path)
+        };
+
         let mut response = json!({
             "intent": intent_name,
             "appliedBones": if dry_run { 0 } else { count },
@@ -1811,6 +1838,7 @@ impl JarvisMcpServer {
                 "dryRun": dry_run,
             },
             "verificationHint": verification_hint(touches_legs_hint, touches_arms_hint),
+            "semanticVrmKey": semantic_vrm_key,
         });
         if dry_run {
             response["sanitizedRotations"] =

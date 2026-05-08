@@ -5,10 +5,9 @@
 //! amount sliders (`0..=1`) so they don't have to pick raw axes / signs and
 //! mirror them by hand.
 //!
-//! Per-rig calibration is intentionally NOT in scope here — these intents
-//! target the airi/MMD humanoid family that POSE_GUIDE.md was written
-//! against. For other rigs, agents fall back to `pose_bones` with the
-//! per-rig probe protocol (see guide).
+//! Default compilers target the airi/MMD humanoid family (`POSE_GUIDE.md`).
+//! Per-VRM sign overrides live in [`super::semantic_intent_calibration::SemanticIntentCalibration`]
+//! (Intent Lab UI + `config/semantic_intent_calibration/<key>.toml`).
 
 use std::collections::HashMap;
 
@@ -16,6 +15,7 @@ use rmcp::schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::pose_authoring::BoneEulerDeg;
+use super::semantic_intent_calibration::SemanticIntentCalibration;
 
 /// Hard cap so semantic intents never push agents into `Severe` territory.
 /// Each intent's max amount maps to ≤ this many degrees on the dominant axis.
@@ -91,10 +91,12 @@ pub struct ArmsDownRestArgs {
 
 /// Compile `raise_leg` to a bounded Euler map.
 ///
-/// `forward`: positive `pitch_deg` on `*UpperLeg` (hip flexion).
-/// `outward`: positive `roll_deg` on the right thigh, negative on the left
-/// — matches the clean lateral-abduction axis the guide recommends.
-pub fn compile_raise_leg(args: &RaiseLegArgs) -> HashMap<String, BoneEulerDeg> {
+/// `forward`: positive `pitch_deg` on `*UpperLeg` (hip flexion) × calibration.
+/// `outward`: mirrored `roll_deg` × calibration.
+pub fn compile_raise_leg(
+    args: &RaiseLegArgs,
+    cal: &SemanticIntentCalibration,
+) -> HashMap<String, BoneEulerDeg> {
     let amt = args.amount.clamp(0.0, 1.0);
     let dir = args.direction.unwrap_or(LegRaiseDirection::Forward);
     let bone = format!("{}UpperLeg", args.side.lower());
@@ -102,14 +104,19 @@ pub fn compile_raise_leg(args: &RaiseLegArgs) -> HashMap<String, BoneEulerDeg> {
     let mut map = HashMap::new();
     let euler = match dir {
         LegRaiseDirection::Forward => BoneEulerDeg {
-            pitch_deg: Some(primary),
+            pitch_deg: Some(primary * cal.raise_leg_forward_pitch_sign),
             yaw_deg: None,
             roll_deg: None,
         },
         LegRaiseDirection::Outward => BoneEulerDeg {
             pitch_deg: None,
             yaw_deg: None,
-            roll_deg: Some(args.side.outward_sign() * primary * 0.8),
+            roll_deg: Some(
+                args.side.outward_sign()
+                    * primary
+                    * 0.8
+                    * cal.raise_leg_outward_roll_sign,
+            ),
         },
     };
     map.insert(bone, euler);
@@ -121,10 +128,13 @@ pub fn compile_raise_leg(args: &RaiseLegArgs) -> HashMap<String, BoneEulerDeg> {
 /// On airi-family rigs the safe knee-flex axis tends to be **positive
 /// `pitch_deg`** on `*LowerLeg` (the guide flips the historical negative
 /// convention because it hyperextends backward on this default rig).
-pub fn compile_bend_knee(args: &BendKneeArgs) -> HashMap<String, BoneEulerDeg> {
+pub fn compile_bend_knee(
+    args: &BendKneeArgs,
+    cal: &SemanticIntentCalibration,
+) -> HashMap<String, BoneEulerDeg> {
     let amt = args.amount.clamp(0.0, 1.0);
     let bone = format!("{}LowerLeg", args.side.lower());
-    let primary = INTENT_MAX_PRIMARY_DEG * amt;
+    let primary = INTENT_MAX_PRIMARY_DEG * amt * cal.bend_knee_pitch_sign;
     let mut map = HashMap::new();
     map.insert(
         bone,
@@ -142,16 +152,22 @@ pub fn compile_bend_knee(args: &BendKneeArgs) -> HashMap<String, BoneEulerDeg> {
 /// Drops both arms beside the torso using the mirror-asymmetric `roll_deg`
 /// convention from POSE_GUIDE: left = -k, right = +k. Adds a soft elbow
 /// pitch on the lower arms.
-pub fn compile_arms_down_rest(args: &ArmsDownRestArgs) -> HashMap<String, BoneEulerDeg> {
+pub fn compile_arms_down_rest(
+    args: &ArmsDownRestArgs,
+    cal: &SemanticIntentCalibration,
+) -> HashMap<String, BoneEulerDeg> {
     let amt = args.amount.unwrap_or(0.85).clamp(0.0, 1.0);
-    let primary = 60.0 * amt; // upper-arm roll
-    let elbow = -10.0 * amt; // soft elbow pitch
-    let shoulder = 4.0 * amt;
+    let ru = cal.arms_down_rest_upper_arm_roll_sign;
+    let el = cal.arms_down_rest_elbow_pitch_sign;
+    let sh = cal.arms_down_rest_shoulder_sign;
+    let primary = 60.0 * amt * ru; // upper-arm roll
+    let elbow = -10.0 * amt * el; // soft elbow pitch
+    let shoulder = 4.0 * amt * sh;
     let mut map = HashMap::new();
     map.insert(
         "leftUpperArm".into(),
         BoneEulerDeg {
-            pitch_deg: Some(2.0 * amt),
+            pitch_deg: Some(2.0 * amt * sh),
             yaw_deg: None,
             roll_deg: Some(-primary),
         },
@@ -159,7 +175,7 @@ pub fn compile_arms_down_rest(args: &ArmsDownRestArgs) -> HashMap<String, BoneEu
     map.insert(
         "rightUpperArm".into(),
         BoneEulerDeg {
-            pitch_deg: Some(2.0 * amt),
+            pitch_deg: Some(2.0 * amt * sh),
             yaw_deg: None,
             roll_deg: Some(primary),
         },
@@ -202,6 +218,7 @@ pub fn compile_arms_down_rest(args: &ArmsDownRestArgs) -> HashMap<String, BoneEu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::semantic_intent_calibration::SemanticIntentCalibration;
 
     fn around(actual: f32, expected: f32, tol: f32) -> bool {
         (actual - expected).abs() <= tol
@@ -209,12 +226,16 @@ mod tests {
 
     #[test]
     fn raise_leg_forward_uses_pitch() {
-        let map = compile_raise_leg(&RaiseLegArgs {
-            side: Side::Left,
-            amount: 0.5,
-            direction: Some(LegRaiseDirection::Forward),
-            dry_run: None,
-        });
+        let cal = SemanticIntentCalibration::default();
+        let map = compile_raise_leg(
+            &RaiseLegArgs {
+                side: Side::Left,
+                amount: 0.5,
+                direction: Some(LegRaiseDirection::Forward),
+                dry_run: None,
+            },
+            &cal,
+        );
         let e = map.get("leftUpperLeg").expect("left upper leg");
         let p = e.pitch_deg.unwrap_or(0.0);
         assert!(around(p, INTENT_MAX_PRIMARY_DEG * 0.5, 0.01));
@@ -224,18 +245,25 @@ mod tests {
 
     #[test]
     fn raise_leg_outward_uses_signed_roll_per_side() {
-        let left = compile_raise_leg(&RaiseLegArgs {
-            side: Side::Left,
-            amount: 1.0,
-            direction: Some(LegRaiseDirection::Outward),
-            dry_run: None,
-        });
-        let right = compile_raise_leg(&RaiseLegArgs {
-            side: Side::Right,
-            amount: 1.0,
-            direction: Some(LegRaiseDirection::Outward),
-            dry_run: None,
-        });
+        let cal = SemanticIntentCalibration::default();
+        let left = compile_raise_leg(
+            &RaiseLegArgs {
+                side: Side::Left,
+                amount: 1.0,
+                direction: Some(LegRaiseDirection::Outward),
+                dry_run: None,
+            },
+            &cal,
+        );
+        let right = compile_raise_leg(
+            &RaiseLegArgs {
+                side: Side::Right,
+                amount: 1.0,
+                direction: Some(LegRaiseDirection::Outward),
+                dry_run: None,
+            },
+            &cal,
+        );
         let l = left.get("leftUpperLeg").unwrap().roll_deg.unwrap();
         let r = right.get("rightUpperLeg").unwrap().roll_deg.unwrap();
         assert!(l < 0.0 && r > 0.0, "outward roll mirror: left {l}, right {r}");
@@ -244,23 +272,31 @@ mod tests {
 
     #[test]
     fn raise_leg_amount_is_clamped() {
-        let map = compile_raise_leg(&RaiseLegArgs {
-            side: Side::Right,
-            amount: 5.0,
-            direction: Some(LegRaiseDirection::Forward),
-            dry_run: None,
-        });
+        let cal = SemanticIntentCalibration::default();
+        let map = compile_raise_leg(
+            &RaiseLegArgs {
+                side: Side::Right,
+                amount: 5.0,
+                direction: Some(LegRaiseDirection::Forward),
+                dry_run: None,
+            },
+            &cal,
+        );
         let p = map.get("rightUpperLeg").unwrap().pitch_deg.unwrap();
         assert!(p <= INTENT_MAX_PRIMARY_DEG + 1e-3);
     }
 
     #[test]
     fn bend_knee_uses_lower_leg_pitch() {
-        let map = compile_bend_knee(&BendKneeArgs {
-            side: Side::Right,
-            amount: 0.5,
-            dry_run: None,
-        });
+        let cal = SemanticIntentCalibration::default();
+        let map = compile_bend_knee(
+            &BendKneeArgs {
+                side: Side::Right,
+                amount: 0.5,
+                dry_run: None,
+            },
+            &cal,
+        );
         let e = map.get("rightLowerLeg").expect("right lower leg");
         assert!(e.pitch_deg.is_some());
         assert!(e.yaw_deg.is_none());
@@ -269,10 +305,14 @@ mod tests {
 
     #[test]
     fn arms_down_rest_mirrors_signs() {
-        let map = compile_arms_down_rest(&ArmsDownRestArgs {
-            amount: Some(1.0),
-            dry_run: None,
-        });
+        let cal = SemanticIntentCalibration::default();
+        let map = compile_arms_down_rest(
+            &ArmsDownRestArgs {
+                amount: Some(1.0),
+                dry_run: None,
+            },
+            &cal,
+        );
         let l = map.get("leftUpperArm").unwrap().roll_deg.unwrap();
         let r = map.get("rightUpperArm").unwrap().roll_deg.unwrap();
         assert!(l < 0.0 && r > 0.0, "left should drop with -roll, right with +roll");
