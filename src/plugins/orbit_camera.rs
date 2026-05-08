@@ -408,6 +408,9 @@ fn set_orbit_pivot_from_click(
     mut orbit_q: Query<&mut PanOrbitCamera, With<Camera3d>>,
     mut state: ResMut<VrmFocusSnapState>,
 ) {
+    if !settings.camera.click_pivot_orbit {
+        return;
+    }
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
@@ -577,18 +580,20 @@ fn snap_orbit_focus_to_vrm_root(
     let target = root + Vec3::Y * lift;
 
     let panning = mouse.pressed(MouseButton::Middle);
-    let orbiting = mouse.pressed(MouseButton::Left);
+    // When the experimental click-pivot orbit is on, we also need to honour
+    // an LMB-orbit gesture (otherwise `focus_follow_vrm` snaps the focus
+    // back to the VRM root mid-orbit and the camera jumps). When the flag
+    // is off, the previous "MMB-only" guard is correct.
+    let lmb_orbit_in_progress =
+        settings.camera.click_pivot_orbit && mouse.pressed(MouseButton::Left);
     let force = std::mem::replace(&mut state.force_recenter, false);
     let initial = !state.initial_snap_done;
 
-    // Don't fight the user while they're actively interacting — both
-    // panning (MMB) and orbiting (LMB) are gestures we want to honour, so
-    // we skip the snap-back until the button is released. Without this,
-    // `focus_follow_vrm` will hard-snap the focus back to the VRM root
-    // mid-orbit and the camera visibly jumps to the new pivot — exactly
-    // the failure the click-pivot system was added to avoid. Initial
-    // post-load snap and explicit force-recenters still win.
-    if (panning || orbiting) && !force && !initial {
+    // Don't fight the user while they're actively interacting — panning
+    // (MMB) and (when click-pivot is enabled) orbiting (LMB) are both
+    // gestures we want to honour. Initial post-load snap and explicit
+    // force-recenters still win.
+    if (panning || lmb_orbit_in_progress) && !force && !initial {
         return;
     }
 

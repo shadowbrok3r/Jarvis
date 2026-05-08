@@ -628,12 +628,12 @@ pub fn jarvis_ios_egui_windows(
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                if ui.small_button("Loop").clicked() {
+                                                if ui.button("Loop").clicked() {
                                                     anim_requests
                                                         .vrma
                                                         .push((path.clone(), true));
                                                 }
-                                                if ui.small_button("Play").clicked() {
+                                                if ui.button("Play").clicked() {
                                                     anim_requests
                                                         .vrma
                                                         .push((path.clone(), false));
@@ -662,7 +662,7 @@ pub fn jarvis_ios_egui_windows(
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                if ui.small_button("Play").clicked() {
+                                                if ui.button("Play").clicked() {
                                                     anim_requests.json.push(path.clone());
                                                 }
                                             },

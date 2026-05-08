@@ -24,6 +24,7 @@ pub mod services;
 mod widgets;
 pub mod workspaces;
 
+use bevy_egui::egui::Layout;
 pub use chat::ChatUiState;
 pub use pose_controller::{KimodoClientRes, PoseControllerUiState};
 
@@ -321,7 +322,8 @@ fn draw_menu_bar(
             // users running purely in chat / services mode keep a clean
             // menu bar.
             if pose_controller_open {
-                ui.separator();
+                ui.add_space(ui.available_width() / 3.);
+                
                 pose_controller::transport_toolbar(
                     ui,
                     &mut state.pose_controller,
@@ -332,8 +334,6 @@ fn draw_menu_bar(
                     &mut players_q,
                     &mut settings.pose_controller,
                 );
-                ui.separator();
-                pose_controller::draw_rig_hover_hint(ui, &mut state.pose_controller, &rig);
             }
 
             // Right-aligned: playback indicator, pipeline (ops), save hint.
@@ -350,6 +350,9 @@ fn draw_menu_bar(
                 );
                 if pose_controller_open {
                     pose_controller::playback_indicator(ui, &active_anim);
+                    ui.separator();
+                    pose_controller::draw_rig_hover_hint(ui, &mut state.pose_controller, &rig);
+                    ui.separator();
                 }
             });
         });

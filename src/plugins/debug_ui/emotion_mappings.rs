@@ -253,7 +253,7 @@ fn expression_blend_panel(
                             .show_value(true),
                     );
                 }
-                if ui.small_button("remove").clicked() {
+                if ui.button("remove").clicked() {
                     remove = true;
                 }
             });

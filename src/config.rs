@@ -651,6 +651,16 @@ pub struct CameraSettings {
     /// orbit/zoom interaction.
     #[serde(default = "default_true")]
     pub recenter_on_orbit_zoom: bool,
+    /// When `true`, an LMB press over the model sets the orbit pivot to the
+    /// nearest bone joint along the click ray, so the next drag orbits
+    /// around that point. Defaults to `false`: PanOrbitCamera always re-aims
+    /// the camera at `focus`, so changing the pivot mid-session means the
+    /// camera silently re-orients toward the new pivot — and the first drag
+    /// frame then sweeps a wide arc around it, which reads as "the camera
+    /// shoots over". Until we have a proper trackball-orbit implementation
+    /// (rotate around pivot without changing focus), this stays opt-in.
+    #[serde(default)]
+    pub click_pivot_orbit: bool,
 }
 
 fn default_near_clip() -> f32 {

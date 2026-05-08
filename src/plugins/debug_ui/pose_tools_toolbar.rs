@@ -65,28 +65,28 @@ pub fn draw_pose_tools_toolbar(
 }
 
 fn edit_mode_section(ui: &mut egui::Ui, rig: &mut RigEditorState) {
-    ui.label(egui::RichText::new("Edit:").small().weak());
-    ui.toggle_value(&mut rig.edit_mode, "Edit mode")
-        .on_hover_text(
-            "Master toggle for viewport hover and axis-ring drag.\n\
-             - LMB on an axis ring -> rotate around that axis.\n\
-             - RMB on a bone -> select it (LMB never selects a bone).\n\
-             - Off = standard orbit / pan / zoom only.",
-        );
-    ui.toggle_value(&mut rig.twist_drag_enabled, "Drag")
-        .on_hover_text(
-            "When on (and a bone is selected), LMB-drag on an axis ring \
-             rotates the bone around that ring's axis.",
-        );
-    ui.toggle_value(&mut rig.invert_drag_direction, "Invert drag")
-        .on_hover_text(
-            "Flip the drag direction so the visible bone follows the cursor \
-             in the opposite convention.",
-        );
+    ui.menu_button("Edit", |ui| {
+        ui.toggle_value(&mut rig.edit_mode, "Edit mode")
+            .on_hover_text(
+                "Master toggle for viewport hover and axis-ring drag.\n\
+                - LMB on an axis ring -> rotate around that axis.\n\
+                - RMB on a bone -> select it (LMB never selects a bone).\n\
+                - Off = standard orbit / pan / zoom only.",
+            );
+        ui.toggle_value(&mut rig.twist_drag_enabled, "Drag")
+            .on_hover_text(
+                "When on (and a bone is selected), LMB-drag on an axis ring \
+                rotates the bone around that ring's axis.",
+            );
+        ui.toggle_value(&mut rig.invert_drag_direction, "Invert drag")
+            .on_hover_text(
+                "Flip the drag direction so the visible bone follows the cursor \
+                in the opposite convention.",
+            );
+    });
 }
 
 fn axis_section(ui: &mut egui::Ui, rig: &mut RigEditorState) {
-    ui.label(egui::RichText::new("Axis:").small().weak());
     for axis in [RigEditAxis::X, RigEditAxis::Y, RigEditAxis::Z] {
         let selected = rig.active_axis == axis;
         let label = egui::RichText::new(axis.label())
@@ -111,14 +111,13 @@ fn mirror_section(
     mirror: &mut MirrorState,
     sender: Option<&PoseCommandSender>,
 ) {
-    ui.label(egui::RichText::new("Mirror:").small().weak());
     ui.toggle_value(&mut mirror.realtime, "Realtime mirror")
         .on_hover_text(
             "When on, every bone-list slider drag and rig-handle rotation \
              also writes the mirrored value to the partner bone.",
         );
     if ui
-        .small_button("Mirror selected")
+        .button("Mirror selected")
         .on_hover_text(
             "Snapshot the currently selected bone's rotation and apply the \
              mirrored value to the partner.",
@@ -165,38 +164,39 @@ fn panel_visibility_section(
     settings: &mut Settings,
     pc: &PoseControllerUiState,
 ) {
-    ui.label(egui::RichText::new("Panels:").small().weak());
-    let default_side = settings.ui.pose_controller_dock_side.clone();
-    for tab in PoseControllerTab::all() {
-        let key = tab.config_key().to_string();
-        let current = settings
-            .ui
-            .pose_controller_tab_dock_sides
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| default_side.clone());
-        let visible = current != "hidden";
-        let label = format!("{}{}", tab.label(), side_glyph_for(&current));
-        let resp = ui
-            .selectable_label(visible, label)
-            .on_hover_text(format!(
-                "{} {} side. Click to {}",
-                tab.label(),
-                if visible { current.as_str() } else { "hidden" },
-                if visible { "hide" } else { "show" }
-            ));
-        if resp.clicked() {
-            if visible {
-                settings
-                    .ui
-                    .pose_controller_tab_dock_sides
-                    .insert(key, "hidden".to_string());
-            } else {
-                // Restore to default workspace side.
-                settings.ui.pose_controller_tab_dock_sides.remove(&key);
+    ui.menu_button("Panels", |ui| {
+        let default_side = settings.ui.pose_controller_dock_side.clone();
+        for tab in PoseControllerTab::all() {
+            let key = tab.config_key().to_string();
+            let current = settings
+                .ui
+                .pose_controller_tab_dock_sides
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| default_side.clone());
+            let visible = current != "hidden";
+            let label = format!("{}{}", tab.label(), side_glyph_for(&current));
+            let resp = ui
+                .selectable_label(visible, label)
+                .on_hover_text(format!(
+                    "{} {} side. Click to {}",
+                    tab.label(),
+                    if visible { current.as_str() } else { "hidden" },
+                    if visible { "hide" } else { "show" }
+                ));
+            if resp.clicked() {
+                if visible {
+                    settings
+                        .ui
+                        .pose_controller_tab_dock_sides
+                        .insert(key, "hidden".to_string());
+                } else {
+                    // Restore to default workspace side.
+                    settings.ui.pose_controller_tab_dock_sides.remove(&key);
+                }
             }
         }
-    }
+    });
 
     // Animation Layers — owned by `anim_layers::draw_anim_layers_window`,
     // but its show/hide is global, so we place it here next to the pose

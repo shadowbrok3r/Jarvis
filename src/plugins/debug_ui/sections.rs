@@ -329,6 +329,15 @@ pub fn draw_camera_window(
             ui.checkbox(&mut cam.focus_follow_vrm, "focus_follow_vrm");
             ui.add(egui::Slider::new(&mut cam.focus_y_lift, -2.0..=3.0).text("focus_y_lift"));
             ui.add(egui::Slider::new(&mut cam.snap_wait_frames, 0..=240).text("snap_wait_frames"));
+            ui.checkbox(&mut cam.click_pivot_orbit, "click_pivot_orbit (experimental)")
+                .on_hover_text(
+                    "When ON, an LMB click over the model sets the orbit pivot to the \
+                     nearest bone joint along the click ray (next drag orbits around \
+                     that point). PanOrbitCamera always re-aims at `focus`, so the \
+                     camera silently re-orients toward the new pivot on click and the \
+                     first drag frame can sweep a wide arc — that's why this is \
+                     opt-in. A future trackball implementation will fix this.",
+                );
 
             if ui
                 .button("Re-center on VRM now")

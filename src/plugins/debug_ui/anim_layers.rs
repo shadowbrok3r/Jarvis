@@ -522,7 +522,7 @@ fn layer_row(
                     }
                     let expand_icon = if expanded { "-" } else { "+" };
                     if ui
-                        .small_button(expand_icon)
+                        .button(expand_icon)
                         .on_hover_text("expand / collapse driver params")
                         .clicked()
                     {

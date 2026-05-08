@@ -212,14 +212,14 @@ pub fn rig_tab(
                     );
                 }
                 if ui
-                    .small_button("Focus camera")
+                    .button("Focus camera")
                     .on_hover_text("Move the orbit camera focus onto this bone now.")
                     .clicked()
                 {
                     rig.pending_focus_camera_to_bone = Some(bone.clone());
                 }
                 if ui
-                    .small_button("Reveal in list")
+                    .button("Reveal in list")
                     .on_hover_text("Switch to the Bones tab and scroll this bone into view.")
                     .clicked()
                 {
@@ -1553,13 +1553,21 @@ pub(crate) fn rig_editor_viewport_pick(
 /// which is intrinsic XYZ. That means once the bone has any prior rotation,
 /// adding to a single euler component no longer produces a clean rotation
 /// around the *visible* ring's axis — the X rotation happens before Y and
-/// Z, so the Y/Z axes drift relative to the gizmo. We instead compose
-/// `current_q * Quat::from_axis_angle(local_axis, theta)` (post-multiply
-/// = bone-local rotation) and re-decompose to XYZ. Combined with the
-/// "ring frame = current bone world rotation" gizmo (see
-/// [`crate::plugins::rig_editor::bone_bind_world_rot`]), this makes every
-/// ring stay visually glued to the bone — dragging X spins the X ring
-/// around its own normal, not around some hidden parent axis.
+/// Z, so the Y/Z axes drift relative to the gizmo. We instead compose in
+/// quaternion space and re-decompose to XYZ.
+///
+/// **Why the drag axis is `rest_world · local_axis`, not just `local_axis`:**
+/// the pose driver's effective math is `bone_world = M · L · R_w` where
+/// `M = parent_world · parent_rest_world⁻¹`, `L = pose_q`, and
+/// `R_w = bone's rest-world rotation`. The ring is drawn perpendicular to
+/// `bone_world · X` (so it visibly hugs the bone), and we want the drag to
+/// rotate around exactly that visible axis. Solving
+/// `M · L_new · R_w = R(bone_world·X, θ) · M · L · R_w` gives
+/// `L_new = L · R(R_w · X, θ)`. So we post-multiply by an axis pre-rotated
+/// through `R_w`. When `R_w = I` (spine, root), this collapses to the
+/// naive `current_q * R(X, θ)` and shoulders work; for arms/fingers
+/// (where the bone's rest world basis is rotated relative to the parent),
+/// the `R_w` factor is what kills the cyclic-axis-swap.
 pub(crate) fn rig_editor_axis_drag(
     mut contexts: EguiContexts,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1568,6 +1576,8 @@ pub(crate) fn rig_editor_axis_drag(
     sender: Option<Res<PoseCommandSender>>,
     rig: Res<RigEditorState>,
     mirror: Res<MirrorState>,
+    indexed: Option<Res<IndexedBones>>,
+    rest_gtf_q: Query<&RestGlobalTransform>,
     mut debug: ResMut<super::DebugUiState>,
 ) {
     if !rig.edit_mode || !rig.twist_drag_enabled {
@@ -1611,23 +1621,37 @@ pub(crate) fn rig_editor_axis_drag(
     };
     let delta_deg = dx * rig.twist_drag_sensitivity * dir * precision;
 
+    // The drag axis must be rotated through the bone's rest-world rotation so
+    // that post-multiplying with `current_q * R(R_w·axis, θ)` produces a
+    // world-space rotation around the visible ring's normal `bone_world·axis`.
+    // Without this factor, arms/fingers/hands (whose rest_world is rotated
+    // relative to their parent) drag along the wrong ring's path.
+    let rest_world_rot = indexed
+        .as_deref()
+        .and_then(|idx| idx.entity(&bone))
+        .and_then(|e| rest_gtf_q.get(e).ok())
+        .map(|r| r.0.rotation())
+        .unwrap_or(Quat::IDENTITY);
+
     let euler = debug
         .pose_controller
         .bone_euler
         .entry(bone.clone())
         .or_insert([0.0, 0.0, 0.0]);
 
-    // Compose the new rotation in the **bone-local** frame (post-multiply)
-    // so the ring stays glued to the bone — drag rotates around the bone's
-    // current local axis, not around a fixed parent/bind axis. Then
-    // re-decompose to euler XYZ for the slider mirror.
     let current_q = Quat::from_euler(
         EulerRot::XYZ,
         euler[0].to_radians(),
         euler[1].to_radians(),
         euler[2].to_radians(),
     );
-    let delta_q = Quat::from_axis_angle(axis.unit(), delta_deg.to_radians());
+    let drag_axis_local = (rest_world_rot * axis.unit()).normalize_or_zero();
+    let drag_axis_local = if drag_axis_local == Vec3::ZERO {
+        axis.unit()
+    } else {
+        drag_axis_local
+    };
+    let delta_q = Quat::from_axis_angle(drag_axis_local, delta_deg.to_radians());
     let new_q = (current_q * delta_q).normalize();
     let (nx, ny, nz) = new_q.to_euler(EulerRot::XYZ);
     euler[0] = nx.to_degrees();

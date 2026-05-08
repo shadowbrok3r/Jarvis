@@ -938,24 +938,15 @@ pub(super) fn draw_rig_hover_hint(
     pc: &mut PoseControllerUiState,
     rig: &crate::plugins::rig_editor::RigEditorState,
 ) {
-    let mode = if rig.edit_mode { "edit" } else { "view" };
-    let mode_color = if rig.edit_mode {
-        egui::Color32::from_rgb(180, 220, 140)
-    } else {
-        egui::Color32::from_rgb(160, 160, 160)
-    };
-    ui.colored_label(mode_color, format!("[{mode}]"));
-
-    if let Some(name) = rig.hovered_bone.as_deref() {
-        ui.label("hover:");
-        ui.colored_label(
-            egui::Color32::from_rgb(220, 200, 120),
-            egui::RichText::new(name).monospace(),
-        );
-    } else {
-        ui.label(egui::RichText::new("hover: —").weak());
+    if let Some(h) = rig.hovered_axis {
+        ui.label(egui::RichText::new(format!("(over {})", h.label())).weak());
     }
-    ui.separator();
+    let axis_color = match rig.active_axis {
+        RigEditAxis::X => egui::Color32::from_rgb(235, 80, 80),
+        RigEditAxis::Y => egui::Color32::from_rgb(90, 220, 100),
+        RigEditAxis::Z => egui::Color32::from_rgb(110, 150, 240),
+    };
+    ui.colored_label(axis_color, rig.active_axis.label());
 
     if let Some(name) = rig.selected_bone.as_deref() {
         ui.label("selected:");
@@ -971,16 +962,24 @@ pub(super) fn draw_rig_hover_hint(
     }
 
     ui.separator();
-    ui.label("axis:");
-    let axis_color = match rig.active_axis {
-        RigEditAxis::X => egui::Color32::from_rgb(235, 80, 80),
-        RigEditAxis::Y => egui::Color32::from_rgb(90, 220, 100),
-        RigEditAxis::Z => egui::Color32::from_rgb(110, 150, 240),
-    };
-    ui.colored_label(axis_color, rig.active_axis.label());
-    if let Some(h) = rig.hovered_axis {
-        ui.label(egui::RichText::new(format!("(over {})", h.label())).weak());
+    if let Some(name) = rig.hovered_bone.as_deref() {
+        ui.label("hover:");
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 200, 120),
+            egui::RichText::new(name).monospace(),
+        );
+    } else {
+        ui.label(egui::RichText::new("hover: —").weak());
     }
+    ui.separator();
+
+    let mode = if rig.edit_mode { "edit" } else { "view" };
+    let mode_color = if rig.edit_mode {
+        egui::Color32::from_rgb(180, 220, 140)
+    } else {
+        egui::Color32::from_rgb(160, 160, 160)
+    };
+    ui.colored_label(mode_color, format!("[{mode}]"));
 }
 
 /// Bevy-side resource wrapping [`KimodoClient`] so the UI can send generate
@@ -1016,37 +1015,7 @@ pub(super) fn transport_toolbar(
     pose_settings: &mut jarvis_avatar::config::PoseControllerSettings,
 ) {
     if ui
-        .button("Reset")
-        .on_hover_text("Reset pose + expressions (reset_pose MCP)")
-        .clicked()
-    {
-        if let Some(s) = sender {
-            s.send(PoseCommand::ResetPose);
-            state.status = Some("reset pose queued".into());
-        }
-    }
-    if ui
-        .button("Stop native")
-        .on_hover_text("Stop the native Bevy animation player")
-        .clicked()
-    {
-        active_anim.stop();
-        state.status = Some("stopped native animation".into());
-    }
-    if ui
-        .button("Stop idle")
-        .on_hover_text("Stop every AnimationPlayer (idle VRMA sampler)")
-        .clicked()
-    {
-        let mut n = 0usize;
-        for mut player in players_q.iter_mut() {
-            player.stop_all();
-            n += 1;
-        }
-        state.status = Some(format!("stopped {n} AnimationPlayer(s)"));
-    }
-    if ui
-        .add_enabled(!vrma_entities.is_empty(), egui::Button::new("Resume idle"))
+        .add_enabled(!vrma_entities.is_empty(), egui::Button::new("▶"))
         .on_hover_text("Play the loaded idle VRMA on a loop again")
         .clicked()
     {
@@ -1059,6 +1028,39 @@ pub(super) fn transport_toolbar(
             });
         }
         state.status = Some(format!("resumed {} VRMA(s)", vrma_entities.len()));
+    }
+    ui.separator();
+    if ui
+        .button("⏹ native")
+        .on_hover_text("Stop the native Bevy animation player")
+        .clicked()
+    {
+        active_anim.stop();
+        state.status = Some("stopped native animation".into());
+    }
+    ui.separator();
+    if ui
+        .button("⏹ idle")
+        .on_hover_text("Stop every AnimationPlayer (idle VRMA sampler)")
+        .clicked()
+    {
+        let mut n = 0usize;
+        for mut player in players_q.iter_mut() {
+            player.stop_all();
+            n += 1;
+        }
+        state.status = Some(format!("stopped {n} AnimationPlayer(s)"));
+    }
+    ui.separator();
+    if ui
+        .button("⟲")
+        .on_hover_text("Reset pose + expressions (reset_pose MCP)")
+        .clicked()
+    {
+        if let Some(s) = sender {
+            s.send(PoseCommand::ResetPose);
+            state.status = Some("reset pose queued".into());
+        }
     }
     ui.separator();
     ui.checkbox(&mut pose_settings.auto_stop_idle_vrma, "auto-stop idle")
@@ -1276,7 +1278,7 @@ fn pose_row(
                 } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     state.renaming_pose = None;
                 }
-                if ui.small_button("save").on_hover_text("Save (Enter)").clicked() {
+                if ui.button("save").on_hover_text("Save (Enter)").clicked() {
                     let new_name = buf.trim().to_string();
                     if !new_name.is_empty() && new_name != pose.name {
                         let _ = library.library.rename_pose(&pose.name, &new_name);
@@ -1284,7 +1286,7 @@ fn pose_row(
                     }
                     state.renaming_pose = None;
                 }
-                if ui.small_button("cancel").on_hover_text("Cancel (Esc)").clicked() {
+                if ui.button("cancel").on_hover_text("Cancel (Esc)").clicked() {
                     state.renaming_pose = None;
                 }
             } else {
@@ -1304,7 +1306,7 @@ fn pose_row(
                 if editing {
                     // Edit-mode actions: category combobox + delete.
                     if ui
-                        .small_button("delete")
+                        .button("delete")
                         .on_hover_text("Delete this pose from the library")
                         .clicked()
                     {
@@ -1327,10 +1329,10 @@ fn pose_row(
                         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             commit_new_category(library, state, &pose.name);
                         }
-                        if ui.small_button("save").clicked() {
+                        if ui.button("save").clicked() {
                             commit_new_category(library, state, &pose.name);
                         }
-                        if ui.small_button("cancel").clicked() {
+                        if ui.button("cancel").clicked() {
                             state.new_category_buf.remove(&pose.name);
                         }
                     } else {
@@ -1364,11 +1366,11 @@ fn pose_row(
                                 }
                             });
                     }
-                    if ui.small_button("done").clicked() {
+                    if ui.button("done").clicked() {
                         state.editing_pose = None;
                     }
                 } else if ui
-                    .small_button("edit")
+                    .button("edit")
                     .on_hover_text("Enter edit mode (rename, change category, delete)")
                     .clicked()
                 {
@@ -1451,86 +1453,80 @@ fn animation_tab(
 
     ui.horizontal(|ui| {
         ui.label("Filter");
-        ui.text_edit_singleline(&mut state.search);
+        ui.add(egui::TextEdit::singleline(&mut state.search).desired_width(140.0));
         category_combobox(ui, "anim_filter_cat", &cats, &mut state.category_filter, "Category");
         ui.separator();
-        ui.label("Default source:");
-        ui.selectable_value(
-            &mut state.default_playback_mode,
-            PlaybackMode::Native,
-            "Native",
-        );
-        ui.selectable_value(
-            &mut state.default_playback_mode,
-            PlaybackMode::Kimodo,
-            "Kimodo",
-        );
-        if ui.button("Refresh").clicked() {
+        ui.menu_button(format!("{:?} ▼", state.default_playback_mode), |ui| {
+            ui.selectable_value(
+                &mut state.default_playback_mode,
+                PlaybackMode::Native,
+                "Native",
+            );
+            ui.selectable_value(
+                &mut state.default_playback_mode,
+                PlaybackMode::Kimodo, "Kimodo",
+            );
+        });
+        if ui.button("⟲").clicked() {
             library.mark_dirty();
         }
     });
 
     ui.separator();
 
-    // Two-column body: explorer on the left, generator + idle on the right.
-    let avail_h = ui.available_height();
-    let left_w = (ui.available_width() * 0.62).max(260.0);
+    // Right: generator + idle controls.
+    ui.vertical(|ui| {
+        egui::CollapsingHeader::new("Generator").default_open(true).show(ui, |ui| {
+            ai_gen_panel(ui, state, library, streaming, kimodo, tokio_rt);
+        });
+        egui::CollapsingHeader::new("Idle").show(ui, |ui| {
+            idle_panel(ui, pose_settings);
+        });
+    });
+
+    ui.vertical_centered(|ui| {
+        ui.add_space(10.);
+        ui.label(egui::RichText::new("Library").strong());
+    });
+    ui.separator();
+
     egui::ScrollArea::vertical()
         .id_salt("anim_workspace_scroll")
-        .max_height(avail_h)
         .show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                // Left: animation list grouped by category.
-                ui.allocate_ui_with_layout(
-                    egui::vec2(left_w, avail_h - 4.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.label(egui::RichText::new("Library").strong());
-                        let anims = library.animations();
-                        let search = state.search.trim().to_ascii_lowercase();
-                        let cat = state.category_filter.trim().to_ascii_lowercase();
-                        let mut grouped: BTreeMap<String, Vec<AnimationMeta>> = BTreeMap::new();
-                        for meta in anims {
-                            if !search.is_empty()
-                                && !meta.name.to_ascii_lowercase().contains(&search)
-                            {
-                                continue;
-                            }
-                            if !cat.is_empty() && meta.category.to_ascii_lowercase() != cat {
-                                continue;
-                            }
-                            let key = if meta.category.trim().is_empty() {
-                                "(uncategorized)".to_string()
-                            } else {
-                                meta.category.clone()
-                            };
-                            grouped.entry(key).or_default().push(meta);
-                        }
-                        if grouped.is_empty() {
-                            ui.label(egui::RichText::new("(no animations match)").italics());
-                        }
-                        for (cat_key, metas) in &grouped {
-                            egui::CollapsingHeader::new(format!("{cat_key} ({})", metas.len()))
-                                .id_salt(format!("anim-cat-{cat_key}"))
-                                .default_open(true)
-                                .show(ui, |ui| {
-                                    for meta in metas {
-                                        anim_row(ui, state, library, active_anim, kimodo, meta);
-                                    }
-                                });
-                        }
-                    },
-                );
 
-                ui.separator();
-
-                // Right: generator + idle controls.
-                ui.vertical(|ui| {
-                    ai_gen_panel(ui, state, library, streaming, kimodo, tokio_rt);
-                    ui.separator();
-                    idle_panel(ui, pose_settings);
-                });
-            });
+            let anims = library.animations();
+            let search = state.search.trim().to_ascii_lowercase();
+            let cat = state.category_filter.trim().to_ascii_lowercase();
+            let mut grouped: BTreeMap<String, Vec<AnimationMeta>> = BTreeMap::new();
+            for meta in anims {
+                if !search.is_empty()
+                    && !meta.name.to_ascii_lowercase().contains(&search)
+                {
+                    continue;
+                }
+                if !cat.is_empty() && meta.category.to_ascii_lowercase() != cat {
+                    continue;
+                }
+                let key = if meta.category.trim().is_empty() {
+                    "(uncategorized)".to_string()
+                } else {
+                    meta.category.clone()
+                };
+                grouped.entry(key).or_default().push(meta);
+            }
+            if grouped.is_empty() {
+                ui.label(egui::RichText::new("(no animations match)").italics());
+            }
+            for (cat_key, metas) in &grouped {
+                egui::CollapsingHeader::new(format!("{cat_key} ({})", metas.len()))
+                    .id_salt(format!("anim-cat-{cat_key}"))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for meta in metas {
+                            anim_row(ui, state, library, active_anim, kimodo, meta);
+                        }
+                    });
+            }
         });
 }
 
@@ -1576,7 +1572,7 @@ fn anim_row(
                     .entry(meta.filename.clone())
                     .or_insert_with(|| meta.filename.clone());
                 ui.add(egui::TextEdit::singleline(buf).desired_width(180.0));
-                if ui.small_button("save").clicked() {
+                if ui.button("save").clicked() {
                     let new_name = buf.trim().to_string();
                     if !new_name.is_empty() && new_name != meta.filename {
                         let new_name = if new_name.ends_with(".json") {
@@ -1594,30 +1590,19 @@ fn anim_row(
                     }
                     state.renaming_animation = None;
                 }
-                if ui.small_button("cancel").clicked() {
+                if ui.button("cancel").clicked() {
                     state.renaming_animation = None;
                 }
             } else {
-                let title_resp = ui
-                    .add(
-                        egui::Label::new(egui::RichText::new(&meta.name).strong())
-                            .sense(egui::Sense::click()),
-                    )
+                let title_resp = ui.button(egui::RichText::new(&meta.name).strong())
                     .on_hover_text("Click to rename. Use the play buttons to start playback.");
                 if title_resp.clicked() {
                     state.renaming_animation = Some(meta.filename.clone());
                 }
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{}fr @{:.0}fps",
-                        meta.frame_count, meta.fps
-                    ))
-                    .weak(),
-                );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .small_button("Play (native)")
+                    .button("▶")
                     .on_hover_text("Play via Bevy native player")
                     .clicked()
                 {
@@ -1631,7 +1616,7 @@ fn anim_row(
                     }
                 }
                 if ui
-                    .small_button("Play (Kimodo)")
+                    .button("▶ (K)")
                     .on_hover_text("Ask Kimodo peer to stream it")
                     .clicked()
                 {
@@ -1641,16 +1626,24 @@ fn anim_row(
                     }
                 }
                 if editing {
-                    if ui.small_button("done").clicked() {
+                    if ui.button("done").clicked() {
                         state.editing_animation = None;
                     }
                 } else if ui
-                    .small_button("edit")
+                    .button("🖊")
                     .on_hover_text("Enter edit mode (rename, change category/loop/hold, delete)")
                     .clicked()
                 {
                     state.editing_animation = Some(meta.filename.clone());
                 }
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}fr @{:.0}fps",
+                        meta.frame_count, meta.fps
+                    ))
+                    .weak(),
+                );
             });
         });
         if editing {
@@ -1669,7 +1662,7 @@ fn anim_row(
                     .or_insert(meta.hold_duration);
                 ui.label("Hold (s)");
                 ui.add(egui::Slider::new(hold_buf, 0.0..=10.0).step_by(0.1));
-                if ui.small_button("Save").clicked() {
+                if ui.button("Save").clicked() {
                     let new_cat = cat_buf.trim().to_string();
                     let new_hold = *hold_buf;
                     let _ = library.library.update_animation_metadata(
@@ -1685,7 +1678,7 @@ fn anim_row(
                     library.mark_dirty();
                     state.status = Some(format!("metadata saved for {}", meta.filename));
                 }
-                if ui.small_button("Delete").on_hover_text("Delete this animation").clicked() {
+                if ui.button("Delete").on_hover_text("Delete this animation").clicked() {
                     if library.library.delete_animation(&meta.filename).is_ok() {
                         state.status = Some(format!("deleted {}", meta.filename));
                         library.mark_dirty();
@@ -1844,7 +1837,7 @@ fn expressions_panel(
 ) {
     ui.label(egui::RichText::new("VRM expression presets").strong());
     ui.small(format!(
-        "Each slider is 0..=1. Idle VRMA can overwrite morphs unless `auto-stop idle` is on in the toolbar (currently {}).",
+        "Idle VRMA can overwrite morphs unless `auto-stop idle` is on in the toolbar (currently {}).",
         if pose_settings.auto_stop_idle_vrma {
             "on"
         } else {
@@ -1942,7 +1935,7 @@ fn bones_with_expressions_tab(
     let avail_h = ui.available_height();
     let total_w = ui.available_width();
     let left_w = (total_w * 0.62).max(280.0);
-    let right_w = (total_w - left_w - 12.0).max(180.0);
+    let right_w = (total_w - left_w - 12.0).max(160.0);
 
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(
@@ -1977,13 +1970,12 @@ fn bones_panel(
     mirror: &mut crate::plugins::mirror::MirrorState,
 ) {
     ui.horizontal(|ui| {
-        ui.label("Bone filter:");
         ui.add(
             egui::TextEdit::singleline(&mut state.bone_search)
-                .hint_text("substring, e.g. toe / DEF- / leftHand")
+                .hint_text("Bone filter")
                 .desired_width((ui.available_width() - 90.0).clamp(120.0, 240.0)),
         );
-        if ui.small_button("Clear").clicked() {
+        if ui.button("Ｘ").clicked() {
             state.bone_search.clear();
         }
     });
@@ -1991,7 +1983,7 @@ fn bones_panel(
 
     ui.horizontal(|ui| {
         if ui
-            .small_button("Reset all")
+            .button("Reset all")
             .on_hover_text("Reset every bone back to bind (rest) — same as the toolbar reset.")
             .clicked()
         {
@@ -2002,7 +1994,7 @@ fn bones_panel(
             state.status = Some("reset rig to bind pose".into());
         }
         if ui
-            .small_button("📷 Snapshot → sliders")
+            .button("📷 Snapshot → sliders")
             .on_hover_text(
                 "Seed the sliders with the current rig rotations so you can nudge from live pose.",
             )
@@ -2217,7 +2209,7 @@ arms_down_rest → shoulder/upper-arm/lower-arm rolls & pitches (× the three ar
             egui::Slider::new(&mut pc.intent_lab_cal.raise_leg_forward_pitch_sign, -1.0..=1.0)
                 .text("raise_leg forward pitch"),
         );
-        if ui.small_button("Flip").clicked() {
+        if ui.button("Flip").clicked() {
             pc.intent_lab_cal.raise_leg_forward_pitch_sign *= -1.0;
         }
     });
@@ -2226,13 +2218,13 @@ arms_down_rest → shoulder/upper-arm/lower-arm rolls & pitches (× the three ar
             egui::Slider::new(&mut pc.intent_lab_cal.raise_leg_outward_roll_sign, -1.0..=1.0)
                 .text("raise_leg outward roll"),
         );
-        if ui.small_button("Flip").clicked() {
+        if ui.button("Flip").clicked() {
             pc.intent_lab_cal.raise_leg_outward_roll_sign *= -1.0;
         }
     });
     ui.horizontal(|ui| {
         ui.add(egui::Slider::new(&mut pc.intent_lab_cal.bend_knee_pitch_sign, -1.0..=1.0).text("bend_knee pitch"));
-        if ui.small_button("Flip").clicked() {
+        if ui.button("Flip").clicked() {
             pc.intent_lab_cal.bend_knee_pitch_sign *= -1.0;
         }
     });
@@ -2241,7 +2233,7 @@ arms_down_rest → shoulder/upper-arm/lower-arm rolls & pitches (× the three ar
             egui::Slider::new(&mut pc.intent_lab_cal.arms_down_rest_upper_arm_roll_sign, -1.0..=1.0)
                 .text("arms_down_rest upper-arm roll"),
         );
-        if ui.small_button("Flip").clicked() {
+        if ui.button("Flip").clicked() {
             pc.intent_lab_cal.arms_down_rest_upper_arm_roll_sign *= -1.0;
         }
     });
@@ -2250,7 +2242,7 @@ arms_down_rest → shoulder/upper-arm/lower-arm rolls & pitches (× the three ar
             egui::Slider::new(&mut pc.intent_lab_cal.arms_down_rest_elbow_pitch_sign, -1.0..=1.0)
                 .text("arms_down_rest elbow pitch"),
         );
-        if ui.small_button("Flip").clicked() {
+        if ui.button("Flip").clicked() {
             pc.intent_lab_cal.arms_down_rest_elbow_pitch_sign *= -1.0;
         }
     });
@@ -2258,7 +2250,7 @@ arms_down_rest → shoulder/upper-arm/lower-arm rolls & pitches (× the three ar
         ui.add(
             egui::Slider::new(&mut pc.intent_lab_cal.arms_down_rest_shoulder_sign, -1.0..=1.0).text("arms_down_rest shoulder"),
         );
-        if ui.small_button("Flip").clicked() {
+        if ui.button("Flip").clicked() {
             pc.intent_lab_cal.arms_down_rest_shoulder_sign *= -1.0;
         }
     });
@@ -2424,10 +2416,10 @@ fn bone_row(
     // glance — selected wins over hovered, hovered wins over default.
     let frame = if is_selected {
         egui::Frame::group(ui.style())
-            .fill(egui::Color32::from_rgba_unmultiplied(80, 100, 160, 36))
+            .fill(egui::Color32::from_rgba_unmultiplied(125, 80, 161, 36))
     } else if is_hovered_other {
         egui::Frame::group(ui.style())
-            .fill(egui::Color32::from_rgba_unmultiplied(160, 130, 50, 28))
+            .fill(egui::Color32::from_rgba_unmultiplied(161, 80, 146, 28))
     } else {
         egui::Frame::group(ui.style())
     };
@@ -2464,7 +2456,7 @@ fn bone_row(
                 label = label.color(egui::Color32::from_rgb(230, 210, 130));
             }
             let label_resp = ui
-                .add(egui::Label::new(label).sense(egui::Sense::click()))
+                .button(label)
                 .on_hover_text(if in_index {
                     "Click the name to select this bone in the rig editor (sets selected bone, focuses camera in edit mode). Right-click the name to reset it to rest. Sliders below stay independent."
                 } else {
