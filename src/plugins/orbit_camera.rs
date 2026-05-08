@@ -577,13 +577,18 @@ fn snap_orbit_focus_to_vrm_root(
     let target = root + Vec3::Y * lift;
 
     let panning = mouse.pressed(MouseButton::Middle);
+    let orbiting = mouse.pressed(MouseButton::Left);
     let force = std::mem::replace(&mut state.force_recenter, false);
     let initial = !state.initial_snap_done;
 
-    // Don't fight the user while they are actively panning — that would make
-    // pan feel like a rubber band. Still allow the initial post-load snap and
-    // explicit force-recenters to win.
-    if panning && !force && !initial {
+    // Don't fight the user while they're actively interacting — both
+    // panning (MMB) and orbiting (LMB) are gestures we want to honour, so
+    // we skip the snap-back until the button is released. Without this,
+    // `focus_follow_vrm` will hard-snap the focus back to the VRM root
+    // mid-orbit and the camera visibly jumps to the new pivot — exactly
+    // the failure the click-pivot system was added to avoid. Initial
+    // post-load snap and explicit force-recenters still win.
+    if (panning || orbiting) && !force && !initial {
         return;
     }
 
