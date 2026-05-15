@@ -10,17 +10,16 @@ name = "jarvis-avatar"
 path = "src/main.rs"
 
 [dependencies]
-# Rendering (Bevy 0.18 + bevy_vrm1 0.7 — see README vs NewPlan.md pin)
+# Rendering (Bevy 0.18 + bevy_vrm1 0.7)
 bevy = { version = "0.18", features = ["wav"] }
 bevy_vrm1 = "0.7"
 bevy_egui = { version = "0.39", features = ["serde"] }
 bevy_panorbit_camera = { version = "0.34", features = ["bevy_egui"] }
 # Markdown rendering in the chat window. Version pin: 0.22 targets egui ^0.33,
-# which is what bevy_egui 0.39 re-exports (confirmed via Cargo.lock).
+# which is what bevy_egui 0.39 re-exports 
 egui_commonmark = { version = "0.22", default-features = false, features = ["pulldown_cmark"] }
-# Matches bevy_egui 0.39 / egui 0.33 (see Cargo.lock).
+# Matches bevy_egui 0.39 / egui 0.33 
 egui_json_tree = "0.14.2"
-# Native file open dialog for the chat "📎 Attach" button.
 rfd = "0.17.2"
 
 # Channel-server hub (axum WS + HTTP) / async
@@ -28,7 +27,7 @@ axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
 crossbeam-channel = "0.5"
 futures = "0.3"
 rand = "0.10"
@@ -99,6 +98,16 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.release-fast]
+inherits = "release"
+lto = false            # no link-time optimisation (biggest time saver)
+codegen-units = 16     # more parallel codegen units; trades binary size for speed
+opt-level = 2          # slightly faster than 3 to compile; runtime cost is negligible
+strip = false          # keep symbols for legible stack traces during testing
+debug = false          # no debug info (keeps binary small)
+incremental = true     # cache unchanged crates between rebuilds
+
 
 # Vendored fork: `VrmcMaterialRegistry` maps VRMC_materials_mtoon by material
 # index so unnamed glTF materials still promote to MToon (see vendor patch).
