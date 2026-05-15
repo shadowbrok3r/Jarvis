@@ -29,6 +29,7 @@ use crate::plugins::mirror::{MirrorChain, MirrorState, chain_bones, mirror_quat,
 use crate::plugins::pose_driver::{
     BoneSnapshotHandle, IndexedBones, PoseCommand, PoseCommandSender, is_vrm_humanoid_bone,
 };
+use crate::plugins::undo_history::UndoHistory;
 use crate::plugins::rig_editor::{
     HoverSource, RigEditAxis, RigEditorState, axis_handle_angle, axis_handle_world,
     bone_bind_world_rot,
@@ -1578,8 +1579,16 @@ pub(crate) fn rig_editor_axis_drag(
     mirror: Res<MirrorState>,
     indexed: Option<Res<IndexedBones>>,
     rest_gtf_q: Query<&RestGlobalTransform>,
+    snapshot: Option<Res<BoneSnapshotHandle>>,
+    undo: Res<UndoHistory>,
+    mut drag_checkpoint_done: Local<bool>,
     mut debug: ResMut<super::DebugUiState>,
 ) {
+    // Reset the per-drag checkpoint guard whenever LMB is released, so the
+    // next drag can record a fresh undo entry.
+    if !mouse.pressed(MouseButton::Left) {
+        *drag_checkpoint_done = false;
+    }
     if !rig.edit_mode || !rig.twist_drag_enabled {
         return;
     }
@@ -1608,6 +1617,15 @@ pub(crate) fn rig_editor_axis_drag(
     let dx = accum_motion.delta.x;
     if dx.abs() < f32::EPSILON {
         return;
+    }
+
+    // First write of this LMB-drag — snapshot the pre-drag rig so Ctrl-Z
+    // jumps back to where the drag started, not to every per-pixel frame.
+    if !*drag_checkpoint_done {
+        if let Some(snap) = snapshot.as_deref() {
+            undo.record(snap, &debug.pose_controller.bone_euler, format!("drag {bone}"));
+        }
+        *drag_checkpoint_done = true;
     }
     let dir = if rig.invert_drag_direction { -1.0 } else { 1.0 };
     // Shift = Blender-style precision modifier. Multiplying degrees-per-pixel

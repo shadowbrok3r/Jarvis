@@ -590,6 +590,7 @@ pub fn draw_pose_controller_window(
                     &mut rig_params,
                     &mut settings,
                     intent_cal.as_deref(),
+                    Some(&*undo),
                     &mut pending_side_changes,
                 );
             });
@@ -618,6 +619,7 @@ pub fn draw_pose_controller_window(
                     &mut rig_params,
                     &mut settings,
                     intent_cal.as_deref(),
+                    Some(&*undo),
                     &mut pending_side_changes,
                 );
             });
@@ -653,6 +655,7 @@ pub fn draw_pose_controller_window(
                         &mut rig_params,
                         &mut settings,
                         intent_cal.as_deref(),
+                        Some(&*undo),
                     );
                 });
             if !keep_open {
@@ -723,6 +726,7 @@ fn render_side_panel(
     rig_params: &mut super::rig_editor::RigTabSystemParam,
     settings: &mut Settings,
     intent_cal: Option<&SemanticIntentCalibrationHandle>,
+    undo: Option<&UndoHistory>,
     pending_side_changes: &mut Vec<(PoseControllerTab, &'static str)>,
 ) {
     if tabs.is_empty() {
@@ -770,6 +774,7 @@ fn render_side_panel(
         rig_params,
         settings,
         intent_cal,
+        undo,
     );
 
     egui::TopBottomPanel::bottom(format!("pose_controller_{side}_status_strip")).show_inside(
@@ -895,9 +900,10 @@ fn render_tab_body(
     rig_params: &mut super::rig_editor::RigTabSystemParam,
     settings: &mut Settings,
     intent_cal: Option<&SemanticIntentCalibrationHandle>,
+    undo: Option<&UndoHistory>,
 ) {
     match tab {
-        PoseControllerTab::Library => library_tab(ui, pc, library, sender, snapshot),
+        PoseControllerTab::Library => library_tab(ui, pc, library, sender, snapshot, undo),
         PoseControllerTab::Animation => animation_tab(
             ui,
             pc,
@@ -917,6 +923,7 @@ fn render_tab_body(
             &mut rig_params.rig,
             &mut rig_params.mirror,
             &settings.pose_controller,
+            undo,
         ),
         PoseControllerTab::Rig => super::rig_editor::rig_tab(
             ui,
@@ -927,7 +934,7 @@ fn render_tab_body(
             rig_params,
         ),
         PoseControllerTab::IntentLab => {
-            intent_lab_tab(ui, pc, &*settings, sender, intent_cal)
+            intent_lab_tab(ui, pc, &*settings, sender, intent_cal, snapshot, undo)
         }
     }
 }
@@ -1016,6 +1023,8 @@ pub(super) fn transport_toolbar(
     vrma_entities: &[Entity],
     players_q: &mut Query<&mut AnimationPlayer>,
     pose_settings: &mut jarvis_avatar::config::PoseControllerSettings,
+    snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
+    undo: Option<&UndoHistory>,
 ) {
     if ui
         .add_enabled(!vrma_entities.is_empty(), egui::Button::new("▶"))
@@ -1061,6 +1070,9 @@ pub(super) fn transport_toolbar(
         .clicked()
     {
         if let Some(s) = sender {
+            if let (Some(h), Some(snap)) = (undo, snapshot) {
+                h.record(snap, &state.bone_euler, "reset pose");
+            }
             s.send(PoseCommand::ResetPose);
             state.status = Some("reset pose queued".into());
         }
@@ -1098,6 +1110,7 @@ fn library_tab(
     library: &PoseLibraryAssets,
     sender: Option<&PoseCommandSender>,
     snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
+    undo: Option<&UndoHistory>,
 ) {
     let categories: Vec<String> = collect_pose_categories(library);
 
@@ -1187,7 +1200,7 @@ fn library_tab(
                 if !cat.is_empty() && pose.category.to_ascii_lowercase() != cat {
                     continue;
                 }
-                pose_row(ui, state, library, sender, &categories, &pose);
+                pose_row(ui, state, library, sender, &categories, &pose, snapshot, undo);
             }
         });
 }
@@ -1246,6 +1259,8 @@ fn pose_row(
     sender: Option<&PoseCommandSender>,
     categories: &[String],
     pose: &PoseFile,
+    snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
+    undo: Option<&UndoHistory>,
 ) {
     let editing = state.editing_pose.as_deref() == Some(pose.name.as_str());
     let renaming = state.renaming_pose.as_deref() == Some(pose.name.as_str());
@@ -1389,6 +1404,9 @@ fn pose_row(
     let click_resp = ui.interact(response.response.rect, row_id, egui::Sense::click());
     if click_resp.clicked() && !renaming {
         if let Some(s) = sender {
+            if let (Some(h), Some(snap)) = (undo, snapshot) {
+                h.record(snap, &state.bone_euler, format!("apply pose {}", pose.name));
+            }
             let bones = pose
                 .bones
                 .iter()
@@ -1934,6 +1952,7 @@ fn bones_with_expressions_tab(
     rig: &mut crate::plugins::rig_editor::RigEditorState,
     mirror: &mut crate::plugins::mirror::MirrorState,
     pose_settings: &jarvis_avatar::config::PoseControllerSettings,
+    undo: Option<&UndoHistory>,
 ) {
     let avail_h = ui.available_height();
     let total_w = ui.available_width();
@@ -1945,7 +1964,7 @@ fn bones_with_expressions_tab(
             egui::vec2(left_w, avail_h),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                bones_panel(ui, state, sender, snapshot, indexed, rig, mirror);
+                bones_panel(ui, state, sender, snapshot, indexed, rig, mirror, undo);
             },
         );
         ui.separator();
@@ -1971,6 +1990,7 @@ fn bones_panel(
     indexed: Option<&IndexedBones>,
     rig: &mut crate::plugins::rig_editor::RigEditorState,
     mirror: &mut crate::plugins::mirror::MirrorState,
+    undo: Option<&UndoHistory>,
 ) {
     ui.horizontal(|ui| {
         ui.add(
@@ -1990,6 +2010,9 @@ fn bones_panel(
             .on_hover_text("Reset every bone back to bind (rest) — same as the toolbar reset.")
             .clicked()
         {
+            if let (Some(h), Some(snap)) = (undo, snapshot) {
+                h.record(snap, &state.bone_euler, "reset all bones");
+            }
             state.bone_euler.clear();
             if let Some(s) = sender {
                 s.send(PoseCommand::ResetPose);
@@ -2068,7 +2091,7 @@ fn bones_panel(
                     .open(if force_open { Some(true) } else { None })
                     .show(ui, |ui| {
                         for bone in filtered {
-                            bone_row(ui, state, sender, indexed, rig, mirror, bone, st);
+                            bone_row(ui, state, sender, indexed, rig, mirror, bone, st, snapshot, undo);
                         }
                     });
             }
@@ -2091,7 +2114,7 @@ fn bones_panel(
                 .open(if force_open { Some(true) } else { None })
                 .show(ui, |ui| {
                     for bone in other_humanoid {
-                        bone_row(ui, state, sender, indexed, rig, mirror, bone, st);
+                        bone_row(ui, state, sender, indexed, rig, mirror, bone, st, snapshot, undo);
                     }
                 });
             }
@@ -2133,7 +2156,7 @@ fn bones_panel(
                         .open(if force_open { Some(true) } else { None })
                         .show(ui, |ui| {
                             for bone in bones {
-                                bone_row(ui, state, sender, indexed, rig, mirror, bone.as_str(), st);
+                                bone_row(ui, state, sender, indexed, rig, mirror, bone.as_str(), st, snapshot, undo);
                             }
                         });
                 }
@@ -2149,7 +2172,7 @@ fn bones_panel(
                     .open(if force_open { Some(true) } else { None })
                     .show(ui, |ui| {
                         for bone in &misc {
-                            bone_row(ui, state, sender, indexed, rig, mirror, bone.as_str(), st);
+                            bone_row(ui, state, sender, indexed, rig, mirror, bone.as_str(), st, snapshot, undo);
                         }
                     });
                 }
@@ -2163,6 +2186,8 @@ fn intent_lab_tab(
     settings: &Settings,
     sender: Option<&PoseCommandSender>,
     cal_handle: Option<&SemanticIntentCalibrationHandle>,
+    snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
+    undo: Option<&UndoHistory>,
 ) {
     ui.label(egui::RichText::new("Intent Lab — semantic MCP tools").strong());
     ui.label(
@@ -2329,7 +2354,7 @@ arms_down_rest → shoulder/upper-arm/lower-arm rolls & pitches (× the three ar
                 dry_run: Some(false),
             };
             let bones = compile_raise_leg(&args, &pc.intent_lab_cal);
-            intent_lab_apply(sender, pc, &bones, "raise_leg");
+            intent_lab_apply(sender, pc, &bones, "raise_leg", snapshot, undo);
         }
     });
 
@@ -2341,7 +2366,7 @@ arms_down_rest → shoulder/upper-arm/lower-arm rolls & pitches (× the three ar
                 dry_run: Some(false),
             };
             let bones = compile_bend_knee(&args, &pc.intent_lab_cal);
-            intent_lab_apply(sender, pc, &bones, "bend_knee");
+            intent_lab_apply(sender, pc, &bones, "bend_knee", snapshot, undo);
         }
         if ui.button("Apply arms_down_rest").clicked() {
             let args = ArmsDownRestArgs {
@@ -2349,7 +2374,7 @@ arms_down_rest → shoulder/upper-arm/lower-arm rolls & pitches (× the three ar
                 dry_run: Some(false),
             };
             let bones = compile_arms_down_rest(&args, &pc.intent_lab_cal);
-            intent_lab_apply(sender, pc, &bones, "arms_down_rest");
+            intent_lab_apply(sender, pc, &bones, "arms_down_rest", snapshot, undo);
         }
     });
 }
@@ -2359,6 +2384,8 @@ fn intent_lab_apply(
     pc: &mut PoseControllerUiState,
     bones: &HashMap<String, BoneEulerDeg>,
     label: &str,
+    snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
+    undo: Option<&UndoHistory>,
 ) {
     let Some(sender) = sender else {
         pc.status = Some("no PoseCommandSender".into());
@@ -2376,6 +2403,9 @@ fn intent_lab_apply(
     let (quats, mut w1) = bone_map_from_euler_deg(bones);
     let (sanitized, mut w2) = sanitize_bone_map(quats);
     w1.append(&mut w2);
+    if let (Some(h), Some(snap)) = (undo, snapshot) {
+        h.record(snap, &pc.bone_euler, format!("intent {label}"));
+    }
     sender.send(PoseCommand::ApplyBones {
         bones: sanitized,
         preserve_omitted_bones: true,
@@ -2402,7 +2432,13 @@ fn bone_row(
     mirror: &crate::plugins::mirror::MirrorState,
     bone: &str,
     scroll_target: Option<&str>,
+    snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
+    undo: Option<&UndoHistory>,
 ) {
+    // Capture a pre-edit clone of the full bone_euler map for the undo entry
+    // before we take a mutable borrow into it via `entry(...).or_insert(...)`.
+    // Cheap (a small HashMap) and only needed once per slider drag-start.
+    let pre_edit_euler = state.bone_euler.clone();
     let euler = state
         .bone_euler
         .entry(bone.to_string())
@@ -2516,32 +2552,55 @@ fn bone_row(
             let hi = (v + slider_range).clamp(-360.0, 360.0).min(180.0);
             (lo, hi)
         };
+        let mut drag_started = false;
+        let mut committed_without_drag = false;
         ui.horizontal(|ui| {
             ui.label("X");
             let (lo, hi) = bound(x);
-            if ui
-                .add(egui::Slider::new(&mut x, lo..=hi).suffix("°"))
-                .changed()
-            {
+            let r = ui.add(egui::Slider::new(&mut x, lo..=hi).suffix("°"));
+            if r.drag_started() {
+                drag_started = true;
+            }
+            if r.changed() {
                 changed = true;
+                if !r.dragged() {
+                    committed_without_drag = true;
+                }
             }
             ui.label("Y");
             let (lo, hi) = bound(y);
-            if ui
-                .add(egui::Slider::new(&mut y, lo..=hi).suffix("°"))
-                .changed()
-            {
+            let r = ui.add(egui::Slider::new(&mut y, lo..=hi).suffix("°"));
+            if r.drag_started() {
+                drag_started = true;
+            }
+            if r.changed() {
                 changed = true;
+                if !r.dragged() {
+                    committed_without_drag = true;
+                }
             }
             ui.label("Z");
             let (lo, hi) = bound(z);
-            if ui
-                .add(egui::Slider::new(&mut z, lo..=hi).suffix("°"))
-                .changed()
-            {
+            let r = ui.add(egui::Slider::new(&mut z, lo..=hi).suffix("°"));
+            if r.drag_started() {
+                drag_started = true;
+            }
+            if r.changed() {
                 changed = true;
+                if !r.dragged() {
+                    committed_without_drag = true;
+                }
             }
         });
+
+        // Checkpoint once per logical edit: at the first frame of a drag, or
+        // when a typed/keyboard-stepped commit lands. Skipping mid-drag
+        // frames keeps the undo stack from filling with one entry per pixel.
+        if drag_started || committed_without_drag {
+            if let (Some(h), Some(snap)) = (undo, snapshot) {
+                h.record(snap, &pre_edit_euler, format!("slider {bone}"));
+            }
+        }
 
         if changed {
             euler[0] = x;
@@ -2564,6 +2623,9 @@ fn bone_row(
     let row_response = frame_resp.response;
 
     if outcome.header_reset_via_context {
+        if let (Some(h), Some(snap)) = (undo, snapshot) {
+            h.record(snap, &pre_edit_euler, format!("reset {bone}"));
+        }
         state
             .bone_euler
             .insert(bone.to_string(), [0.0, 0.0, 0.0]);

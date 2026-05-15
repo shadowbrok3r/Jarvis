@@ -288,6 +288,8 @@ fn draw_menu_bar(
     mut active_anim: ResMut<ActiveNativeAnimation>,
     vrma_q: Query<Entity, With<Vrma>>,
     mut players_q: Query<&mut AnimationPlayer>,
+    snapshot: Option<Res<crate::plugins::pose_driver::BoneSnapshotHandle>>,
+    undo: Res<crate::plugins::undo_history::UndoHistory>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -333,6 +335,8 @@ fn draw_menu_bar(
                     &vrma_entities,
                     &mut players_q,
                     &mut settings.pose_controller,
+                    snapshot.as_deref(),
+                    Some(&*undo),
                 );
             }
 
