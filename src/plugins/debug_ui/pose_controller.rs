@@ -46,6 +46,7 @@ use crate::plugins::intent_calibration::SemanticIntentCalibrationHandle;
 use crate::plugins::pose_library_assets::PoseLibraryAssets;
 use crate::plugins::rig_editor::{HoverSource, RigEditAxis};
 use crate::plugins::shared_runtime::SharedTokio;
+use crate::plugins::undo_history::UndoHistory;
 use crate::plugins::vrm_preset_key;
 
 /// Visual groupings for the manual Bones tab. Order matters — the UI renders
@@ -445,6 +446,7 @@ pub fn draw_pose_controller_window(
     snapshot: Option<Res<crate::plugins::pose_driver::BoneSnapshotHandle>>,
     indexed: Option<Res<IndexedBones>>,
     intent_cal: Option<Res<SemanticIntentCalibrationHandle>>,
+    undo: Res<UndoHistory>,
     mut state: ResMut<super::DebugUiState>,
     mut rig_params: super::rig_editor::RigTabSystemParam,
 ) {
@@ -559,6 +561,7 @@ pub fn draw_pose_controller_window(
                     &mut rig_params,
                     &mut settings,
                     intent_cal.as_deref(),
+                    Some(&*undo),
                     &mut pending_side_changes,
                 );
             });

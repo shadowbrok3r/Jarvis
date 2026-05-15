@@ -38,3 +38,4 @@ mod spring_preset;
 pub use spring_preset::vrm_preset_key;
 pub mod traffic_log;
 pub mod tts;
+pub mod undo_history;

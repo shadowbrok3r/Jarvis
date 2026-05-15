@@ -95,6 +95,7 @@ fn main() {
             plugins::anim_layer_sets::AnimLayerSetsPlugin,
             plugins::emotion_map::EmotionMapPlugin,
             plugins::service_status::ServiceStatusPlugin,
+            plugins::undo_history::UndoHistoryPlugin,
         ))
         .add_plugins(InjectKimodoClientPlugin)
         .add_systems(Startup, configure_primary_window)
