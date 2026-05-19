@@ -114,6 +114,15 @@ struct DeviceMotionLevelView: View {
 
     private var tuningSliders: some View {
         VStack(alignment: .leading, spacing: 12) {
+            Text("Spring physics (always active)")
+                .font(.caption.weight(.semibold))
+            tuningSlider("Gravity strength ×", value: $motion.springGravityScale, range: 0 ... 2, format: "%.2f")
+            tuningSlider("Drag × (higher = less sway)", value: $motion.springDragScale, range: 0.2 ... 3, format: "%.2f")
+
+            Text("Phone steering (only when motion toggle is on)")
+                .font(.caption.weight(.semibold))
+                .padding(.top, 4)
+
             VStack(alignment: .leading, spacing: 4) {
                 Text("Spring bones affected")
                     .font(.caption)
@@ -133,6 +142,9 @@ struct DeviceMotionLevelView: View {
 
             tuningSlider("Gravity smoothing", value: $motion.gravitySmoothing, range: 0.05 ... 0.5, format: "%.2f")
             tuningSlider("Shake smoothing", value: $motion.accelSmoothing, range: 0.05 ... 0.5, format: "%.2f")
+            Text("Smoothing affects the sensor bubble only (Swift-side).")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             tuningSlider("Spring tilt blend", value: $motion.gravityBlend, range: 0 ... 1, format: "%.2f")
             tuningSlider("Max tilt (°)", value: $motion.maxTiltDegrees, range: 5 ... 85, format: "%.0f")
             tuningSlider("Shake power", value: $motion.shakePower, range: 0 ... 0.6, format: "%.2f")

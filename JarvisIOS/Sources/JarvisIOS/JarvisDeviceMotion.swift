@@ -93,6 +93,18 @@ final class JarvisDeviceMotion {
         set { UserDefaults.standard.set(clamp(newValue, 0, 1), forKey: Keys.shakeDeadzone) }
     }
 
+    /// Multiplies VRMC spring gravity power (0 = limp, 1 = default, up to 3).
+    var springGravityScale: Double {
+        get { storedDouble(Keys.springGravityScale, default: 1) }
+        set { UserDefaults.standard.set(clamp(newValue, 0, 3), forKey: Keys.springGravityScale) }
+    }
+
+    /// Multiplies VRMC spring drag (higher = less sway).
+    var springDragScale: Double {
+        get { storedDouble(Keys.springDragScale, default: 1) }
+        set { UserDefaults.standard.set(clamp(newValue, 0.05, 5), forKey: Keys.springDragScale) }
+    }
+
     /// Which spring joints phone motion steers (see `DeviceMotionSpringScope`).
     var springScope: DeviceMotionSpringScope {
         get {
@@ -112,6 +124,8 @@ final class JarvisDeviceMotion {
         static let shakePower = "jarvis.ios.motion.shakePower"
         static let maxShakeMult = "jarvis.ios.motion.maxShakeMult"
         static let shakeDeadzone = "jarvis.ios.motion.shakeDeadzone"
+        static let springGravityScale = "jarvis.ios.motion.springGravityScale"
+        static let springDragScale = "jarvis.ios.motion.springDragScale"
     }
 
     private let manager = CMMotionManager()
@@ -192,7 +206,9 @@ final class JarvisDeviceMotion {
             Float(shakePower),
             Float(maxShakeMultiplier),
             Float(shakeDeadzone),
-            springScope.rustCode
+            springScope.rustCode,
+            Float(springGravityScale),
+            Float(springDragScale)
         )
     }
 
@@ -204,6 +220,8 @@ final class JarvisDeviceMotion {
         shakePower = 0.18
         maxShakeMultiplier = 3
         shakeDeadzone = 0.12
+        springGravityScale = 1
+        springDragScale = 1
         springScope = .allSprings
         JarvisBevySession.pushDeviceMotionTuning()
     }

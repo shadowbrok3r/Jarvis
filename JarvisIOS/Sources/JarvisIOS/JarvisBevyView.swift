@@ -109,10 +109,16 @@ enum JarvisBevySession {
         jarvis_renderer_layers_clear(r)
     }
 
-    /// Push phone-motion spring tuning (blend, tilt cap, shake) to Rust.
+    /// Push phone-motion spring tuning (blend, tilt cap, shake, physics scales) to Rust.
     static func pushDeviceMotionTuning() {
         guard let r = renderer else { return }
         JarvisDeviceMotion.shared.pushTuningToRenderer(r)
+    }
+
+    /// Pause or resume the profile idle VRMA loop without reloading the VRM.
+    static func setIdleAnimationEnabled(_ enabled: Bool) {
+        guard let r = renderer else { return }
+        jarvis_renderer_set_idle_animation_enabled(r, enabled ? 1 : 0)
     }
 }
 
@@ -413,6 +419,8 @@ struct JarvisBevyView: UIViewRepresentable {
                 self.displayLink = link
                 JarvisDeviceMotion.shared.start()
                 JarvisBevySession.pushDeviceMotionTuning()
+                let idleOn = UserDefaults.standard.object(forKey: "jarvis.ios.idleAnimationEnabled") as? Bool ?? true
+                JarvisBevySession.setIdleAnimationEnabled(idleOn)
                 JarvisIOSLog.recordBevy("startRenderer: CADisplayLink attached")
                 AvatarFirstRunGreeting.scheduleIfNeededAfterBootstrap()
             }

@@ -165,6 +165,7 @@ private struct AvatarExpressionsPanelView: View {
 private struct AvatarMotionPanelView: View {
     @Binding var idleOverrideRel: String
     @AppStorage("jarvis.ios.phoneSpringGravity") private var phoneSpringGravity = false
+    @AppStorage("jarvis.ios.idleAnimationEnabled") private var idleAnimationEnabled = true
     @State private var vrmaPaths: [String] = []
     @State private var jsonPaths: [String] = []
     var body: some View {
@@ -173,7 +174,11 @@ private struct AvatarMotionPanelView: View {
                 Group {
                     Text("Idle loop (VRMA)")
                         .font(.headline)
-                    Text("Loops on profile reload. Hub manifest idle is used when override is empty.")
+                    Toggle("Play idle animation", isOn: $idleAnimationEnabled)
+                        .onChange(of: idleAnimationEnabled) { _, on in
+                            JarvisBevySession.setIdleAnimationEnabled(on)
+                        }
+                    Text("Turn off to test whether idle VRMA drives spring sway. Loops on profile reload when enabled; hub manifest idle is used when override is empty.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Picker("Idle VRMA", selection: $idleOverrideRel) {
@@ -204,8 +209,9 @@ private struct AvatarMotionPanelView: View {
                 Toggle("Phone motion → spring hair / cloth", isOn: $phoneSpringGravity)
                     .onChange(of: phoneSpringGravity) { _, on in
                         JarvisDeviceMotion.shared.enabled = on
+                        JarvisBevySession.pushDeviceMotionTuning()
                     }
-                Text("Tilt/shake steers VRMC spring bones (humanoid animation bones are separate). Use spring scope below to test hair-only vs all springs.")
+                Text("Tilt/shake steers VRMC spring bones when enabled. Heavy sway with motion off is usually idle VRMA or Layers (try disabling both). Spring scope below limits which joints receive phone steering.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
 
@@ -254,6 +260,7 @@ private struct AvatarMotionPanelView: View {
         .onAppear {
             reloadLists()
             JarvisDeviceMotion.shared.enabled = phoneSpringGravity
+            JarvisBevySession.setIdleAnimationEnabled(idleAnimationEnabled)
             JarvisBevySession.pushDeviceMotionTuning()
         }
     }

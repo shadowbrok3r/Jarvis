@@ -73,6 +73,22 @@ struct JarvisIosGroundPlane;
 #[derive(Resource, Default)]
 pub(crate) struct IosAvatarRootEntity(pub(crate) Option<Entity>);
 
+/// User toggle for the profile idle VRMA loop (Motion tab).
+#[derive(Resource)]
+pub struct IosIdlePlaybackState {
+    pub user_enabled: bool,
+    pub paused_entities: Vec<Entity>,
+}
+
+impl Default for IosIdlePlaybackState {
+    fn default() -> Self {
+        Self {
+            user_enabled: true,
+            paused_entities: Vec::new(),
+        }
+    }
+}
+
 /// When set, the VRM load is deferred by `remaining` frames to let Bevy's render backend settle.
 /// Used for VRMs ≥ [`VRM_WARN_BYTES`] where simultaneous Bevy init + large asset load causes OOM spikes.
 #[derive(Resource)]
@@ -737,13 +753,70 @@ fn ios_drain_egui_anim_requests(world: &mut World) {
     }
 }
 
-fn play_idle_when_vrma_loaded(trigger: On<LoadedVrma>, mut commands: Commands) {
+fn play_idle_when_vrma_loaded(
+    trigger: On<LoadedVrma>,
+    mut commands: Commands,
+    idle: Res<IosIdlePlaybackState>,
+) {
+    if !idle.user_enabled {
+        crate::jarvis_ios_line!("[JarvisIOS] idle VRMA loaded — playback disabled by user");
+        return;
+    }
     commands.trigger(PlayVrma {
         repeat: RepeatAnimation::Forever,
         transition_duration: Duration::ZERO,
         vrma: trigger.vrma,
-        reset_spring_bones: true,
+        reset_spring_bones: false,
     });
+}
+
+pub fn ios_set_idle_animation_enabled(world: &mut World, enabled: bool) {
+    let was = world.resource::<IosIdlePlaybackState>().user_enabled;
+    {
+        let mut idle = world.resource_mut::<IosIdlePlaybackState>();
+        idle.user_enabled = enabled;
+    }
+    if was == enabled {
+        return;
+    }
+
+    let Some(root) = world.resource::<IosAvatarRootEntity>().0 else {
+        crate::jarvis_ios_line!("[JarvisIOS] idle playback: no avatar root yet (enabled={enabled})");
+        return;
+    };
+    let settings = world.resource::<IosAvatarSettings>().clone();
+
+    if enabled {
+        let paused = world
+            .resource::<IosIdlePlaybackState>()
+            .paused_entities
+            .clone();
+        if !paused.is_empty() {
+            crate::ios_anim_json::resume_idle_vrmas_on_world(world, &paused);
+        } else {
+            crate::ios_anim_json::start_matching_idle_vrma(world, root, &settings);
+        }
+        world
+            .resource_mut::<IosIdlePlaybackState>()
+            .paused_entities
+            .clear();
+        world.flush();
+        crate::jarvis_ios_line!("[JarvisIOS] idle playback: enabled");
+    } else {
+        let stopped =
+            crate::ios_anim_json::pause_matching_idle_vrma(world, root, &settings);
+        world
+            .resource_mut::<IosIdlePlaybackState>()
+            .paused_entities = stopped.clone();
+        if let Some(root) = world.resource::<IosAvatarRootEntity>().0 {
+            bevy_vrm1::prelude::reset_spring_velocities_recursive_world(world, root);
+        }
+        world.flush();
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] idle playback: paused {} VRMA target(s)",
+            stopped.len()
+        );
+    }
 }
 
 fn observe_vrma_play_forever(trigger: On<LoadedVrma>, mut commands: Commands) {
@@ -883,6 +956,7 @@ fn ios_apply_spring_preset_on_vrm_ready(
             crate::ios_device_motion::SpringMotionBaseline {
                 gravity_dir: p.gravity_dir,
                 gravity_power: p.gravity_power,
+                drag_force: p.drag_force,
             },
         )
     }));
@@ -1194,6 +1268,7 @@ impl IosEmbeddedRenderer {
         crate::ios_anim_json::plugin(&mut app);
         app.add_plugins(crate::ios_anim_layers::IosAnimLayersPlugin);
         app.add_plugins(crate::ios_device_motion::IosDeviceMotionPlugin);
+        app.init_resource::<IosIdlePlaybackState>();
         // When the pointer is over egui (menu bar, windows), PanOrbit must not consume drags/pinch.
         let mut egui_global = bevy_egui::EguiGlobalSettings::default();
         egui_global.enable_absorb_bevy_input_system = true;
@@ -1351,6 +1426,8 @@ impl IosEmbeddedRenderer {
         max_shake_mult: f32,
         shake_deadzone: f32,
         spring_scope: u8,
+        spring_gravity_scale: f32,
+        spring_drag_scale: f32,
     ) {
         let mut t = self
             .app
@@ -1362,6 +1439,12 @@ impl IosEmbeddedRenderer {
         t.max_power_mult = max_shake_mult.max(1.0);
         t.shake_deadzone_ms2 = shake_deadzone.max(0.0);
         t.spring_scope = crate::ios_device_motion::IosSpringBoneScope::from_u8(spring_scope);
+        t.spring_gravity_power_scale = spring_gravity_scale.clamp(0.0, 3.0);
+        t.spring_drag_scale = spring_drag_scale.clamp(0.05, 5.0);
+    }
+
+    pub fn set_idle_animation_enabled(&mut self, enabled: bool) {
+        ios_set_idle_animation_enabled(self.app.world_mut(), enabled);
     }
 
     pub fn expressions_snapshot_json(&self) -> String {
@@ -1525,7 +1608,12 @@ impl IosEmbeddedRenderer {
         world
             .resource_mut::<crate::ios_device_motion::IosSpringMotionBaselines>()
             .clear();
+        world.resource_mut::<IosIdlePlaybackState>().paused_entities.clear();
         world.flush();
+        let idle_enabled = world.resource::<IosIdlePlaybackState>().user_enabled;
+        if !idle_enabled {
+            ios_set_idle_animation_enabled(world, false);
+        }
         world
             .resource_mut::<crate::ios_anim_json::IosJsonAnimPlayback>()
             .replace_with_clip(None);

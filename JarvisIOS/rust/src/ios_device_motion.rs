@@ -1,6 +1,8 @@
 //! Device motion from CoreMotion → VRMC spring bones (gravity direction + shake power).
 //!
 //! Scope is configurable: all spring joints (desktop parity) or secondary hair/cloth only.
+//! Spring physics scales (gravity power / drag) apply every frame so tuning sliders work
+//! even when phone motion is off.
 
 use std::collections::HashMap;
 
@@ -43,7 +45,7 @@ impl Plugin for IosDeviceMotionPlugin {
                 PostUpdate,
                 (
                     ios_capture_spring_motion_baselines,
-                    ios_apply_device_motion_to_springs
+                    ios_apply_spring_motion_settings
                         .after(ios_capture_spring_motion_baselines)
                         .before(VrmSystemSets::SpringBone),
                 ),
@@ -60,6 +62,10 @@ pub struct IosDeviceMotionTuning {
     pub phone_gravity_blend: f32,
     pub max_tilt_from_down_rad: f32,
     pub spring_scope: IosSpringBoneScope,
+    /// Multiplies baseline `gravity_power` every frame (phone motion off or on).
+    pub spring_gravity_power_scale: f32,
+    /// Multiplies baseline `drag_force` every frame.
+    pub spring_drag_scale: f32,
 }
 
 impl Default for IosDeviceMotionTuning {
@@ -71,6 +77,8 @@ impl Default for IosDeviceMotionTuning {
             phone_gravity_blend: 0.72,
             max_tilt_from_down_rad: 1.15,
             spring_scope: IosSpringBoneScope::All,
+            spring_gravity_power_scale: 1.0,
+            spring_drag_scale: 1.0,
         }
     }
 }
@@ -96,6 +104,7 @@ impl Default for IosDeviceMotionInput {
 pub struct SpringMotionBaseline {
     pub gravity_dir: Vec3,
     pub gravity_power: f32,
+    pub drag_force: f32,
 }
 
 #[derive(Resource, Default)]
@@ -133,6 +142,7 @@ pub fn ios_capture_spring_motion_baselines(
             SpringMotionBaseline {
                 gravity_dir: p.gravity_dir,
                 gravity_power: p.gravity_power,
+                drag_force: p.drag_force,
             },
         )
     }));
@@ -204,19 +214,7 @@ fn clamp_tilt_from_down(dir: Vec3, max_tilt_rad: f32) -> Vec3 {
     snap_gravity_downward(Quat::from_axis_angle(axis.normalize(), max_tilt_rad) * WORLD_DOWN)
 }
 
-fn restore_spring_baselines(
-    springs: &mut Query<(Entity, Option<&Name>, &mut SpringJointProps)>,
-    baselines: &IosSpringMotionBaselines,
-) {
-    for (e, _, mut p) in springs.iter_mut() {
-        if let Some(base) = baselines.joints.get(&e) {
-            p.gravity_dir = base.gravity_dir;
-            p.gravity_power = base.gravity_power;
-        }
-    }
-}
-
-fn ios_apply_device_motion_to_springs(
+fn ios_apply_spring_motion_settings(
     motion: Res<IosDeviceMotionInput>,
     tuning: Res<IosDeviceMotionTuning>,
     baselines: Res<IosSpringMotionBaselines>,
@@ -232,26 +230,24 @@ fn ios_apply_device_motion_to_springs(
     }
 
     let enabled = motion.enabled;
-    if !enabled {
-        if *was_enabled {
-            restore_spring_baselines(&mut springs, &baselines);
-            if let Some(root) = avatar.0 {
-                reset_spring_velocities_recursive(root, &spring_roots, &mut joint_states, &children);
-            }
-            crate::jarvis_ios_line!("[JarvisIOS] device motion: disabled — restored springs + reset velocities");
+    if !enabled && *was_enabled {
+        if let Some(root) = avatar.0 {
+            reset_spring_velocities_recursive(root, &spring_roots, &mut joint_states, &children);
         }
-        *was_enabled = false;
-        return;
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] device motion: disabled — reset spring velocities"
+        );
     }
-
-    if !*was_enabled {
+    if enabled && !*was_enabled {
         crate::jarvis_ios_line!(
             "[JarvisIOS] device motion: enabled — spring scope {:?}",
             tuning.spring_scope
         );
     }
-    *was_enabled = true;
+    *was_enabled = enabled;
 
+    let gravity_scale = tuning.spring_gravity_power_scale.clamp(0.0, 3.0);
+    let drag_scale = tuning.spring_drag_scale.clamp(0.05, 5.0);
     let max_tilt = tuning.max_tilt_from_down_rad.max(0.05);
     let blend = tuning.phone_gravity_blend.clamp(0.0, 1.0);
     let phone_dir = clamp_tilt_from_down(motion.gravity_dir, max_tilt);
@@ -260,10 +256,19 @@ fn ios_apply_device_motion_to_springs(
         .clamp(1.0, tuning.max_power_mult.max(1.0));
 
     for (e, name, mut p) in springs.iter_mut() {
-        if !spring_receives_phone_motion(tuning.spring_scope, name) {
+        let Some(base) = baselines.joints.get(&e) else {
+            if enabled && spring_receives_phone_motion(tuning.spring_scope, name) {
+                p.gravity_dir = phone_dir;
+                p.gravity_power = p.gravity_power * power_mult * gravity_scale;
+            }
             continue;
-        }
-        if let Some(base) = baselines.joints.get(&e) {
+        };
+
+        p.gravity_dir = base.gravity_dir;
+        p.gravity_power = base.gravity_power * gravity_scale;
+        p.drag_force = base.drag_force * drag_scale;
+
+        if enabled && spring_receives_phone_motion(tuning.spring_scope, name) {
             let blended = base
                 .gravity_dir
                 .lerp(phone_dir, blend)
@@ -273,24 +278,13 @@ fn ios_apply_device_motion_to_springs(
             } else {
                 phone_dir
             };
-            p.gravity_power = base.gravity_power * power_mult;
-        } else {
-            p.gravity_dir = phone_dir;
-            p.gravity_power = p.gravity_power * power_mult;
+            p.gravity_power = base.gravity_power * gravity_scale * power_mult;
         }
     }
 }
 
 /// Called from FFI when the user toggles phone motion off in Swift.
 pub fn ios_reset_springs_after_device_motion_off(world: &mut World) {
-    let baselines = world.resource::<IosSpringMotionBaselines>().joints.clone();
-    let mut q = world.query::<(Entity, &mut SpringJointProps)>();
-    for (e, mut p) in q.iter_mut(world) {
-        if let Some(base) = baselines.get(&e) {
-            p.gravity_dir = base.gravity_dir;
-            p.gravity_power = base.gravity_power;
-        }
-    }
     let avatar = world.resource::<IosAvatarRootEntity>().0;
     if let Some(root) = avatar {
         reset_spring_velocities_recursive_world(world, root);

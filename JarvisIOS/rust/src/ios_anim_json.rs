@@ -266,6 +266,44 @@ pub(crate) fn pause_matching_idle_vrma(
     stopped
 }
 
+/// Start the configured idle VRMA loop (used when user re-enables idle after load).
+pub(crate) fn start_matching_idle_vrma(
+    world: &mut World,
+    avatar_root: Entity,
+    settings: &IosAvatarSettings,
+) -> Vec<Entity> {
+    let idle = settings.idle_vrma_path.trim();
+    if idle.is_empty() {
+        return Vec::new();
+    }
+    let mut started = Vec::new();
+    for e in collect_descendants(world, avatar_root) {
+        if world.get::<Vrma>(e).is_none() {
+            continue;
+        }
+        let Some(vp) = world.get::<VrmaPath>(e) else {
+            continue;
+        };
+        if !vrma_path_matches_idle(&vp.0, idle) {
+            continue;
+        }
+        world.entity_mut(e).trigger(|ent| PlayVrma {
+            repeat: RepeatAnimation::Forever,
+            transition_duration: Duration::ZERO,
+            vrma: ent,
+            reset_spring_bones: false,
+        });
+        started.push(e);
+    }
+    if !started.is_empty() {
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] idle playback: started {} VRMA target(s)",
+            started.len()
+        );
+    }
+    started
+}
+
 fn resume_idle_vrmas(commands: &mut Commands, stopped: &[Entity]) {
     for &vrma_e in stopped {
         commands.entity(vrma_e).trigger(|e| PlayVrma {

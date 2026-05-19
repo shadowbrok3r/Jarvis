@@ -75,7 +75,11 @@ mod ffi {
             max_shake_mult: f32,
             shake_deadzone: f32,
             spring_scope: u8,
+            spring_gravity_scale: f32,
+            spring_drag_scale: f32,
         );
+
+        fn jarvis_renderer_set_idle_animation_enabled(ptr: *mut u8, enabled: u8);
 
         fn jarvis_renderer_expressions_snapshot_json(ptr: *mut u8) -> String;
 
@@ -331,6 +335,8 @@ pub fn jarvis_renderer_set_device_motion_tuning(
     max_shake_mult: f32,
     shake_deadzone: f32,
     spring_scope: u8,
+    spring_gravity_scale: f32,
+    spring_drag_scale: f32,
 ) {
     if ptr.is_null() {
         return;
@@ -343,6 +349,8 @@ pub fn jarvis_renderer_set_device_motion_tuning(
             max_shake_mult,
             shake_deadzone,
             spring_scope,
+            spring_gravity_scale,
+            spring_drag_scale,
         );
     }
 }
@@ -356,7 +364,23 @@ pub fn jarvis_renderer_set_device_motion_tuning(
     _max_shake_mult: f32,
     _shake_deadzone: f32,
     _spring_scope: u8,
+    _spring_gravity_scale: f32,
+    _spring_drag_scale: f32,
 ) {
+}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_set_idle_animation_enabled(ptr: *mut u8, enabled: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).set_idle_animation_enabled(enabled != 0);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_set_idle_animation_enabled(_ptr: *mut u8, _enabled: u8) {
 }
 
 fn utf8_from_ptr(path_ptr: *const u8, path_len: usize) -> Option<String> {
