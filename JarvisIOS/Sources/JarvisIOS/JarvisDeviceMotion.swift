@@ -30,6 +30,51 @@ enum DeviceMotionSpringScope: String, CaseIterable, Identifiable {
     }
 }
 
+/// How CoreMotion orientation maps to Bevy spring pull direction (Y-up, avatar faces -Z).
+enum DeviceMotionGravityMode: String, CaseIterable, Identifiable {
+    /// Portrait screen bottom points "down" for springs (upside-down phone → hair up).
+    case screenBottom = "screen_bottom"
+    /// Portrait screen top points "down" for springs.
+    case screenTop = "screen_top"
+    /// Real-world gravity from the sensor (earth down; phone flip does not invert hair).
+    case worldGravity = "world_gravity"
+    /// Screen normal (out of display toward you in portrait).
+    case screenNormal = "screen_normal"
+    /// Legacy axis remap of reference gravity `(x, z, y)` — no attitude.
+    case legacyAxis = "legacy_axis"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .screenBottom: return "Screen bottom"
+        case .screenTop: return "Screen top"
+        case .worldGravity: return "World gravity"
+        case .screenNormal: return "Screen normal"
+        case .legacyAxis: return "Legacy axes"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .screenBottom:
+            return "Pull follows the bottom edge of the screen. Best for upside-down hair flip."
+        case .screenTop:
+            return "Pull follows the top edge (port toward ceiling when upright)."
+        case .worldGravity:
+            return "Pull follows real gravity. Upright phone ≈ avatar down regardless of roll."
+        case .screenNormal:
+            return "Pull follows the direction out of the screen (toward your face in portrait)."
+        case .legacyAxis:
+            return "Raw reference-frame gravity with fixed axis remap (older behavior)."
+        }
+    }
+
+    static func fromStored(_ raw: String) -> Self {
+        Self(rawValue: raw) ?? .screenBottom
+    }
+}
+
 /// Streams device gravity + user acceleration into Rust spring bones (VRMC secondary motion only).
 @MainActor
 @Observable
@@ -114,9 +159,26 @@ final class JarvisDeviceMotion {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: Keys.springScope) }
     }
 
+    /// How phone orientation maps to spring pull direction.
+    var gravityMode: DeviceMotionGravityMode {
+        get {
+            let raw = UserDefaults.standard.string(forKey: Keys.gravityMode) ?? DeviceMotionGravityMode.screenBottom.rawValue
+            return DeviceMotionGravityMode.fromStored(raw)
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Keys.gravityMode) }
+    }
+
+    /// Negate the computed pull vector (flip spring gravity 180°).
+    var invertGravityPull: Bool {
+        get { UserDefaults.standard.object(forKey: Keys.invertGravityPull) as? Bool ?? false }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.invertGravityPull) }
+    }
+
     private enum Keys {
         static let enabled = "jarvis.ios.phoneSpringGravity"
         static let springScope = "jarvis.ios.motion.springScope"
+        static let gravityMode = "jarvis.ios.motion.gravityMode"
+        static let invertGravityPull = "jarvis.ios.motion.invertGravityPull"
         static let gravitySmooth = "jarvis.ios.motion.gravitySmooth"
         static let accelSmooth = "jarvis.ios.motion.accelSmooth"
         static let gravityBlend = "jarvis.ios.motion.gravityBlend"
@@ -151,7 +213,7 @@ final class JarvisDeviceMotion {
             }
             let gAlpha = self.gravitySmoothing
             let aAlpha = self.accelSmoothing
-            let rawG = Self.screenBottomPullToBevy(motion)
+            let rawG = Self.pullDirectionToBevy(motion, mode: self.gravityMode, invert: self.invertGravityPull)
             let rawA = Self.rawAccelToBevy(motion.userAcceleration)
             self.rawAccelBevy = rawA
             self.gravityBevy = Self.smooth(self.gravityBevy, toward: rawG, alpha: gAlpha)
@@ -228,16 +290,41 @@ final class JarvisDeviceMotion {
         springGravityScale = 1
         springDragScale = 1
         springScope = .allSprings
+        gravityMode = .screenBottom
+        invertGravityPull = false
         JarvisBevySession.pushDeviceMotionTuning()
     }
 
-    /// Where "down" is on the phone screen (portrait bottom), expressed in Bevy Y-up space.
-    ///
-    /// Uses attitude so upside-down portrait pulls springs toward +Y (hair above the head) instead
-    /// of mapping raw accelerometer axes to avatar forward.
-    private static func screenBottomPullToBevy(_ motion: CMDeviceMotion) -> SIMD3<Double> {
-        let screenBottomDevice = SIMD3<Double>(0, -1, 0)
-        let vRef = referenceVector(fromDevice: screenBottomDevice, motion: motion)
+    private static func pullDirectionToBevy(
+        _ motion: CMDeviceMotion,
+        mode: DeviceMotionGravityMode,
+        invert: Bool
+    ) -> SIMD3<Double> {
+        let v: SIMD3<Double> = switch mode {
+        case .screenBottom:
+            deviceAxisPullToBevy(motion, deviceAxis: SIMD3(0, -1, 0))
+        case .screenTop:
+            deviceAxisPullToBevy(motion, deviceAxis: SIMD3(0, 1, 0))
+        case .worldGravity:
+            bevyFromReference(SIMD3(motion.gravity.x, motion.gravity.y, motion.gravity.z))
+        case .screenNormal:
+            deviceAxisPullToBevy(motion, deviceAxis: SIMD3(0, 0, 1))
+        case .legacyAxis:
+            legacyGravityToBevy(motion.gravity)
+        }
+        return invert ? -v : v
+    }
+
+    /// Reference-frame gravity with the pre-attitude `(x, z, y)` remap.
+    private static func legacyGravityToBevy(_ g: CMAcceleration) -> SIMD3<Double> {
+        let len = sqrt(g.x * g.x + g.y * g.y + g.z * g.z)
+        guard len > 1e-6 else { return SIMD3(0, -1, 0) }
+        return SIMD3(g.x / len, g.z / len, g.y / len)
+    }
+
+    /// Map a unit vector fixed in device space (portrait) to Bevy pull direction.
+    private static func deviceAxisPullToBevy(_ motion: CMDeviceMotion, deviceAxis: SIMD3<Double>) -> SIMD3<Double> {
+        let vRef = referenceVector(fromDevice: deviceAxis, motion: motion)
         return bevyFromReference(vRef)
     }
 

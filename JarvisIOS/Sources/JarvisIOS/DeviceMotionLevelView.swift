@@ -92,11 +92,13 @@ struct DeviceMotionLevelView: View {
                 .font(.headline)
             labeledValue("Tilt", String(format: "%.0f°", motion.tiltDegrees))
             labeledValue("Shake", String(format: "%.2f m/s²", motion.shakeMagnitude))
+            labeledValue("Pull mode", motion.gravityMode.label)
             labeledValue("Gravity Y", String(format: "%.2f", motion.gravityDisplay.y))
-            Text("Dot = screen-bottom pull direction. 180° = hair can flip above head when phone is upside down. Orange ring = shake.")
+            Text(motion.gravityMode.detail)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Text("Dot = horizontal pull (X/Z). Orange ring = shake.")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -122,6 +124,21 @@ struct DeviceMotionLevelView: View {
             Text("Phone steering (only when motion toggle is on)")
                 .font(.caption.weight(.semibold))
                 .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Gravity pull direction")
+                    .font(.caption)
+                Picker("Gravity pull direction", selection: $motion.gravityMode) {
+                    ForEach(DeviceMotionGravityMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                Text(motion.gravityMode.detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Toggle("Invert pull (180°)", isOn: $motion.invertGravityPull)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Spring bones affected")
