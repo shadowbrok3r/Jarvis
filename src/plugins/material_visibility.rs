@@ -237,20 +237,26 @@ fn apply_material_visibility(
     store: Option<Res<MaterialVisibilityStore>>,
     vrm_roots_q: Query<Entity, With<Vrm>>,
     child_of_q: Query<&ChildOf>,
-    mut mtoon_meshes: Query<(
-        Entity,
-        Option<&Name>,
-        Option<&GltfMaterialName>,
-        &MeshMaterial3d<MToonMaterial>,
-        &mut Visibility,
-    )>,
-    mut std_meshes: Query<(
-        Entity,
-        Option<&Name>,
-        Option<&GltfMaterialName>,
-        &MeshMaterial3d<StandardMaterial>,
-        &mut Visibility,
-    )>,
+    mut mtoon_meshes: Query<
+        (
+            Entity,
+            Option<&Name>,
+            Option<&GltfMaterialName>,
+            &MeshMaterial3d<MToonMaterial>,
+            &mut Visibility,
+        ),
+        Without<MeshMaterial3d<StandardMaterial>>,
+    >,
+    mut std_meshes: Query<
+        (
+            Entity,
+            Option<&Name>,
+            Option<&GltfMaterialName>,
+            &MeshMaterial3d<StandardMaterial>,
+            &mut Visibility,
+        ),
+        Without<MeshMaterial3d<MToonMaterial>>,
+    >,
     mut applied: Local<MaterialVisibilityApplyCursor>,
 ) {
     let Some(store) = store else {

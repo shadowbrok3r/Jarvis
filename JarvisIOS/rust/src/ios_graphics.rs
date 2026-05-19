@@ -1,7 +1,79 @@
-//! Subset of desktop `[graphics]` mirrored by the hub manifest (`JarvisIosGraphicsLite`).
+//! Subset of desktop `[graphics]` + `[light_rig]` mirrored by the hub manifest (`JarvisIosGraphicsLite`).
 
 use bevy::prelude::*;
+use serde::Deserialize;
 use serde_json::Value;
+
+/// One directional light in the anime rig (matches desktop `LightSpec`).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct IosLightSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub direction: [f32; 3],
+    pub color: [f32; 3],
+    pub illuminance: f32,
+    #[serde(default)]
+    pub shadows: bool,
+}
+
+impl Default for IosLightSpec {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            direction: [-0.6, -1.0, -0.8],
+            color: [1.0, 0.96, 0.90],
+            illuminance: 9000.0,
+            shadows: true,
+        }
+    }
+}
+
+fn default_fill_light() -> IosLightSpec {
+    IosLightSpec {
+        enabled: true,
+        direction: [0.8, -0.4, -0.6],
+        color: [0.75, 0.85, 1.0],
+        illuminance: 3500.0,
+        shadows: false,
+    }
+}
+
+fn default_rim_light() -> IosLightSpec {
+    IosLightSpec {
+        enabled: true,
+        direction: [0.2, -0.2, 1.0],
+        color: [1.0, 0.9, 0.8],
+        illuminance: 5000.0,
+        shadows: false,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct IosLightRigSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub key: IosLightSpec,
+    #[serde(default = "default_fill_light")]
+    pub fill: IosLightSpec,
+    #[serde(default = "default_rim_light")]
+    pub rim: IosLightSpec,
+}
+
+impl Default for IosLightRigSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            key: IosLightSpec::default(),
+            fill: default_fill_light(),
+            rim: default_rim_light(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
 
 /// Lighting + MSAA snapshot for the embedded viewer (from `jarvis-ios.profile.v1` → `graphics`).
 #[derive(Resource, Clone, Debug, PartialEq)]
@@ -11,14 +83,14 @@ pub struct IosGraphicsSettings {
     pub exposure_ev100: f32,
     pub ambient_brightness: f32,
     pub ambient_color: [f32; 4],
+    /// Legacy single-sun fields (used only when `light_rig.enabled` is false).
     pub directional_illuminance: f32,
     pub directional_shadows: bool,
     pub directional_position: Vec3,
     pub show_ground_plane: bool,
-    /// Full width/depth of the ground quad in world units (matches desktop `graphics.ground_size`).
     pub ground_size: f32,
-    /// Linear RGB for the ground material (matches desktop `graphics.ground_base_color`).
     pub ground_base_color: [f32; 3],
+    pub light_rig: IosLightRigSettings,
 }
 
 impl Default for IosGraphicsSettings {
@@ -35,6 +107,7 @@ impl Default for IosGraphicsSettings {
             show_ground_plane: true,
             ground_size: 24.0,
             ground_base_color: [0.02, 0.021, 0.025],
+            light_rig: IosLightRigSettings::default(),
         }
     }
 }
@@ -94,7 +167,11 @@ pub fn graphics_from_manifest_value(g: Option<&Value>) -> IosGraphicsSettings {
             }
         }
     }
-    // iOS Metal: `Rgba16Float` (HDR) guarantees MSAA only in {1,2,4}; `Sample8` panics in `create_texture`.
+    if let Some(lr) = v.get("light_rig") {
+        if let Ok(rig) = serde_json::from_value::<IosLightRigSettings>(lr.clone()) {
+            s.light_rig = rig;
+        }
+    }
     s.msaa_samples = s.msaa_samples.min(4);
     s
 }

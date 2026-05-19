@@ -153,20 +153,26 @@ pub fn ios_apply_material_visibility(
     store: Res<IosMaterialVisibilityStore>,
     vrm_roots_q: Query<Entity, With<Vrm>>,
     child_of_q: Query<&ChildOf>,
-    mut mtoon_meshes: Query<(
-        Entity,
-        Option<&Name>,
-        Option<&GltfMaterialName>,
-        &MeshMaterial3d<MToonMaterial>,
-        &mut Visibility,
-    )>,
-    mut std_meshes: Query<(
-        Entity,
-        Option<&Name>,
-        Option<&GltfMaterialName>,
-        &MeshMaterial3d<StandardMaterial>,
-        &mut Visibility,
-    )>,
+    mut mtoon_meshes: Query<
+        (
+            Entity,
+            Option<&Name>,
+            Option<&GltfMaterialName>,
+            &MeshMaterial3d<MToonMaterial>,
+            &mut Visibility,
+        ),
+        Without<MeshMaterial3d<StandardMaterial>>,
+    >,
+    mut std_meshes: Query<
+        (
+            Entity,
+            Option<&Name>,
+            Option<&GltfMaterialName>,
+            &MeshMaterial3d<StandardMaterial>,
+            &mut Visibility,
+        ),
+        Without<MeshMaterial3d<MToonMaterial>>,
+    >,
     mut applied: Local<IosMaterialVisibilityApplyCursor>,
 ) {
     let vrm_roots: HashSet<Entity> = vrm_roots_q.iter().collect();

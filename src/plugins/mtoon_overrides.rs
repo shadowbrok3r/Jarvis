@@ -21,13 +21,23 @@ use jarvis_avatar::config::Settings;
 
 // ── Per-VRM ModelOverrides directory helpers ────────────────────────────────────────────────────
 
-/// Returns `config/ModelOverrides/{stem}/` where stem is the VRM filename without extension.
-/// e.g. `models/3.vrm` → `config/ModelOverrides/3/`
-pub fn vrm_model_overrides_dir(model_path: &str) -> PathBuf {
+/// File stem for per-VRM override folders (`3` for both `models/3.vrm` and `models/3.ios.vrm`).
+pub fn vrm_model_stem_for_overrides(model_path: &str) -> String {
     let stem = std::path::Path::new(model_path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("default");
+    if stem.ends_with(".ios") {
+        stem[..stem.len().saturating_sub(4)].to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Returns `config/ModelOverrides/{stem}/` where stem is the VRM filename without extension.
+/// e.g. `models/3.vrm` → `config/ModelOverrides/3/`
+pub fn vrm_model_overrides_dir(model_path: &str) -> PathBuf {
+    let stem = vrm_model_stem_for_overrides(model_path);
     std::env::current_dir()
         .unwrap_or_default()
         .join("config")

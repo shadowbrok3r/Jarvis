@@ -78,6 +78,16 @@ pub extern "C" fn jarvis_ios_set_log_verbosity(level: u8) {
     set_log_verbosity(level);
 }
 
+#[cfg(target_os = "ios")]
+fn load_saved_default_log_verbosity() -> Option<u8> {
+    crate::ios_user_prefs::load_default_log_verbosity()
+}
+
+#[cfg(not(target_os = "ios"))]
+fn load_saved_default_log_verbosity() -> Option<u8> {
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Ring buffer (in-app display)
 // ---------------------------------------------------------------------------
@@ -367,6 +377,8 @@ pub extern "C" fn jarvis_ios_set_log_file(
             "debug" | "3" => LOG_VERBOSITY_DEBUG,
             _ => LOG_VERBOSITY_NORMAL,
         };
+        set_log_verbosity(level);
+    } else if let Some(level) = load_saved_default_log_verbosity() {
         set_log_verbosity(level);
     }
 

@@ -17,6 +17,7 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::MouseButton;
 use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::mesh::skinning::SkinnedMesh;
+use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
 use bevy::render::view::{Hdr, Msaa};
 use bevy::render::RenderPlugin;
@@ -31,7 +32,7 @@ use bevy_panorbit_camera::{ActiveCameraData, EguiFocusIncludesHover, PanOrbitCam
 use bevy_vrm1::prelude::*;
 use core::ptr::NonNull;
 
-use crate::ios_graphics::{msaa_for_samples, IosGraphicsSettings};
+use crate::ios_graphics::{msaa_for_samples, IosGraphicsSettings, IosLightRigSettings, IosLightSpec};
 use crate::ios_material_visibility::{
     ios_apply_material_visibility, ios_seed_material_visibility_on_vrm_ready,
     IosMaterialVisibilityJson, IosMaterialVisibilityStore,
@@ -54,8 +55,16 @@ fn ios_asset_file_path() -> String {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub(crate) struct JarvisIosAvatarRoot;
 
+/// Legacy single sun when `light_rig.enabled` is false.
 #[derive(Component)]
 struct JarvisIosSun;
+
+#[derive(Component, Copy, Clone, Eq, PartialEq, Debug)]
+enum IosLightRigRole {
+    Key,
+    Fill,
+    Rim,
+}
 
 #[derive(Component)]
 struct JarvisIosGroundPlane;
@@ -241,6 +250,80 @@ fn log_render_device_limits(
     *done = true;
 }
 
+fn ios_light_vis(enabled: bool) -> Visibility {
+    if enabled {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    }
+}
+
+fn spawn_ios_light_one(commands: &mut Commands, role: IosLightRigRole, spec: &IosLightSpec) {
+    let direction = Vec3::from_array(spec.direction).normalize_or_zero();
+    let transform = if direction.length_squared() > 0.0 {
+        Transform::IDENTITY.looking_to(direction, Vec3::Y)
+    } else {
+        Transform::IDENTITY
+    };
+    commands.spawn((
+        DirectionalLight {
+            color: Color::linear_rgb(spec.color[0], spec.color[1], spec.color[2]),
+            illuminance: spec.illuminance,
+            shadows_enabled: spec.shadows,
+            ..default()
+        },
+        transform,
+        ios_light_vis(spec.enabled),
+        role,
+    ));
+}
+
+fn spawn_ios_lights(commands: &mut Commands, graphics: &IosGraphicsSettings, look_at: Vec3) {
+    if graphics.light_rig.enabled {
+        let rig = &graphics.light_rig;
+        spawn_ios_light_one(commands, IosLightRigRole::Key, &rig.key);
+        spawn_ios_light_one(commands, IosLightRigRole::Fill, &rig.fill);
+        spawn_ios_light_one(commands, IosLightRigRole::Rim, &rig.rim);
+        crate::jarvis_ios_line!("[JarvisIOS] spawned 3-light rig (key/fill/rim)");
+    } else {
+        commands.spawn((
+            JarvisIosSun,
+            DirectionalLight {
+                illuminance: graphics.directional_illuminance,
+                shadows_enabled: graphics.directional_shadows,
+                ..default()
+            },
+            Transform::from_translation(graphics.directional_position).looking_at(look_at, Vec3::Y),
+        ));
+        crate::jarvis_ios_line!("[JarvisIOS] spawned legacy single sun (light_rig disabled)");
+    }
+}
+
+fn sync_ios_light_rig(world: &mut World, rig: &IosLightRigSettings) {
+    let mut q = world.query::<(
+        &IosLightRigRole,
+        &mut DirectionalLight,
+        &mut Transform,
+        &mut Visibility,
+    )>();
+    for (role, mut light, mut tf, mut vis) in q.iter_mut(world) {
+        let spec = match role {
+            IosLightRigRole::Key => &rig.key,
+            IosLightRigRole::Fill => &rig.fill,
+            IosLightRigRole::Rim => &rig.rim,
+        };
+        let effective = rig.enabled && spec.enabled;
+        *vis = ios_light_vis(effective);
+        light.color = Color::linear_rgb(spec.color[0], spec.color[1], spec.color[2]);
+        light.illuminance = spec.illuminance;
+        light.shadows_enabled = spec.shadows;
+        let direction = Vec3::from_array(spec.direction).normalize_or_zero();
+        if direction.length_squared() > 0.0 {
+            *tf = Transform::IDENTITY.looking_to(direction, Vec3::Y);
+        }
+    }
+}
+
 fn spawn_ios_viewport(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -264,15 +347,13 @@ fn spawn_ios_viewport(
     }
     let focus = settings.world_position;
     let look_at = focus + Vec3::Y * 0.5;
-    commands.spawn((
-        JarvisIosSun,
-        DirectionalLight {
-            illuminance: graphics.directional_illuminance,
-            shadows_enabled: graphics.directional_shadows,
-            ..default()
-        },
-        Transform::from_translation(graphics.directional_position).looking_at(look_at, Vec3::Y),
-    ));
+    let [ar, ag, ab, aa] = graphics.ambient_color;
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::linear_rgba(ar, ag, ab, aa),
+        brightness: graphics.ambient_brightness,
+        affects_lightmapped_meshes: true,
+    });
+    spawn_ios_lights(&mut commands, &graphics, look_at);
     let half = (graphics.ground_size.max(0.02) * 0.5).min(512.0);
     let gc = graphics.ground_base_color;
     let ground_color = Color::linear_rgb(gc[0], gc[1], gc[2]);
@@ -686,6 +767,23 @@ pub(crate) fn is_safe_asset_rel(rel: &str) -> bool {
 
 fn apply_scene_graphics_from_settings(world: &mut World, g: &IosGraphicsSettings, focus: Vec3) {
     let look_at = focus + Vec3::Y * 0.5;
+    let [ar, ag, ab, aa] = g.ambient_color;
+    *world.resource_mut::<GlobalAmbientLight>() = GlobalAmbientLight {
+        color: Color::linear_rgba(ar, ag, ab, aa),
+        brightness: g.ambient_brightness,
+        affects_lightmapped_meshes: true,
+    };
+    if g.light_rig.enabled {
+        sync_ios_light_rig(world, &g.light_rig);
+    } else {
+        let mut sun_q =
+            world.query_filtered::<(&mut DirectionalLight, &mut Transform), With<JarvisIosSun>>();
+        for (mut dl, mut tf) in sun_q.iter_mut(world) {
+            dl.illuminance = g.directional_illuminance;
+            dl.shadows_enabled = g.directional_shadows;
+            *tf = Transform::from_translation(g.directional_position).looking_at(look_at, Vec3::Y);
+        }
+    }
     let cam_entities: Vec<Entity> = world
         .query_filtered::<Entity, With<Camera3d>>()
         .iter(world)
@@ -703,12 +801,6 @@ fn apply_scene_graphics_from_settings(world: &mut World, g: &IosGraphicsSettings
         } else {
             ew.remove::<Hdr>();
         }
-    }
-    let mut sun_q = world.query_filtered::<(&mut DirectionalLight, &mut Transform), With<JarvisIosSun>>();
-    for (mut dl, mut tf) in sun_q.iter_mut(world) {
-        dl.illuminance = g.directional_illuminance;
-        dl.shadows_enabled = g.directional_shadows;
-        *tf = Transform::from_translation(g.directional_position).looking_at(look_at, Vec3::Y);
     }
     let half = (g.ground_size.max(0.02) * 0.5).min(512.0);
     let gc = g.ground_base_color;
@@ -1049,13 +1141,15 @@ impl IosEmbeddedRenderer {
             avatar_settings.model_path,
             avatar_settings.idle_vrma_path
         );
+        let model_path = avatar_settings.model_path.clone();
         app.insert_resource(avatar_settings);
         app.insert_resource(graphics_settings);
         app.insert_resource(IosSpringPresetToml(spring_toml));
         app.insert_resource(IosMToonOverridesJson(mtoon_overrides_json));
         app.insert_resource(IosMaterialVisibilityJson(material_visibility_json.clone()));
-        app.insert_resource(IosMaterialVisibilityStore::from_json(
+        app.insert_resource(crate::ios_user_prefs::material_visibility_store_for_model(
             material_visibility_json.as_deref(),
+            &model_path,
         ));
         app.init_resource::<IosAvatarRootEntity>();
         app.init_resource::<IosExpressionsState>();
@@ -1248,7 +1342,10 @@ impl IosEmbeddedRenderer {
         *world.resource_mut::<IosMaterialVisibilityJson>() =
             IosMaterialVisibilityJson(material_vis.clone());
         *world.resource_mut::<IosMaterialVisibilityStore>() =
-            IosMaterialVisibilityStore::from_json(material_vis.as_deref());
+            crate::ios_user_prefs::material_visibility_store_for_model(
+                material_vis.as_deref(),
+                &avatar.model_path,
+            );
         world.insert_resource(ClearColor(avatar.background_color));
         // Despawn every avatar root (VRM + VRMA children). Relying on a single stored entity can miss
         // duplicates if a previous reload partially failed, which breaks PanOrbit + leaves a black view.

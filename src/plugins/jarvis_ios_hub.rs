@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use jarvis_avatar::config::{AvatarSettings, CameraSettings, Settings};
+use jarvis_avatar::config::{AvatarSettings, CameraSettings, LightRigSettings, Settings};
 
 use super::mtoon_overrides::{
     vrm_model_graphics_override_path, vrm_model_material_visibility_path,
@@ -55,6 +55,8 @@ pub struct JarvisIosGraphicsLite {
     pub show_ground_plane: bool,
     pub ground_size: f32,
     pub ground_base_color: [f32; 3],
+    /// Three-point key / fill / rim rig (what desktop actually uses when `[light_rig].enabled`).
+    pub light_rig: LightRigSettings,
 }
 
 /// Write per-VRM graphics overrides JSON to `config/ModelOverrides/{stem}/graphics_overrides.json`.
@@ -85,6 +87,7 @@ fn graphics_lite_from_settings(settings: &Settings) -> JarvisIosGraphicsLite {
         show_ground_plane: settings.graphics.show_ground_plane,
         ground_size: settings.graphics.ground_size,
         ground_base_color: settings.graphics.ground_base_color,
+        light_rig: settings.light_rig.clone(),
     }
 }
 
@@ -355,6 +358,11 @@ fn merge_graphics_overrides(mut base: JarvisIosGraphicsLite, v: &serde_json::Val
                 c[i] = val.as_f64().unwrap_or(0.0) as f32;
             }
             base.ground_base_color = c;
+        }
+    }
+    if let Some(lr) = v.get("light_rig") {
+        if let Ok(rig) = serde_json::from_value::<LightRigSettings>(lr.clone()) {
+            base.light_rig = rig;
         }
     }
     base

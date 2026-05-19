@@ -13,6 +13,8 @@ mod ios_mtoon_overrides;
 #[cfg(target_os = "ios")]
 mod ios_material_visibility;
 #[cfg(target_os = "ios")]
+mod ios_user_prefs;
+#[cfg(target_os = "ios")]
 mod jarvis_egui_theme;
 #[cfg(target_os = "ios")]
 mod ios_egui_ui;

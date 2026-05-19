@@ -298,7 +298,9 @@ pub fn draw_graphics_advanced_window(
         .default_size([520.0, 620.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
                 draw_post_process(
                     ui,
                     settings.graphics.msaa_samples,
@@ -518,8 +520,10 @@ fn draw_material_visibility(
     });
 
     egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
         .max_height(200.0)
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             for key in &keys {
                 let mut visible = store.is_visible(key);
                 if ui.checkbox(&mut visible, key).changed() {

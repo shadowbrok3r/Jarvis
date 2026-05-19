@@ -140,7 +140,6 @@ fn view_menu_desktop_parity(ui: &mut egui::Ui, s: &mut JarvisIosUiState) {
     ui.checkbox(&mut s.show_emotion_mappings, "Emotion Mappings");
     ui.checkbox(&mut s.show_network_trace, "Network trace");
     ui.checkbox(&mut s.show_rig_editor, "Rig editor");
-    ui.checkbox(&mut s.show_graphics_advanced, "Graphics Advanced");
     ui.separator();
     ui.checkbox(&mut s.show_expressions, "Expressions");
 }
@@ -156,6 +155,7 @@ pub fn jarvis_ios_egui_menu_bar(mut contexts: EguiContexts, mut ui_state: ResMut
                 ui.checkbox(&mut s.show_graphics, "Graphics / lights");
                 ui.checkbox(&mut s.show_expressions, "Expressions");
                 ui.checkbox(&mut s.show_animations, "Animations");
+                ui.checkbox(&mut s.show_graphics_advanced, "Materials");
                 ui.checkbox(&mut s.show_logging, "Logging");
                 ui.separator();
                 ui.menu_button("More windows…", |ui| {
@@ -432,16 +432,16 @@ pub fn jarvis_ios_egui_windows(
             &mtoon_meshes_q,
             &std_meshes_q,
         );
-        egui::Window::new("Graphics Advanced")
-            .default_pos(egui::pos2(560.0, 440.0))
-            .default_size(egui::vec2(320.0, 420.0))
+        let model_path = avatar.model_path.clone();
+        let mut save_status: Option<String> = None;
+        egui::Window::new("Materials")
+            .default_pos(egui::pos2(8.0, 120.0))
+            .default_size(egui::vec2(300.0, 480.0))
             .collapsible(true)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.label(RichText::new("Graphics Advanced").strong());
-                ui.separator();
-                ui.heading("Material visibility");
-                ui.small("Session toggles apply immediately; sync hub profile to persist from desktop.");
+                ui.label(RichText::new("Material visibility").strong());
+                ui.small("Toggles apply immediately. Save stores per-model on this device; hub sync can also push desktop presets.");
                 if material_keys.is_empty() {
                     ui.label("No materials found under the active VRM.");
                 } else {
@@ -456,9 +456,25 @@ pub fn jarvis_ios_egui_windows(
                             vis_store.invert(&material_keys);
                         }
                     });
+                    if ui.button("Save on device").clicked() {
+                        let ok = crate::ios_user_prefs::save_material_visibility(
+                            &model_path,
+                            &vis_store,
+                        );
+                        save_status = Some(if ok {
+                            "Saved material visibility for this model.".into()
+                        } else {
+                            "Save failed (prefs directory unavailable).".into()
+                        });
+                    }
+                    if let Some(msg) = &save_status {
+                        ui.label(RichText::new(msg).small().weak());
+                    }
                     egui::ScrollArea::vertical()
-                        .max_height(280.0)
+                        .auto_shrink([false, false])
+                        .max_height(360.0)
                         .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
                             for key in &material_keys {
                                 let mut visible = vis_store.is_visible(key);
                                 if ui.checkbox(&mut visible, key).changed() {
@@ -467,8 +483,6 @@ pub fn jarvis_ios_egui_windows(
                             }
                         });
                 }
-                ui.separator();
-                stub_footer(ui);
             });
     }
 
@@ -750,6 +764,7 @@ pub fn jarvis_ios_egui_windows(
     if ui_state.show_logging {
         let mut show = true;
         let mut current = crate::debug_log::log_verbosity();
+        let mut save_log_default_status: Option<String> = None;
         egui::Window::new("Logging")
             .default_pos(egui::pos2(620.0, 60.0))
             .default_size(egui::vec2(260.0, 0.0))
@@ -791,8 +806,21 @@ pub fn jarvis_ios_egui_windows(
                     crate::debug_log::set_log_verbosity(current);
                 }
                 ui.separator();
+                if ui.button("Save as default").clicked() {
+                    let ok = crate::ios_user_prefs::save_default_log_verbosity(current);
+                    if ok {
+                        save_log_default_status = Some(
+                            "Saved default log level for next launch.".into(),
+                        );
+                    } else {
+                        save_log_default_status = Some("Save failed.".into());
+                    }
+                }
+                if let Some(msg) = &save_log_default_status {
+                    ui.label(RichText::new(msg).small().weak());
+                }
                 ui.label(
-                    RichText::new("Tip: env JARVIS_IOS_LOG_VERBOSITY={off|quiet|normal|debug} sets the boot default.")
+                    RichText::new("Saved defaults apply on next app launch (or after profile reload).")
                         .weak()
                         .small(),
                 );

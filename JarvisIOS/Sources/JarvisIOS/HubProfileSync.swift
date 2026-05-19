@@ -113,6 +113,11 @@ enum HubProfileSync {
         static let userDefaultsBackgroundLinearRgbaKey = "jarvis.ios.scene.backgroundLinearRgba"
     }
 
+    /// On-device prefs directory for Rust (`ios_user_prefs.rs`): material visibility + default log level.
+    enum IosUserPrefs {
+        static let userDefaultsDefaultLogVerbosityKey = "jarvis.ios.defaultLogVerbosity"
+    }
+
     /// Last hub base URL that produced a successful cache (used to avoid reusing cache after URL change).
     private static let userDefaultsCachedHubBaseURLKey = "jarvis.hub.cachedProfileHubBaseURL"
     /// Filesystem paths from the last successful sync (re-applied before Bevy boots without re-downloading).
@@ -819,6 +824,9 @@ extension HubProfileSync {
     /// Pushes `JARVIS_IOS_MODEL_PATH` / `JARVIS_IOS_IDLE_VRMA_PATH` for the Rust `jarvis_ios` staticlib.
     /// Call before `jarvis_renderer_new` and before `jarvis_renderer_reload_profile`.
     static func applyIosAvatarOverrideEnvFromUserDefaults() {
+        applyIosUserPrefsDirectoryEnv()
+        applyIosDefaultLogVerbosityEnvFromUserDefaults()
+
         let m = UserDefaults.standard.string(forKey: IosAvatarCustomize.userDefaultsModelRelPathOverrideKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if m.isEmpty || m.contains("..") || m.hasPrefix("/") {
@@ -856,6 +864,55 @@ extension HubProfileSync {
         } else {
             setenv("JARVIS_IOS_BACKGROUND_LINEAR", bg, 1)
         }
+    }
+
+    /// Application Support/JarvisIOS — Rust reads/writes material visibility + default log prefs here.
+    private static func applyIosUserPrefsDirectoryEnv() {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            unsetenv("JARVIS_IOS_USER_PREFS_DIR")
+            return
+        }
+        let dir = base.appendingPathComponent("JarvisIOS", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            setenv("JARVIS_IOS_USER_PREFS_DIR", dir.path, 1)
+        } catch {
+            JarvisIOSLog.recordHubError("applyIosUserPrefsDirectoryEnv: mkdir failed \(error)")
+            unsetenv("JARVIS_IOS_USER_PREFS_DIR")
+        }
+    }
+
+    /// Boot default for `JARVIS_IOS_LOG_VERBOSITY` (0–3). Session changes in egui can still override until restart.
+    private static func applyIosDefaultLogVerbosityEnvFromUserDefaults() {
+        let key = IosUserPrefs.userDefaultsDefaultLogVerbosityKey
+        if UserDefaults.standard.object(forKey: key) != nil {
+            let level = min(max(UserDefaults.standard.integer(forKey: key), 0), 3)
+            setenv("JARVIS_IOS_LOG_VERBOSITY", String(level), 1)
+            return
+        }
+        guard let dir = iosUserPrefsDirectoryURL() else { return }
+        let file = dir.appendingPathComponent("default_log_verbosity.txt")
+        guard let raw = try? String(contentsOf: file, encoding: .utf8),
+              let level = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (0 ... 3).contains(level)
+        else { return }
+        setenv("JARVIS_IOS_LOG_VERBOSITY", String(level), 1)
+    }
+
+    /// Persist default log verbosity for the next app launch (`0` = off … `3` = debug).
+    static func persistDefaultLogVerbosity(_ level: Int) {
+        let clamped = min(max(level, 0), 3)
+        UserDefaults.standard.set(clamped, forKey: IosUserPrefs.userDefaultsDefaultLogVerbosityKey)
+        setenv("JARVIS_IOS_LOG_VERBOSITY", String(clamped), 1)
+        _ = iosUserPrefsDirectoryURL().map { dir in
+            let file = dir.appendingPathComponent("default_log_verbosity.txt")
+            try? String(clamped).write(to: file, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private static func iosUserPrefsDirectoryURL() -> URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("JarvisIOS", isDirectory: true)
     }
 
     /// `avatar.model_path` from the last synced hub `manifest.json` (for UI labels).
