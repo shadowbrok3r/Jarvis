@@ -958,6 +958,25 @@ extension HubProfileSync {
         return nil
     }
 
+    /// `.vrma` files under the resolved asset root (e.g. `models/idle_loop.vrma`).
+    static func listDiscoveredVrmaRelativePaths(maxFiles: Int = 300) -> [String] {
+        guard let root = resolvedAssetRootDirectoryURL() else { return [] }
+        let fm = FileManager.default
+        guard let en = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var out: [String] = []
+        while out.count < maxFiles, let u = en.nextObject() as? URL {
+            guard u.pathExtension.lowercased() == "vrma" else { continue }
+            guard let rel = vrmPathRelativeToAssetRoot(file: u, assetRoot: root) else { continue }
+            out.append(rel)
+        }
+        return out.sorted()
+    }
+
     /// All `.vrm` files under the resolved asset root, as repo-relative paths (e.g. `models/foo.vrm`).
     static func listDiscoveredVrmRelativePaths(maxFiles: Int = 300) -> [String] {
         guard let root = resolvedAssetRootDirectoryURL() else { return [] }

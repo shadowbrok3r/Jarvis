@@ -21,6 +21,8 @@ mod ios_egui_ui;
 #[cfg(target_os = "ios")]
 mod ios_anim_json;
 #[cfg(target_os = "ios")]
+mod ios_anim_layers;
+#[cfg(target_os = "ios")]
 mod ios_mem_probe;
 #[cfg(target_os = "ios")]
 mod ios_bevy;
@@ -51,6 +53,29 @@ mod ffi {
         fn jarvis_renderer_queue_vrma(ptr: *mut u8, path_ptr: *const u8, path_len: usize, loop_forever: u8);
 
         fn jarvis_renderer_queue_anim_json(ptr: *mut u8, path_ptr: *const u8, path_len: usize);
+
+        fn jarvis_renderer_expressions_snapshot_json(ptr: *mut u8) -> String;
+
+        fn jarvis_renderer_set_expression_weight(
+            ptr: *mut u8,
+            name_ptr: *const u8,
+            name_len: usize,
+            weight: f32,
+        );
+
+        fn jarvis_renderer_apply_expressions(ptr: *mut u8);
+
+        fn jarvis_renderer_layers_snapshot_json(ptr: *mut u8) -> String;
+
+        fn jarvis_renderer_layers_set_master(ptr: *mut u8, enabled: u8);
+
+        fn jarvis_renderer_layers_install_default(ptr: *mut u8);
+
+        fn jarvis_renderer_layers_set_enabled(ptr: *mut u8, layer_id: u64, enabled: u8);
+
+        fn jarvis_renderer_layers_set_weight(ptr: *mut u8, layer_id: u64, weight: f32);
+
+        fn jarvis_renderer_layers_clear(ptr: *mut u8);
 
         fn jarvis_ios_debug_log_snapshot() -> String;
 
@@ -228,3 +253,135 @@ pub fn jarvis_renderer_queue_anim_json(ptr: *mut u8, path_ptr: *const u8, path_l
 
 #[cfg(not(target_os = "ios"))]
 pub fn jarvis_renderer_queue_anim_json(_ptr: *mut u8, _path_ptr: *const u8, _path_len: usize) {}
+
+fn utf8_from_ptr(path_ptr: *const u8, path_len: usize) -> Option<String> {
+    if path_ptr.is_null() || path_len == 0 {
+        return None;
+    }
+    let path = unsafe { std::slice::from_raw_parts(path_ptr, path_len) };
+    std::str::from_utf8(path).ok().map(str::to_owned)
+}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_expressions_snapshot_json(ptr: *mut u8) -> String {
+    if ptr.is_null() {
+        return "{}".into();
+    }
+    unsafe { (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).expressions_snapshot_json() }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_expressions_snapshot_json(_ptr: *mut u8) -> String {
+    "{}".into()
+}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_set_expression_weight(ptr: *mut u8, name_ptr: *const u8, name_len: usize, weight: f32) {
+    let Some(name) = utf8_from_ptr(name_ptr, name_len) else { return };
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).set_expression_weight(&name, weight);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_set_expression_weight(
+    _ptr: *mut u8,
+    _name_ptr: *const u8,
+    _name_len: usize,
+    _weight: f32,
+) {
+}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_apply_expressions(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).apply_expressions_from_state();
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_apply_expressions(_ptr: *mut u8) {}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_layers_snapshot_json(ptr: *mut u8) -> String {
+    if ptr.is_null() {
+        return "{}".into();
+    }
+    unsafe { (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).layers_snapshot_json() }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_layers_snapshot_json(_ptr: *mut u8) -> String {
+    "{}".into()
+}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_layers_set_master(ptr: *mut u8, enabled: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).layers_set_master(enabled != 0);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_layers_set_master(_ptr: *mut u8, _enabled: u8) {}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_layers_install_default(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).layers_install_default();
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_layers_install_default(_ptr: *mut u8) {}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_layers_set_enabled(ptr: *mut u8, layer_id: u64, enabled: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).layers_set_enabled(layer_id, enabled != 0);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_layers_set_enabled(_ptr: *mut u8, _layer_id: u64, _enabled: u8) {}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_layers_set_weight(ptr: *mut u8, layer_id: u64, weight: f32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).layers_set_weight(layer_id, weight);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_layers_set_weight(_ptr: *mut u8, _layer_id: u64, _weight: f32) {}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_layers_clear(ptr: *mut u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).layers_clear();
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_layers_clear(_ptr: *mut u8) {}

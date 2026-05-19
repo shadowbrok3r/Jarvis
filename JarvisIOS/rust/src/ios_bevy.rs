@@ -71,7 +71,7 @@ struct JarvisIosGroundPlane;
 
 /// Entity with [`JarvisIosAvatarRoot`] (VRM + optional idle VRMA children).
 #[derive(Resource, Default)]
-struct IosAvatarRootEntity(Option<Entity>);
+pub(crate) struct IosAvatarRootEntity(pub(crate) Option<Entity>);
 
 /// When set, the VRM load is deferred by `remaining` frames to let Bevy's render backend settle.
 /// Used for VRMs ≥ [`VRM_WARN_BYTES`] where simultaneous Bevy init + large asset load causes OOM spikes.
@@ -1179,6 +1179,7 @@ impl IosEmbeddedRenderer {
         );
         app.add_plugins((VrmPlugin, VrmaPlugin, EguiPlugin::default(), PanOrbitCameraPlugin));
         crate::ios_anim_json::plugin(&mut app);
+        app.add_plugins(crate::ios_anim_layers::IosAnimLayersPlugin);
         // When the pointer is over egui (menu bar, windows), PanOrbit must not consume drags/pinch.
         let mut egui_global = bevy_egui::EguiGlobalSettings::default();
         egui_global.enable_absorb_bevy_input_system = true;
@@ -1296,6 +1297,94 @@ impl IosEmbeddedRenderer {
         }
     }
 
+    pub fn expressions_snapshot_json(&self) -> String {
+        let world = self.app.world();
+        let state = world.resource::<IosExpressionsState>();
+        let presets: Vec<serde_json::Value> = state
+            .presets
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "name": n,
+                    "weight": state.weights.get(n).copied().unwrap_or(0.0_f32),
+                })
+            })
+            .collect();
+        serde_json::json!({ "presets": presets }).to_string()
+    }
+
+    pub fn set_expression_weight(&mut self, name: &str, weight: f32) {
+        let world = self.app.world_mut();
+        let mut state = world.resource_mut::<IosExpressionsState>();
+        let key = name.trim();
+        if key.is_empty() {
+            return;
+        }
+        state.weights.insert(key.to_string(), weight.clamp(0.0, 1.0));
+    }
+
+    pub fn apply_expressions_from_state(&mut self) {
+        let world = self.app.world_mut();
+        let weights_map = world.resource::<IosExpressionsState>().weights.clone();
+        let mut vrm_q = world.query_filtered::<Entity, (With<Vrm>, With<Initialized>)>();
+        let Some(vrm_e) = vrm_q.iter(world).next() else {
+            return;
+        };
+        let weights: std::collections::HashMap<VrmExpression, f32> = weights_map
+            .iter()
+            .filter_map(|(k, &v)| {
+                let n = k.trim();
+                if n.is_empty() {
+                    None
+                } else {
+                    Some((VrmExpression::from(n), v))
+                }
+            })
+            .collect();
+        world.commands().trigger(SetExpressions::from_iter(vrm_e, weights));
+    }
+
+    pub fn layers_snapshot_json(&self) -> String {
+        let handle = self.app.world().resource::<crate::ios_anim_layers::IosLayerStackHandle>();
+        crate::ios_anim_layers::layers_snapshot_json(handle)
+    }
+
+    pub fn layers_set_master(&mut self, enabled: bool) {
+        let handle = self.app.world().resource::<crate::ios_anim_layers::IosLayerStackHandle>().clone();
+        handle.with_write(|s| s.master_enabled = enabled);
+    }
+
+    pub fn layers_install_default(&mut self) {
+        let handle = self.app.world().resource::<crate::ios_anim_layers::IosLayerStackHandle>().clone();
+        handle.with_write(|s| {
+            s.reset_and_install_default();
+            s.master_enabled = true;
+        });
+    }
+
+    pub fn layers_set_enabled(&mut self, id: u64, enabled: bool) {
+        let handle = self.app.world().resource::<crate::ios_anim_layers::IosLayerStackHandle>().clone();
+        handle.with_write(|s| {
+            if let Some(l) = s.layers.iter_mut().find(|l| l.id == id) {
+                l.enabled = enabled;
+            }
+        });
+    }
+
+    pub fn layers_set_weight(&mut self, id: u64, weight: f32) {
+        let handle = self.app.world().resource::<crate::ios_anim_layers::IosLayerStackHandle>().clone();
+        handle.with_write(|s| {
+            if let Some(l) = s.layers.iter_mut().find(|l| l.id == id) {
+                l.weight = weight.clamp(0.0, 1.0);
+            }
+        });
+    }
+
+    pub fn layers_clear(&mut self) {
+        let handle = self.app.world().resource::<crate::ios_anim_layers::IosLayerStackHandle>().clone();
+        handle.with_write(|s| s.layers.clear());
+    }
+
     fn flush_queued_json_anim_requests(&mut self) {
         let drained: Vec<String> = {
             let mut g = self.json_anim_queue.lock().unwrap();
@@ -1363,6 +1452,9 @@ impl IosEmbeddedRenderer {
         let asset_server = world.resource::<AssetServer>().clone();
         let id = spawn_jarvis_ios_vrm_root(&mut world.commands(), &asset_server, &avatar);
         world.insert_resource(IosAvatarRootEntity(Some(id)));
+        world.resource_mut::<crate::ios_anim_layers::IosBoneNameMap>().lower_to_entity.clear();
+        world.resource_mut::<crate::ios_anim_layers::IosBoneNameMap>().vrm_entity = None;
+        world.resource_mut::<crate::ios_anim_layers::IosRestPoseSnapshot>().captured = 0;
         world.flush();
         world
             .resource_mut::<crate::ios_anim_json::IosJsonAnimPlayback>()

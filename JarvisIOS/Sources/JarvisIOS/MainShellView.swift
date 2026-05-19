@@ -19,7 +19,9 @@ struct MainShellView: View {
     @State private var shellTab: ShellTab = .avatar
     @State private var bevySessionId = 0
     @State private var gatewayChatModel = GatewayChatViewModel()
-    @AppStorage("jarvis.avatarChatOverlay") private var showAvatarChatOverlay = false
+    @AppStorage("jarvis.avatarBottomPanel") private var showAvatarBottomPanel = false
+    @AppStorage("jarvis.avatarBottomPanelHeight") private var avatarBottomPanelHeight: Double = 380
+    @AppStorage("jarvis.avatarBottomPanelTab") private var avatarBottomPanelTabRaw: String = AvatarBottomPanelTab.chat.rawValue
     @AppStorage(HubProfileSync.userDefaultsBaseURLKey) private var hubBaseURL: String = ""
     @AppStorage(HubProfileSync.userDefaultsSecondaryBaseURLKey) private var hubSecondaryBaseURL: String = ""
     @AppStorage(HubProfileSync.userDefaultsAuthTokenKey) private var hubAuthToken: String = ""
@@ -58,37 +60,45 @@ struct MainShellView: View {
                             .zIndex(shellTab == .avatar ? 1 : 0)
                             .overlay(alignment: .topTrailing) {
                                 if shellTab == .avatar {
-                                    Button {
-                                        showAvatarChatOverlay.toggle()
-                                    } label: {
-                                        Image(systemName: showAvatarChatOverlay ? "bubble.left.and.text.bubble.fill" : "bubble.left.and.text.bubble")
-                                            .font(.title3)
-                                            .padding(10)
-                                            .background(.ultraThinMaterial, in: Circle())
+                                    HStack(spacing: 6) {
+                                        ForEach(AvatarBottomPanelTab.allCases) { tab in
+                                            Button {
+                                                openAvatarBottomPanel(tab: tab)
+                                            } label: {
+                                                Image(systemName: tab.systemImage)
+                                                    .font(.body)
+                                                    .padding(8)
+                                                    .background(
+                                                        showAvatarBottomPanel && avatarBottomPanelTab == tab
+                                                            ? Color.accentColor.opacity(0.25)
+                                                            : Color.clear,
+                                                        in: Circle()
+                                                    )
+                                            }
+                                            .accessibilityLabel(tab.title)
+                                        }
                                     }
+                                    .padding(8)
+                                    .background(.ultraThinMaterial, in: Capsule())
                                     .padding(.top, 6)
                                     .padding(.trailing, 8)
-                                    .accessibilityLabel(showAvatarChatOverlay ? "Hide chat overlay" : "Show chat overlay")
                                 }
                             }
                             .overlay(alignment: .bottom) {
-                                if shellTab == .avatar, showAvatarChatOverlay {
-                                    GatewayChatView(
-                                        model: gatewayChatModel,
-                                        compact: true,
-                                        onDismissCompact: { showAvatarChatOverlay = false }
+                                if shellTab == .avatar, showAvatarBottomPanel {
+                                    AvatarToolsOverlay(
+                                        selectedTab: Binding(
+                                            get: { avatarBottomPanelTab },
+                                            set: { avatarBottomPanelTabRaw = $0.rawValue }
+                                        ),
+                                        panelHeight: Binding(
+                                            get: { CGFloat(avatarBottomPanelHeight) },
+                                            set: { avatarBottomPanelHeight = Double($0) }
+                                        ),
+                                        viewportHeight: h,
+                                        onDismiss: { showAvatarBottomPanel = false },
+                                        chatModel: gatewayChatModel
                                     )
-                                    .frame(height: min(380, h * 0.46))
-                                    .frame(maxWidth: .infinity)
-                                    .background(.ultraThinMaterial)
-                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                            .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
-                                    )
-                                    .padding(.horizontal, 10)
-                                    .padding(.bottom, 8)
-                                    .shadow(color: .black.opacity(0.2), radius: 12, y: 4)
                                 }
                             }
 
@@ -136,7 +146,31 @@ struct MainShellView: View {
         }
         .onAppear {
             gatewayChatModel.onAppear()
+            migrateLegacyAvatarChatOverlayFlag()
         }
+    }
+
+    private var avatarBottomPanelTab: AvatarBottomPanelTab {
+        AvatarBottomPanelTab(rawValue: avatarBottomPanelTabRaw) ?? .chat
+    }
+
+    private func openAvatarBottomPanel(tab: AvatarBottomPanelTab) {
+        avatarBottomPanelTabRaw = tab.rawValue
+        if avatarBottomPanelHeight < 160 {
+            avatarBottomPanelHeight = 380
+        }
+        showAvatarBottomPanel = true
+    }
+
+    /// One-time migration from the old chat-only overlay toggle.
+    private func migrateLegacyAvatarChatOverlayFlag() {
+        let key = "jarvis.avatarChatOverlay"
+        guard UserDefaults.standard.object(forKey: key) != nil else { return }
+        if UserDefaults.standard.bool(forKey: key) {
+            showAvatarBottomPanel = true
+            avatarBottomPanelTabRaw = AvatarBottomPanelTab.chat.rawValue
+        }
+        UserDefaults.standard.removeObject(forKey: key)
     }
 
     private var aboutStack: some View {

@@ -58,6 +58,56 @@ enum JarvisBevySession {
             jarvis_renderer_queue_anim_json(r, base, UInt(buf.count))
         }
     }
+
+    static func expressionsSnapshotJSON() -> String {
+        guard let r = renderer else { return "{\"presets\":[]}" }
+        return jarvis_renderer_expressions_snapshot_json(r).toString()
+    }
+
+    static func setExpressionWeight(name: String, weight: Float) {
+        guard let r = renderer else { return }
+        let utf8 = Array(name.utf8)
+        utf8.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            jarvis_renderer_set_expression_weight(r, base, UInt(buf.count), weight)
+        }
+        jarvis_renderer_apply_expressions(r)
+    }
+
+    static func applyExpressions() {
+        guard let r = renderer else { return }
+        jarvis_renderer_apply_expressions(r)
+    }
+
+    static func layersSnapshotJSON() -> String {
+        guard let r = renderer else { return "{\"masterEnabled\":false,\"layers\":[]}" }
+        return jarvis_renderer_layers_snapshot_json(r).toString()
+    }
+
+    static func layersSetMaster(enabled: Bool) {
+        guard let r = renderer else { return }
+        jarvis_renderer_layers_set_master(r, enabled ? 1 : 0)
+    }
+
+    static func layersInstallDefault() {
+        guard let r = renderer else { return }
+        jarvis_renderer_layers_install_default(r)
+    }
+
+    static func layersSetEnabled(layerId: UInt64, enabled: Bool) {
+        guard let r = renderer else { return }
+        jarvis_renderer_layers_set_enabled(r, layerId, enabled ? 1 : 0)
+    }
+
+    static func layersSetWeight(layerId: UInt64, weight: Float) {
+        guard let r = renderer else { return }
+        jarvis_renderer_layers_set_weight(r, layerId, weight)
+    }
+
+    static func layersClear() {
+        guard let r = renderer else { return }
+        jarvis_renderer_layers_clear(r)
+    }
 }
 
 /// Forwards multi-touch to Bevy (`TouchInput` injection). `UIView.contentScaleFactor` is sometimes `1`

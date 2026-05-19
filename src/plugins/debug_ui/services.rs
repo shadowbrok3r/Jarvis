@@ -1,21 +1,22 @@
 //! Consolidated "Services" window.
 //!
 //! Renders one row per tracked service with a colored status dot, human
-//! label, endpoint, and detail line. Also exposes quick jump-to-config
-//! buttons that open the per-service config windows that still live in
-//! `sections.rs`.
+//! label, endpoint, and detail line. Quick-jump buttons switch the Service Hub
+//! workspace to the matching config tab.
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::config::Settings;
 
+use crate::plugins::debug_ui::workspaces::{ServiceHubTab, ServiceHubUiState};
 use crate::plugins::service_status::{ServiceId, ServiceState, ServiceStatus};
 
 pub fn services_panel(
     ui: &mut egui::Ui,
     settings: &mut Settings,
     status: Option<&ServiceStatus>,
+    hub: &mut ServiceHubUiState,
 ) {
     ui.label("Live connection state for every external service the avatar talks to.");
     ui.separator();
@@ -66,18 +67,21 @@ pub fn services_panel(
 
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            let u = &mut settings.ui;
             if ui.button("Channel hub config…").clicked() {
-                u.show_channel_hub = true;
+                settings.ui.show_service_hub = true;
+                hub.tab = ServiceHubTab::ChannelHub;
             }
             if ui.button("Gateway config…").clicked() {
-                u.show_gateway = true;
+                settings.ui.show_service_hub = true;
+                hub.tab = ServiceHubTab::Gateway;
             }
             if ui.button("TTS config…").clicked() {
-                u.show_tts = true;
+                settings.ui.show_service_hub = true;
+                hub.tab = ServiceHubTab::Tts;
             }
             if ui.button("MCP config…").clicked() {
-                u.show_mcp = true;
+                settings.ui.show_service_hub = true;
+                hub.tab = ServiceHubTab::Mcp;
             }
         });
     });
@@ -87,6 +91,7 @@ pub fn draw_services_window(
     mut contexts: EguiContexts,
     mut settings: ResMut<Settings>,
     status: Option<Res<ServiceStatus>>,
+    mut hub: ResMut<ServiceHubUiState>,
 ) {
     if !settings.ui.show_services {
         return;
@@ -99,7 +104,7 @@ pub fn draw_services_window(
         .default_height(360.0)
         .open(&mut open)
         .show(ctx, |ui| {
-            services_panel(ui, &mut settings, status.as_deref());
+            services_panel(ui, &mut settings, status.as_deref(), &mut hub);
         });
     settings.ui.show_services = open;
 }

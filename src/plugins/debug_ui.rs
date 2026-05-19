@@ -462,20 +462,8 @@ fn view_menu(ui: &mut egui::Ui, settings: &mut Settings) {
         ui.checkbox(&mut settings.ui.show_camera, "Camera");
         ui.checkbox(&mut settings.ui.show_emotion_mappings, "Emotion Mappings");
         ui.checkbox(&mut settings.ui.show_home_assistant, "Home Assistant");
-        ui.checkbox(&mut settings.ui.show_graphics_advanced, "Graphics Advanced (legacy)");
+        ui.checkbox(&mut settings.ui.show_graphics_advanced, "Graphics Advanced");
         ui.checkbox(&mut settings.ui.show_network_trace, "Network trace");
-
-        ui.separator();
-        ui.menu_button("Legacy single-service windows", |ui| {
-            let u = &mut settings.ui;
-            ui.checkbox(&mut u.show_graphics, "Graphics / lights (legacy)");
-            ui.checkbox(&mut u.show_services, "Services (legacy)");
-            ui.checkbox(&mut u.show_channel_hub, "Channel hub (legacy)");
-            ui.checkbox(&mut u.show_gateway, "Gateway (legacy)");
-            ui.checkbox(&mut u.show_tts, "TTS (legacy)");
-            ui.checkbox(&mut u.show_look_at, "Look-at (legacy)");
-            ui.checkbox(&mut u.show_mcp, "MCP (legacy)");
-        });
     });
 }
 
@@ -679,12 +667,11 @@ fn draw_about_window(mut contexts: EguiContexts, mut state: ResMut<DebugUiState>
                 );
                 ui.separator();
 
-                ui.label("Workspaces (Phase-5 consolidation):");
+                ui.label("Workspaces:");
                 ui.small(
                     "• Service Hub — Channel hub, Gateway, TTS, MCP and the live\n  Services overview in one tabbed window.\n\
                      • Graphics workspace — Lights, Advanced shortcut, Look-at.\n\
-                     • Diagnostics — pipeline status, avatar Y-axis stats, jump\n  to Network trace.\n\
-                     • The legacy single-service windows still work; toggle them\n  in View → \"Legacy single-service windows\".",
+                     • Diagnostics — pipeline status, avatar Y-axis stats, Network trace.",
                 );
                 ui.separator();
 

@@ -27,6 +27,33 @@ public func jarvis_renderer_queue_vrma(_ ptr: UnsafeMutablePointer<UInt8>, _ pat
 public func jarvis_renderer_queue_anim_json(_ ptr: UnsafeMutablePointer<UInt8>, _ path_ptr: UnsafePointer<UInt8>, _ path_len: UInt) {
     __swift_bridge__$jarvis_renderer_queue_anim_json(ptr, path_ptr, path_len)
 }
+public func jarvis_renderer_expressions_snapshot_json(_ ptr: UnsafeMutablePointer<UInt8>) -> RustString {
+    RustString(ptr: __swift_bridge__$jarvis_renderer_expressions_snapshot_json(ptr))
+}
+public func jarvis_renderer_set_expression_weight(_ ptr: UnsafeMutablePointer<UInt8>, _ name_ptr: UnsafePointer<UInt8>, _ name_len: UInt, _ weight: Float) {
+    __swift_bridge__$jarvis_renderer_set_expression_weight(ptr, name_ptr, name_len, weight)
+}
+public func jarvis_renderer_apply_expressions(_ ptr: UnsafeMutablePointer<UInt8>) {
+    __swift_bridge__$jarvis_renderer_apply_expressions(ptr)
+}
+public func jarvis_renderer_layers_snapshot_json(_ ptr: UnsafeMutablePointer<UInt8>) -> RustString {
+    RustString(ptr: __swift_bridge__$jarvis_renderer_layers_snapshot_json(ptr))
+}
+public func jarvis_renderer_layers_set_master(_ ptr: UnsafeMutablePointer<UInt8>, _ enabled: UInt8) {
+    __swift_bridge__$jarvis_renderer_layers_set_master(ptr, enabled)
+}
+public func jarvis_renderer_layers_install_default(_ ptr: UnsafeMutablePointer<UInt8>) {
+    __swift_bridge__$jarvis_renderer_layers_install_default(ptr)
+}
+public func jarvis_renderer_layers_set_enabled(_ ptr: UnsafeMutablePointer<UInt8>, _ layer_id: UInt64, _ enabled: UInt8) {
+    __swift_bridge__$jarvis_renderer_layers_set_enabled(ptr, layer_id, enabled)
+}
+public func jarvis_renderer_layers_set_weight(_ ptr: UnsafeMutablePointer<UInt8>, _ layer_id: UInt64, _ weight: Float) {
+    __swift_bridge__$jarvis_renderer_layers_set_weight(ptr, layer_id, weight)
+}
+public func jarvis_renderer_layers_clear(_ ptr: UnsafeMutablePointer<UInt8>) {
+    __swift_bridge__$jarvis_renderer_layers_clear(ptr)
+}
 public func jarvis_ios_debug_log_snapshot() -> RustString {
     RustString(ptr: __swift_bridge__$jarvis_ios_debug_log_snapshot())
 }

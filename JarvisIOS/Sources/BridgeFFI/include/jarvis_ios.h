@@ -9,6 +9,15 @@ void __swift_bridge__$jarvis_renderer_touch(uint8_t* ptr, uint8_t phase, float x
 void __swift_bridge__$jarvis_renderer_reload_profile(uint8_t* ptr);
 void __swift_bridge__$jarvis_renderer_queue_vrma(uint8_t* ptr, uint8_t const * path_ptr, uintptr_t path_len, uint8_t loop_forever);
 void __swift_bridge__$jarvis_renderer_queue_anim_json(uint8_t* ptr, uint8_t const * path_ptr, uintptr_t path_len);
+void* __swift_bridge__$jarvis_renderer_expressions_snapshot_json(uint8_t* ptr);
+void __swift_bridge__$jarvis_renderer_set_expression_weight(uint8_t* ptr, uint8_t const * name_ptr, uintptr_t name_len, float weight);
+void __swift_bridge__$jarvis_renderer_apply_expressions(uint8_t* ptr);
+void* __swift_bridge__$jarvis_renderer_layers_snapshot_json(uint8_t* ptr);
+void __swift_bridge__$jarvis_renderer_layers_set_master(uint8_t* ptr, uint8_t enabled);
+void __swift_bridge__$jarvis_renderer_layers_install_default(uint8_t* ptr);
+void __swift_bridge__$jarvis_renderer_layers_set_enabled(uint8_t* ptr, uint64_t layer_id, uint8_t enabled);
+void __swift_bridge__$jarvis_renderer_layers_set_weight(uint8_t* ptr, uint64_t layer_id, float weight);
+void __swift_bridge__$jarvis_renderer_layers_clear(uint8_t* ptr);
 void* __swift_bridge__$jarvis_ios_debug_log_snapshot(void);
 void __swift_bridge__$jarvis_ios_debug_log_clear(void);
 

@@ -2912,6 +2912,7 @@ dependencies = [
  "bevy_vrm1",
  "blake3",
  "libc",
+ "rand",
  "raw-window-handle",
  "serde",
  "serde_json",

@@ -69,7 +69,7 @@ pub fn draw_service_hub_window(
 
             match state.tab {
                 ServiceHubTab::Overview => {
-                    services_panel(ui, &mut settings, status.as_deref());
+                    services_panel(ui, &mut settings, status.as_deref(), &mut state);
                 }
                 ServiceHubTab::ChannelHub => {
                     channel_hub_panel(ui, &mut settings);
