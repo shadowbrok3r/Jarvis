@@ -3,10 +3,6 @@
 //! These windows replace the per-service / per-feature floating windows with
 //! tabbed "workspaces" that group related controls together so users only need
 //! to keep one window open per concern (services, graphics, diagnostics).
-//! Legacy single-window toggles in [`UiSettings`](jarvis_avatar::config::UiSettings)
-//! still work — the workspaces simply provide a less cluttered alternative
-//! surface for the same controls (and quick-jump buttons to the heavier
-//! single-purpose windows that own their own queries).
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};

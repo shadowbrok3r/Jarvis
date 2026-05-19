@@ -76,19 +76,7 @@ pub struct UiSettings {
     #[serde(default)]
     pub show_camera: bool,
     #[serde(default)]
-    pub show_graphics: bool,
-    #[serde(default)]
     pub show_live_test: bool,
-    #[serde(default)]
-    pub show_channel_hub: bool,
-    #[serde(default)]
-    pub show_gateway: bool,
-    #[serde(default)]
-    pub show_tts: bool,
-    #[serde(default)]
-    pub show_look_at: bool,
-    #[serde(default)]
-    pub show_mcp: bool,
     #[serde(default)]
     pub show_pose_controller: bool,
     /// Default side panel for any Pose Controller tab without a per-tab
@@ -129,8 +117,6 @@ pub struct UiSettings {
     pub show_rig_editor: bool,
     #[serde(default)]
     pub show_graphics_advanced: bool,
-    #[serde(default = "default_true")]
-    pub show_services: bool,
     /// Dedicated "Animation Layers" window — timeline view of every active
     /// layer with per-layer enable / weight / play controls.
     #[serde(default)]
@@ -173,13 +159,7 @@ impl Default for UiSettings {
             show_chat: true,
             show_avatar: false,
             show_camera: false,
-            show_graphics: false,
             show_live_test: false,
-            show_channel_hub: false,
-            show_gateway: false,
-            show_tts: false,
-            show_look_at: false,
-            show_mcp: false,
             show_pose_controller: false,
             pose_controller_dock_side: default_pose_dock_side(),
             pose_controller_dock_width: default_pose_dock_width(),
@@ -189,14 +169,13 @@ impl Default for UiSettings {
             pose_tools_toolbar_pos: default_pose_tools_toolbar_pos(),
             show_rig_editor: false,
             show_graphics_advanced: false,
-            show_services: true,
             show_anim_layers: false,
             anim_layers_dock_side: default_anim_layers_dock_side(),
             anim_layers_bottom_height: default_anim_layers_bottom_height(),
             show_emotion_mappings: false,
             show_home_assistant: false,
             show_network_trace: false,
-            show_service_hub: false,
+            show_service_hub: true,
             show_graphics_workspace: false,
             show_diagnostics_workspace: false,
         }
@@ -1065,31 +1044,12 @@ impl Settings {
         Self::load().map_err(|e| e.to_string())
     }
 
-    /// One-shot migration from the pre-Phase-5 single-window UI to the new
-    /// consolidated workspaces. Runs at startup. When the user already had any
-    /// of the legacy single-service windows open in their `user.toml` and
-    /// none of the matching workspace toggles are explicitly set, opens the
-    /// workspace instead so they don't lose their entry point. Idempotent —
-    /// only fires when the workspace flags are still default-false AND a
-    /// related legacy flag is true. Does not close legacy windows; users can
-    /// uncheck them from the View menu's "Legacy single-service windows"
-    /// submenu when they're comfortable with the new workspaces.
+    /// One-shot migration: open consolidated workspaces when related standalone
+    /// panels were already enabled in saved settings.
     pub fn migrate_workspace_visibility(&mut self) {
         let u = &mut self.ui;
 
-        if !u.show_service_hub
-            && (u.show_channel_hub
-                || u.show_gateway
-                || u.show_tts
-                || u.show_mcp
-                || u.show_services)
-        {
-            u.show_service_hub = true;
-        }
-
-        if !u.show_graphics_workspace
-            && (u.show_graphics || u.show_graphics_advanced || u.show_look_at)
-        {
+        if !u.show_graphics_workspace && u.show_graphics_advanced {
             u.show_graphics_workspace = true;
         }
 

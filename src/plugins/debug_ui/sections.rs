@@ -415,23 +415,6 @@ pub fn draw_basic_graphics_inline(ui: &mut egui::Ui, settings: &mut Settings) {
     rgb_row(ui, &mut g.ground_base_color);
 }
 
-pub fn draw_graphics_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
-    if !settings.ui.show_graphics {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let mut open = settings.ui.show_graphics;
-    egui::Window::new("Graphics / lights")
-        .default_width(360.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            draw_basic_graphics_inline(ui, &mut settings);
-        });
-    settings.ui.show_graphics = open;
-}
-
 // ---------- Live / Test -------------------------------------------------------
 
 pub fn draw_live_test_window(
@@ -583,23 +566,6 @@ pub fn channel_hub_panel(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.text_edit_singleline(&mut i.module_name);
 }
 
-pub fn draw_channel_hub_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
-    if !settings.ui.show_channel_hub {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let mut open = settings.ui.show_channel_hub;
-    egui::Window::new("Channel hub (IronClaw protocol)")
-        .default_width(360.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            channel_hub_panel(ui, &mut settings);
-        });
-    settings.ui.show_channel_hub = open;
-}
-
 // ---------- Gateway -----------------------------------------------------------
 
 pub fn gateway_panel(ui: &mut egui::Ui, settings: &mut Settings) {
@@ -638,23 +604,6 @@ pub fn gateway_panel(ui: &mut egui::Ui, settings: &mut Settings) {
     }
 }
 
-pub fn draw_gateway_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
-    if !settings.ui.show_gateway {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let mut open = settings.ui.show_gateway;
-    egui::Window::new("Gateway (IronClaw HTTP/SSE)")
-        .default_width(360.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            gateway_panel(ui, &mut settings);
-        });
-    settings.ui.show_gateway = open;
-}
-
 // ---------- TTS ---------------------------------------------------------------
 
 pub fn tts_panel(ui: &mut egui::Ui, settings: &mut Settings) {
@@ -681,23 +630,6 @@ pub fn tts_panel(ui: &mut egui::Ui, settings: &mut Settings) {
     }
 }
 
-pub fn draw_tts_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
-    if !settings.ui.show_tts {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let mut open = settings.ui.show_tts;
-    egui::Window::new("TTS (Kokoro)")
-        .default_width(320.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            tts_panel(ui, &mut settings);
-        });
-    settings.ui.show_tts = open;
-}
-
 // ---------- Look-at -----------------------------------------------------------
 
 pub fn look_at_panel(ui: &mut egui::Ui, settings: &mut Settings) {
@@ -705,23 +637,6 @@ pub fn look_at_panel(ui: &mut egui::Ui, settings: &mut Settings) {
         egui::Slider::new(&mut settings.look_at.idle_return_speed, 0.0..=20.0)
             .text("idle_return_speed"),
     );
-}
-
-pub fn draw_look_at_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
-    if !settings.ui.show_look_at {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let mut open = settings.ui.show_look_at;
-    egui::Window::new("Look-at")
-        .default_width(320.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            look_at_panel(ui, &mut settings);
-        });
-    settings.ui.show_look_at = open;
 }
 
 // ---------- MCP / Pose / A2F / Kimodo -----------------------------------------
@@ -826,21 +741,4 @@ pub fn mcp_panel(ui: &mut egui::Ui, settings: &mut Settings) {
              here apply immediately without a reload button.",
         );
     });
-}
-
-pub fn draw_mcp_window(mut contexts: EguiContexts, mut settings: ResMut<Settings>) {
-    if !settings.ui.show_mcp {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let mut open = settings.ui.show_mcp;
-    egui::Window::new("MCP / Pose controller")
-        .default_width(380.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            mcp_panel(ui, &mut settings);
-        });
-    settings.ui.show_mcp = open;
 }

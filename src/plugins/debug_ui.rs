@@ -1,8 +1,6 @@
 //! `bevy_egui` overlay: persistent menu bar plus optional windows (Chat, Avatar,
-//! Camera, Graphics, Services, Channel hub, Gateway, TTS, Look-at, MCP, Pose
-//! Controller (incl. per-VRM Expressions tab), Rig editor, Graphics Advanced, Animation Layers, Emotion
-//! Mappings, Home Assistant, Network trace, Live/Test). Open/closed flags live
-//! in [`Settings::ui`] and persist in `config/user.toml`.
+//! Camera, Pose Controller, Graphics Advanced, Animation Layers, Emotion Mappings,
+//! Home Assistant, Network trace, Live/Test, and consolidated workspaces).
 //!
 //! The menu bar is always visible — there is no F1 toggle anymore. See the
 //! **View** menu to show/hide windows, the **File** menu to save/restore
@@ -72,16 +70,9 @@ impl Plugin for DebugUiPlugin {
                     chat::draw_chat_window,
                     sections::draw_avatar_window,
                     sections::draw_camera_window,
-                    sections::draw_graphics_window,
                     sections::draw_live_test_window,
-                    sections::draw_channel_hub_window,
-                    sections::draw_gateway_window,
-                    sections::draw_tts_window,
-                    sections::draw_look_at_window,
-                    sections::draw_mcp_window,
                     pose_controller::draw_pose_controller_window,
                     graphics_advanced::draw_graphics_advanced_window,
-                    services::draw_services_window,
                     anim_layers::draw_anim_layers_window,
                     emotion_mappings::draw_emotion_mappings_window,
                     home_assistant::draw_home_assistant_window,

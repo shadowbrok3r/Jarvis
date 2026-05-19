@@ -1,11 +1,7 @@
-//! Consolidated "Services" window.
-//!
-//! Renders one row per tracked service with a colored status dot, human
-//! label, endpoint, and detail line. Quick-jump buttons switch the Service Hub
-//! workspace to the matching config tab.
+//! Services overview panel for the Service Hub workspace.
 
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, egui};
+use bevy_egui::egui;
 
 use jarvis_avatar::config::Settings;
 
@@ -85,28 +81,6 @@ pub fn services_panel(
             }
         });
     });
-}
-
-pub fn draw_services_window(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<Settings>,
-    status: Option<Res<ServiceStatus>>,
-    mut hub: ResMut<ServiceHubUiState>,
-) {
-    if !settings.ui.show_services {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-
-    let mut open = settings.ui.show_services;
-    egui::Window::new("Services")
-        .default_width(560.0)
-        .default_height(360.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            services_panel(ui, &mut settings, status.as_deref(), &mut hub);
-        });
-    settings.ui.show_services = open;
 }
 
 fn status_dot(ui: &mut egui::Ui, state: ServiceState) {
