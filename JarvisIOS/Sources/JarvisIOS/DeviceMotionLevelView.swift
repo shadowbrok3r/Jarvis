@@ -37,7 +37,7 @@ struct DeviceMotionLevelView: View {
                 .fill(Color.primary.opacity(0.06))
             crosshair
             tiltDot
-            if motion.shakeMagnitude > 0.05 {
+            if motion.shakeMagnitude > 0.02 {
                 Circle()
                     .stroke(Color.orange.opacity(shakeRingOpacity), lineWidth: 3)
                     .padding(shakeRingInset)
@@ -93,7 +93,7 @@ struct DeviceMotionLevelView: View {
             labeledValue("Tilt", String(format: "%.0f°", motion.tiltDegrees))
             labeledValue("Shake", String(format: "%.2f m/s²", motion.shakeMagnitude))
             labeledValue("Gravity Y", String(format: "%.2f", motion.gravityDisplay.y))
-            Text("Dot = tilt direction. Orange ring = shake.")
+            Text("Dot = screen-bottom pull direction. 180° = hair can flip above head when phone is upside down. Orange ring = shake.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -146,7 +146,7 @@ struct DeviceMotionLevelView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             tuningSlider("Spring tilt blend", value: $motion.gravityBlend, range: 0 ... 1, format: "%.2f")
-            tuningSlider("Max tilt (°)", value: $motion.maxTiltDegrees, range: 5 ... 85, format: "%.0f")
+            tuningSlider("Max tilt (°)", value: $motion.maxTiltDegrees, range: 15 ... 180, format: "%.0f")
             tuningSlider("Shake power", value: $motion.shakePower, range: 0 ... 0.6, format: "%.2f")
             tuningSlider("Max shake ×", value: $motion.maxShakeMultiplier, range: 1 ... 6, format: "%.1f")
             tuningSlider("Shake deadzone", value: $motion.shakeDeadzone, range: 0 ... 0.5, format: "%.2f")

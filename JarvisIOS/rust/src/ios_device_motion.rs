@@ -75,7 +75,7 @@ impl Default for IosDeviceMotionTuning {
             max_power_mult: 3.0,
             shake_deadzone_ms2: 0.12,
             phone_gravity_blend: 0.72,
-            max_tilt_from_down_rad: 1.15,
+            max_tilt_from_down_rad: std::f32::consts::PI,
             spring_scope: IosSpringBoneScope::All,
             spring_gravity_power_scale: 1.0,
             spring_drag_scale: 1.0,
@@ -191,17 +191,20 @@ fn is_secondary_spring_bone(name: Option<&Name>) -> bool {
     !CORE.iter().any(|token| s.contains(token))
 }
 
-fn snap_gravity_downward(dir: Vec3) -> Vec3 {
-    let d = if dir.length_squared() > 1e-8 {
+fn normalize_gravity_dir(dir: Vec3) -> Vec3 {
+    if dir.length_squared() > 1e-8 {
         dir.normalize()
     } else {
         WORLD_DOWN
-    };
-    if d.y > 0.0 { -d } else { d }
+    }
 }
 
+/// Optional cone limit around world down. At 180° the full sphere is allowed (upside-down phone).
 fn clamp_tilt_from_down(dir: Vec3, max_tilt_rad: f32) -> Vec3 {
-    let d = snap_gravity_downward(dir);
+    let d = normalize_gravity_dir(dir);
+    if max_tilt_rad >= std::f32::consts::PI - 0.02 {
+        return d;
+    }
     let cos_max = max_tilt_rad.cos();
     let dot = d.dot(WORLD_DOWN).clamp(-1.0, 1.0);
     if dot >= cos_max {
@@ -211,7 +214,7 @@ fn clamp_tilt_from_down(dir: Vec3, max_tilt_rad: f32) -> Vec3 {
     if axis.length_squared() < 1e-8 {
         return WORLD_DOWN;
     }
-    snap_gravity_downward(Quat::from_axis_angle(axis.normalize(), max_tilt_rad) * WORLD_DOWN)
+    normalize_gravity_dir(Quat::from_axis_angle(axis.normalize(), max_tilt_rad) * WORLD_DOWN)
 }
 
 fn ios_apply_spring_motion_settings(
@@ -250,7 +253,7 @@ fn ios_apply_spring_motion_settings(
     let drag_scale = tuning.spring_drag_scale.clamp(0.05, 5.0);
     let max_tilt = tuning.max_tilt_from_down_rad.max(0.05);
     let blend = tuning.phone_gravity_blend.clamp(0.0, 1.0);
-    let phone_dir = clamp_tilt_from_down(motion.gravity_dir, max_tilt);
+    let phone_dir = clamp_tilt_from_down(normalize_gravity_dir(motion.gravity_dir), max_tilt);
     let shake = (motion.user_accel.length() - tuning.shake_deadzone_ms2.max(0.0)).max(0.0);
     let power_mult = (1.0 + shake * tuning.shake_power_per_ms2.max(0.0))
         .clamp(1.0, tuning.max_power_mult.max(1.0));

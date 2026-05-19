@@ -1434,7 +1434,7 @@ impl IosEmbeddedRenderer {
             .world_mut()
             .resource_mut::<crate::ios_device_motion::IosDeviceMotionTuning>();
         t.phone_gravity_blend = gravity_blend.clamp(0.0, 1.0);
-        t.max_tilt_from_down_rad = max_tilt_deg.clamp(5.0, 89.0).to_radians();
+        t.max_tilt_from_down_rad = max_tilt_deg.clamp(5.0, 180.0).to_radians();
         t.shake_power_per_ms2 = shake_power.max(0.0);
         t.max_power_mult = max_shake_mult.max(1.0);
         t.shake_deadzone_ms2 = shake_deadzone.max(0.0);

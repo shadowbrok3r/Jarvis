@@ -59,7 +59,7 @@ final class JarvisDeviceMotion {
 
     /// EMA alpha for acceleration smoothing (0.05–0.5).
     var accelSmoothing: Double {
-        get { storedDouble(Keys.accelSmooth, default: 0.22) }
+        get { storedDouble(Keys.accelSmooth, default: 0.35) }
         set { UserDefaults.standard.set(clamp(newValue, 0.05, 0.5), forKey: Keys.accelSmooth) }
     }
 
@@ -69,10 +69,10 @@ final class JarvisDeviceMotion {
         set { UserDefaults.standard.set(clamp(newValue, 0, 1), forKey: Keys.gravityBlend) }
     }
 
-    /// Max spring gravity tilt from world down (degrees).
+    /// Max spring gravity tilt from world down (degrees). 180 = full sphere (upside-down phone).
     var maxTiltDegrees: Double {
-        get { storedDouble(Keys.maxTiltDeg, default: 66) }
-        set { UserDefaults.standard.set(clamp(newValue, 5, 85), forKey: Keys.maxTiltDeg) }
+        get { storedDouble(Keys.maxTiltDeg, default: 180) }
+        set { UserDefaults.standard.set(clamp(newValue, 5, 180), forKey: Keys.maxTiltDeg) }
     }
 
     /// Extra spring power per m/s² of shake.
@@ -89,7 +89,7 @@ final class JarvisDeviceMotion {
 
     /// Ignore shake below this m/s².
     var shakeDeadzone: Double {
-        get { storedDouble(Keys.shakeDeadzone, default: 0.12) }
+        get { storedDouble(Keys.shakeDeadzone, default: 0.05) }
         set { UserDefaults.standard.set(clamp(newValue, 0, 1), forKey: Keys.shakeDeadzone) }
     }
 
@@ -131,6 +131,7 @@ final class JarvisDeviceMotion {
     private let manager = CMMotionManager()
     private var gravityBevy = SIMD3<Double>(0, -1, 0)
     private var accelBevy = SIMD3<Double>(0, 0, 0)
+    private var rawAccelBevy = SIMD3<Double>(0, 0, 0)
 
     private init() {}
 
@@ -150,25 +151,27 @@ final class JarvisDeviceMotion {
             }
             let gAlpha = self.gravitySmoothing
             let aAlpha = self.accelSmoothing
-            let rawG = Self.referenceToBevy(motion.gravity)
+            let rawG = Self.screenBottomPullToBevy(motion)
             let rawA = Self.rawAccelToBevy(motion.userAcceleration)
+            self.rawAccelBevy = rawA
             self.gravityBevy = Self.smooth(self.gravityBevy, toward: rawG, alpha: gAlpha)
             self.accelBevy = Self.smooth(self.accelBevy, toward: rawA, alpha: aAlpha)
-            // Never feed upward gravity into springs (180° flip source when sensor noise crosses zero).
-            if self.gravityBevy.y > 0 {
-                self.gravityBevy = -self.gravityBevy
-            }
 
             self.gravityDisplay = self.gravityBevy
             self.accelDisplay = self.accelBevy
-            let horiz = sqrt(self.gravityBevy.x * self.gravityBevy.x + self.gravityBevy.z * self.gravityBevy.z)
-            self.tiltDegrees = min(90, asin(min(1, horiz)) * 180 / .pi)
+            let fromDown = min(max(-self.gravityBevy.y, -1), 1)
+            self.tiltDegrees = acos(fromDown) * 180 / .pi
             let rawShake = sqrt(
+                rawA.x * rawA.x + rawA.y * rawA.y + rawA.z * rawA.z
+            )
+            let smoothedShake = sqrt(
                 self.accelBevy.x * self.accelBevy.x
                     + self.accelBevy.y * self.accelBevy.y
                     + self.accelBevy.z * self.accelBevy.z
             )
-            self.shakeMagnitude = max(0, rawShake - self.shakeDeadzone)
+            // Peak-biased: raw spikes from shakes survive EMA damping for UI + Rust.
+            let responsiveShake = max(rawShake, smoothedShake)
+            self.shakeMagnitude = max(0, responsiveShake - self.shakeDeadzone)
         }
         JarvisIOSLog.recordBevy("device motion: started")
     }
@@ -177,6 +180,7 @@ final class JarvisDeviceMotion {
         guard manager.isDeviceMotionActive else { return }
         manager.stopDeviceMotionUpdates()
         accelBevy = .zero
+        rawAccelBevy = .zero
         accelDisplay = .zero
         shakeMagnitude = 0
         JarvisIOSLog.recordBevy("device motion: stopped")
@@ -188,7 +192,8 @@ final class JarvisDeviceMotion {
             return
         }
         let g = gravityBevy
-        let a = accelBevy
+        // Push raw user accel so Rust shake boost responds to fast jolts, not laggy EMA.
+        let a = rawAccelBevy
         jarvis_renderer_set_device_motion(
             ptr,
             Float(g.x), Float(g.y), Float(g.z),
@@ -214,31 +219,48 @@ final class JarvisDeviceMotion {
 
     func resetTuningToDefaults() {
         gravitySmoothing = 0.14
-        accelSmoothing = 0.22
+        accelSmoothing = 0.35
         gravityBlend = 0.72
-        maxTiltDegrees = 66
+        maxTiltDegrees = 180
         shakePower = 0.18
         maxShakeMultiplier = 3
-        shakeDeadzone = 0.12
+        shakeDeadzone = 0.05
         springGravityScale = 1
         springDragScale = 1
         springScope = .allSprings
         JarvisBevySession.pushDeviceMotionTuning()
     }
 
-    /// CoreMotion reference frame (Z vertical) → Bevy Y-up unit gravity direction.
-    private static func referenceToBevy(_ v: CMAcceleration) -> SIMD3<Double> {
-        let gx = v.x
-        let gy = v.z
-        let gz = v.y
-        let len = sqrt(gx * gx + gy * gy + gz * gz)
-        guard len > 1e-6 else { return SIMD3(0, -1, 0) }
-        return SIMD3(gx / len, gy / len, gz / len)
+    /// Where "down" is on the phone screen (portrait bottom), expressed in Bevy Y-up space.
+    ///
+    /// Uses attitude so upside-down portrait pulls springs toward +Y (hair above the head) instead
+    /// of mapping raw accelerometer axes to avatar forward.
+    private static func screenBottomPullToBevy(_ motion: CMDeviceMotion) -> SIMD3<Double> {
+        let screenBottomDevice = SIMD3<Double>(0, -1, 0)
+        let vRef = referenceVector(fromDevice: screenBottomDevice, motion: motion)
+        return bevyFromReference(vRef)
     }
 
-    /// User acceleration in Bevy Y-up (not normalized).
+    /// `rotationMatrix` maps reference → device; transpose maps device → reference.
+    private static func referenceVector(fromDevice device: SIMD3<Double>, motion: CMDeviceMotion) -> SIMD3<Double> {
+        let m = motion.attitude.rotationMatrix
+        return SIMD3(
+            m.m11 * device.x + m.m21 * device.y + m.m31 * device.z,
+            m.m12 * device.x + m.m22 * device.y + m.m32 * device.z,
+            m.m13 * device.x + m.m23 * device.y + m.m33 * device.z
+        )
+    }
+
+    /// CoreMotion reference (Z vertical) → Bevy (Y up, avatar faces -Z).
+    private static func bevyFromReference(_ v: SIMD3<Double>) -> SIMD3<Double> {
+        let len = sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+        guard len > 1e-6 else { return SIMD3(0, -1, 0) }
+        return SIMD3(v.x / len, v.z / len, -v.y / len)
+    }
+
+    /// User acceleration in reference frame → Bevy Y-up (magnitude preserved).
     private static func rawAccelToBevy(_ v: CMAcceleration) -> SIMD3<Double> {
-        SIMD3(v.x, v.z, v.y)
+        SIMD3(v.x, v.z, -v.y)
     }
 
     private static func smooth(_ current: SIMD3<Double>, toward target: SIMD3<Double>, alpha: Double) -> SIMD3<Double> {
