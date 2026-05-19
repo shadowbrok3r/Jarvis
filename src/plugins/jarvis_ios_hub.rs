@@ -12,7 +12,10 @@ use serde_json::{Value, json};
 
 use jarvis_avatar::config::{AvatarSettings, CameraSettings, Settings};
 
-use super::mtoon_overrides::{vrm_model_graphics_override_path, vrm_model_mtoon_override_path};
+use super::mtoon_overrides::{
+    vrm_model_graphics_override_path, vrm_model_material_visibility_path,
+    vrm_model_mtoon_override_path,
+};
 use super::spring_preset::{default_preset_path_for_logical_path, vrm_preset_key};
 
 /// Snapshot served over HTTP until Bevy can bump revisions when settings change.
@@ -256,6 +259,11 @@ fn build_manifest_value(settings: &Settings, revision: u64) -> Value {
         std::fs::read_to_string(path).ok()
     };
 
+    let material_visibility_json: Option<String> = {
+        let path = vrm_model_material_visibility_path(&settings.avatar.model_path);
+        std::fs::read_to_string(path).ok()
+    };
+
     serde_json::to_value(ManifestDto {
         schema: "jarvis-ios.profile.v1",
         profile_id,
@@ -267,6 +275,7 @@ fn build_manifest_value(settings: &Settings, revision: u64) -> Value {
         assets,
         spring_preset: spring,
         mtoon_overrides_json,
+        material_visibility_json,
     })
     .unwrap_or_else(|_| json!({ "schema": "jarvis-ios.profile.v1", "error": "serialize_failed" }))
 }
@@ -287,6 +296,9 @@ struct ManifestDto {
     /// iOS applies this after VRM loads via `ios_apply_mtoon_overrides_on_vrm_ready`.
     #[serde(skip_serializing_if = "Option::is_none")]
     mtoon_overrides_json: Option<String>,
+    /// Inlined material visibility JSON (`material_visibility.json` per-VRM sidecar).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    material_visibility_json: Option<String>,
 }
 
 /// Merge partial graphics overrides JSON (from per-VRM `graphics_overrides.json`) on top of `base`.

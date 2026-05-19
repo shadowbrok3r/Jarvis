@@ -32,6 +32,10 @@ use bevy_vrm1::prelude::*;
 use core::ptr::NonNull;
 
 use crate::ios_graphics::{msaa_for_samples, IosGraphicsSettings};
+use crate::ios_material_visibility::{
+    ios_apply_material_visibility, ios_seed_material_visibility_on_vrm_ready,
+    IosMaterialVisibilityJson, IosMaterialVisibilityStore,
+};
 use crate::ios_mtoon_overrides::{ios_apply_mtoon_overrides_on_vrm_ready, IosMToonOverridesJson};
 use crate::ios_profile_manifest::{IosAvatarSettings, IosSpringPresetToml};
 use crate::ios_spring_preset::{apply_spring_preset, parse_preset_toml};
@@ -1038,7 +1042,7 @@ impl IosEmbeddedRenderer {
             height_px: height_px.max(1),
             scale_factor: scale,
         });
-        let (avatar_settings, graphics_settings, spring_toml, mtoon_overrides_json) =
+        let (avatar_settings, graphics_settings, spring_toml, mtoon_overrides_json, material_visibility_json) =
             crate::ios_profile_manifest::load_ios_hub_profile_bundle_from_env();
         crate::jarvis_ios_line!(
             "[JarvisIOS] IosAvatarSettings model_path={} idle_vrma_path={}",
@@ -1049,6 +1053,10 @@ impl IosEmbeddedRenderer {
         app.insert_resource(graphics_settings);
         app.insert_resource(IosSpringPresetToml(spring_toml));
         app.insert_resource(IosMToonOverridesJson(mtoon_overrides_json));
+        app.insert_resource(IosMaterialVisibilityJson(material_visibility_json.clone()));
+        app.insert_resource(IosMaterialVisibilityStore::from_json(
+            material_visibility_json.as_deref(),
+        ));
         app.init_resource::<IosAvatarRootEntity>();
         app.init_resource::<IosExpressionsState>();
         app.init_resource::<IosAnimationCatalog>();
@@ -1112,6 +1120,8 @@ impl IosEmbeddedRenderer {
                 log_render_device_limits,
                 ios_apply_spring_preset_on_vrm_ready,
                 ios_apply_mtoon_overrides_on_vrm_ready,
+                ios_seed_material_visibility_on_vrm_ready,
+                ios_apply_material_visibility,
                 ios_collect_expression_presets,
                 handle_deferred_vrm_load,
                 jarvis_ios_vrm_load_diag,
@@ -1216,7 +1226,8 @@ impl IosEmbeddedRenderer {
     }
 
     fn apply_hub_profile_reload(&mut self) {
-        let (avatar, mut graphics, spring, mtoon) = crate::ios_profile_manifest::load_ios_hub_profile_bundle_from_env();
+        let (avatar, mut graphics, spring, mtoon, material_vis) =
+            crate::ios_profile_manifest::load_ios_hub_profile_bundle_from_env();
         // Apply the same MSAA reduction as spawn_ios_viewport for large VRMs.
         let asset_root = ios_asset_file_path();
         let vrm_disk = Path::new(&asset_root).join(&avatar.model_path);
@@ -1234,6 +1245,10 @@ impl IosEmbeddedRenderer {
         *world.resource_mut::<IosGraphicsSettings>() = graphics.clone();
         *world.resource_mut::<IosSpringPresetToml>() = IosSpringPresetToml(spring);
         *world.resource_mut::<IosMToonOverridesJson>() = IosMToonOverridesJson(mtoon);
+        *world.resource_mut::<IosMaterialVisibilityJson>() =
+            IosMaterialVisibilityJson(material_vis.clone());
+        *world.resource_mut::<IosMaterialVisibilityStore>() =
+            IosMaterialVisibilityStore::from_json(material_vis.as_deref());
         world.insert_resource(ClearColor(avatar.background_color));
         // Despawn every avatar root (VRM + VRMA children). Relying on a single stored entity can miss
         // duplicates if a previous reload partially failed, which breaks PanOrbit + leaves a black view.

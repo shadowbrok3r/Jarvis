@@ -3,10 +3,14 @@
 //! Full IronClaw / MCP / pose / rig tooling stays on desktop for now — windows here are stubs plus
 //! hub manifest fields so layouts and navigation match the desktop **View** menu over time.
 
+use std::collections::HashSet;
+
+use bevy::gltf::GltfMaterialName;
+use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
 use bevy_egui::egui::{self, RichText};
 use bevy_egui::EguiContexts;
-use bevy_vrm1::prelude::{Initialized, SetExpressions, Vrm, VrmExpression};
+use bevy_vrm1::prelude::{Initialized, MToonMaterial, SetExpressions, Vrm, VrmExpression};
 
 // ── Expression categorisation ────────────────────────────────────────────────
 // All lists are derived dynamically from the loaded VRM.
@@ -197,7 +201,22 @@ pub fn jarvis_ios_egui_windows(
     mut expr_state: ResMut<crate::ios_bevy::IosExpressionsState>,
     catalog: Res<crate::ios_bevy::IosAnimationCatalog>,
     mut anim_requests: ResMut<crate::ios_bevy::IosEguiAnimRequests>,
+    mut vis_store: ResMut<crate::ios_material_visibility::IosMaterialVisibilityStore>,
     vrm_q: Query<Entity, (With<Vrm>, With<Initialized>)>,
+    vrm_roots_q: Query<Entity, With<Vrm>>,
+    child_of_q: Query<&ChildOf>,
+    mtoon_meshes_q: Query<(
+        Entity,
+        Option<&Name>,
+        Option<&GltfMaterialName>,
+        &MeshMaterial3d<MToonMaterial>,
+    )>,
+    std_meshes_q: Query<(
+        Entity,
+        Option<&Name>,
+        Option<&GltfMaterialName>,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
     mut commands: Commands,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -406,10 +425,48 @@ pub fn jarvis_ios_egui_windows(
     }
 
     if ui_state.show_graphics_advanced {
+        let vrm_roots: HashSet<Entity> = vrm_roots_q.iter().collect();
+        let material_keys = crate::ios_material_visibility::collect_vrm_material_keys(
+            &vrm_roots,
+            &child_of_q,
+            &mtoon_meshes_q,
+            &std_meshes_q,
+        );
         egui::Window::new("Graphics Advanced")
             .default_pos(egui::pos2(560.0, 440.0))
+            .default_size(egui::vec2(320.0, 420.0))
+            .collapsible(true)
+            .resizable(true)
             .show(ctx, |ui| {
                 ui.label(RichText::new("Graphics Advanced").strong());
+                ui.separator();
+                ui.heading("Material visibility");
+                ui.small("Session toggles apply immediately; sync hub profile to persist from desktop.");
+                if material_keys.is_empty() {
+                    ui.label("No materials found under the active VRM.");
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui.button("Show all").clicked() {
+                            vis_store.show_all();
+                        }
+                        if ui.button("Hide all").clicked() {
+                            vis_store.hide_all(material_keys.iter().cloned());
+                        }
+                        if ui.button("Invert").clicked() {
+                            vis_store.invert(&material_keys);
+                        }
+                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            for key in &material_keys {
+                                let mut visible = vis_store.is_visible(key);
+                                if ui.checkbox(&mut visible, key).changed() {
+                                    vis_store.set_visible(key.clone(), visible);
+                                }
+                            }
+                        });
+                }
                 ui.separator();
                 stub_footer(ui);
             });

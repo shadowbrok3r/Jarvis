@@ -45,6 +45,11 @@ pub fn vrm_model_graphics_override_path(model_path: &str) -> PathBuf {
     vrm_model_overrides_dir(model_path).join("graphics_overrides.json")
 }
 
+/// Returns `config/ModelOverrides/{stem}/material_visibility.json`.
+pub fn vrm_model_material_visibility_path(model_path: &str) -> PathBuf {
+    vrm_model_overrides_dir(model_path).join("material_visibility.json")
+}
+
 pub struct MToonOverridesPlugin;
 
 impl Plugin for MToonOverridesPlugin {

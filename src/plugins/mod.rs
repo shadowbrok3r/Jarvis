@@ -25,6 +25,7 @@ pub mod ironclaw_chat;
 mod jarvis_ios_hub;
 pub mod light_rig;
 pub mod mirror;
+pub mod material_visibility;
 pub mod mtoon_overrides;
 pub mod native_anim_player;
 pub mod pose_capture;

@@ -90,6 +90,7 @@ fn main() {
             plugins::light_rig::LightRigPlugin,
             plugins::graphics_advanced::GraphicsAdvancedPlugin,
             plugins::mtoon_overrides::MToonOverridesPlugin,
+            plugins::material_visibility::MaterialVisibilityPlugin,
             plugins::idle_tick::IdleTickPlugin,
             plugins::anim_layers::AnimLayersPlugin,
             plugins::anim_layer_sets::AnimLayerSetsPlugin,

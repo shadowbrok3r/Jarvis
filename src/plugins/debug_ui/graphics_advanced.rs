@@ -19,6 +19,9 @@ use jarvis_avatar::config::{
     msaa_allows_ssao,
 };
 
+use crate::plugins::material_visibility::{
+    MaterialVisibilityStore, std_mesh_material_key,
+};
 use crate::plugins::mtoon_overrides::{
     MToonOverrideEntry, MToonOverridesStore, apply_override_entry, mtoon_mesh_override_key,
 };
@@ -263,8 +266,14 @@ pub fn draw_graphics_advanced_window(
     )>,
     vrm_roots_q: Query<Entity, With<Vrm>>,
     child_of_q: Query<&ChildOf>,
-    std_meshes_q: Query<Entity, With<MeshMaterial3d<StandardMaterial>>>,
+    std_meshes_q: Query<(
+        Entity,
+        Option<&Name>,
+        Option<&GltfMaterialName>,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
     store: Option<Res<MToonOverridesStore>>,
+    vis_store: Option<Res<MaterialVisibilityStore>>,
     mut state: ResMut<super::DebugUiState>,
 ) {
     if !settings.ui.show_graphics_advanced {
@@ -281,7 +290,7 @@ pub fn draw_graphics_advanced_window(
         .count();
     let std_under_vrm = std_meshes_q
         .iter()
-        .filter(|e| entity_under_vrm(*e, &child_of_q, &vrm_roots))
+        .filter(|(e, ..)| entity_under_vrm(*e, &child_of_q, &vrm_roots))
         .count();
 
     let mut open = settings.ui.show_graphics_advanced;
@@ -297,6 +306,15 @@ pub fn draw_graphics_advanced_window(
                 );
                 ui.separator();
                 draw_light_rig(ui, &mut settings.light_rig);
+                ui.separator();
+                draw_material_visibility(
+                    ui,
+                    &vrm_roots,
+                    &child_of_q,
+                    &mtoon_meshes_q,
+                    &std_meshes_q,
+                    vis_store.as_deref(),
+                );
                 ui.separator();
                 draw_mtoon_editor(
                     ui,
@@ -422,6 +440,93 @@ fn draw_light_spec(ui: &mut egui::Ui, tag: &str, l: &mut LightSpec) {
     ui.label(format!("{tag}.color (linear RGB)"));
     rgb_row(ui, &mut l.color);
     ui.checkbox(&mut l.shadows, format!("{tag}.shadows"));
+}
+
+fn collect_vrm_material_keys(
+    vrm_roots: &HashSet<Entity>,
+    child_of: &Query<&ChildOf>,
+    mtoon_meshes_q: &Query<(
+        Entity,
+        Option<&Name>,
+        Option<&GltfMaterialName>,
+        &MeshMaterial3d<MToonMaterial>,
+    )>,
+    std_meshes_q: &Query<(
+        Entity,
+        Option<&Name>,
+        Option<&GltfMaterialName>,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
+) -> Vec<String> {
+    let mut keys: Vec<String> = mtoon_meshes_q
+        .iter()
+        .filter(|(e, ..)| entity_under_vrm(*e, child_of, vrm_roots))
+        .map(|(_, name, gltf, h)| mtoon_mesh_override_key(name, gltf, &h.0))
+        .chain(
+            std_meshes_q
+                .iter()
+                .filter(|(e, ..)| entity_under_vrm(*e, child_of, vrm_roots))
+                .map(|(_, name, gltf, h)| std_mesh_material_key(name, gltf, &h.0)),
+        )
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn draw_material_visibility(
+    ui: &mut egui::Ui,
+    vrm_roots: &HashSet<Entity>,
+    child_of: &Query<&ChildOf>,
+    mtoon_meshes_q: &Query<(
+        Entity,
+        Option<&Name>,
+        Option<&GltfMaterialName>,
+        &MeshMaterial3d<MToonMaterial>,
+    )>,
+    std_meshes_q: &Query<(
+        Entity,
+        Option<&Name>,
+        Option<&GltfMaterialName>,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
+    store: Option<&MaterialVisibilityStore>,
+) {
+    ui.heading("Material visibility")
+        .on_hover_text("Show or hide each VRM mesh part by material name.");
+    let Some(store) = store else {
+        ui.label("MaterialVisibilityStore not initialised yet.");
+        return;
+    };
+
+    let keys = collect_vrm_material_keys(vrm_roots, child_of, mtoon_meshes_q, std_meshes_q);
+    if keys.is_empty() {
+        ui.label("No materials found under the active VRM.");
+        return;
+    }
+
+    ui.horizontal(|ui| {
+        if ui.button("Show all").clicked() {
+            let _ = store.show_all();
+        }
+        if ui.button("Hide all").clicked() {
+            let _ = store.hide_all(keys.iter().cloned());
+        }
+        if ui.button("Invert").clicked() {
+            let _ = store.invert(&keys);
+        }
+    });
+
+    egui::ScrollArea::vertical()
+        .max_height(200.0)
+        .show(ui, |ui| {
+            for key in &keys {
+                let mut visible = store.is_visible(key);
+                if ui.checkbox(&mut visible, key).changed() {
+                    let _ = store.set_visible(key.clone(), visible);
+                }
+            }
+        });
 }
 
 fn draw_mtoon_editor(
