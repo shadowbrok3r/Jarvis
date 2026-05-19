@@ -821,11 +821,16 @@ extension HubProfileSync {
 
     // MARK: - iOS avatar model (VRM / VRMA overrides + discovery)
 
+    /// Pushes env vars needed before Rust log init / renderer boot (prefs dir + saved log level).
+    static func applyIosBootEnvironment() {
+        applyIosUserPrefsDirectoryEnv()
+        applyIosDefaultLogVerbosityEnvFromUserDefaults()
+    }
+
     /// Pushes `JARVIS_IOS_MODEL_PATH` / `JARVIS_IOS_IDLE_VRMA_PATH` for the Rust `jarvis_ios` staticlib.
     /// Call before `jarvis_renderer_new` and before `jarvis_renderer_reload_profile`.
     static func applyIosAvatarOverrideEnvFromUserDefaults() {
-        applyIosUserPrefsDirectoryEnv()
-        applyIosDefaultLogVerbosityEnvFromUserDefaults()
+        applyIosBootEnvironment()
 
         let m = UserDefaults.standard.string(forKey: IosAvatarCustomize.userDefaultsModelRelPathOverrideKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -882,21 +887,25 @@ extension HubProfileSync {
         }
     }
 
-    /// Boot default for `JARVIS_IOS_LOG_VERBOSITY` (0–3). Session changes in egui can still override until restart.
+    /// Boot default for `JARVIS_IOS_LOG_VERBOSITY` (0–3).
     private static func applyIosDefaultLogVerbosityEnvFromUserDefaults() {
         let key = IosUserPrefs.userDefaultsDefaultLogVerbosityKey
+        // Prefer on-disk file (egui / Rust writes here) so it wins over stale UserDefaults.
+        if let dir = iosUserPrefsDirectoryURL() {
+            let file = dir.appendingPathComponent("default_log_verbosity.txt")
+            if let raw = try? String(contentsOf: file, encoding: .utf8),
+               let level = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+               (0 ... 3).contains(level)
+            {
+                setenv("JARVIS_IOS_LOG_VERBOSITY", String(level), 1)
+                UserDefaults.standard.set(level, forKey: key)
+                return
+            }
+        }
         if UserDefaults.standard.object(forKey: key) != nil {
             let level = min(max(UserDefaults.standard.integer(forKey: key), 0), 3)
             setenv("JARVIS_IOS_LOG_VERBOSITY", String(level), 1)
-            return
         }
-        guard let dir = iosUserPrefsDirectoryURL() else { return }
-        let file = dir.appendingPathComponent("default_log_verbosity.txt")
-        guard let raw = try? String(contentsOf: file, encoding: .utf8),
-              let level = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-              (0 ... 3).contains(level)
-        else { return }
-        setenv("JARVIS_IOS_LOG_VERBOSITY", String(level), 1)
     }
 
     /// Persist default log verbosity for the next app launch (`0` = off … `3` = debug).

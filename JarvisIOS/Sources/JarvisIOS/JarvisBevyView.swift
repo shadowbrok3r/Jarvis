@@ -47,7 +47,7 @@ enum JarvisBevySession {
     }
 
     /// Pose-library JSON path relative to `JARVIS_ASSET_ROOT` (e.g. `animations/talk_nod.json`).
-    static func queueAnimJson(path: String) {
+    static func queueAnimJson(path: String, loopForever: Bool = false) {
         guard let r = renderer else {
             JarvisIOSLog.recordBevy("queueAnimJson: no renderer")
             return
@@ -55,7 +55,7 @@ enum JarvisBevySession {
         let utf8 = Array(path.utf8)
         utf8.withUnsafeBufferPointer { buf in
             guard let base = buf.baseAddress else { return }
-            jarvis_renderer_queue_anim_json(r, base, UInt(buf.count))
+            jarvis_renderer_queue_anim_json(r, base, UInt(buf.count), loopForever ? 1 : 0)
         }
     }
 
@@ -107,6 +107,12 @@ enum JarvisBevySession {
     static func layersClear() {
         guard let r = renderer else { return }
         jarvis_renderer_layers_clear(r)
+    }
+
+    /// Push phone-motion spring tuning (blend, tilt cap, shake) to Rust.
+    static func pushDeviceMotionTuning() {
+        guard let r = renderer else { return }
+        JarvisDeviceMotion.shared.pushTuningToRenderer(r)
     }
 }
 
@@ -239,6 +245,7 @@ struct JarvisBevyView: UIViewRepresentable {
             if renderingHost?.window == nil {
                 return
             }
+            JarvisDeviceMotion.shared.pushToRenderer(r)
             jarvis_renderer_render(r, link.timestamp)
         }
 
@@ -252,6 +259,7 @@ struct JarvisBevyView: UIViewRepresentable {
             if displayLink != nil {
                 displayLink?.invalidate()
                 displayLink = nil
+                JarvisDeviceMotion.shared.stop()
                 JarvisIOSLog.recordBevy("pause: Avatar tab background — display link stopped (Metal idle)")
             }
         }
@@ -267,6 +275,7 @@ struct JarvisBevyView: UIViewRepresentable {
                 let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
                 link.add(to: .main, forMode: .common)
                 self.displayLink = link
+                JarvisDeviceMotion.shared.start()
                 JarvisIOSLog.recordBevy("resume: Avatar tab foreground — display link restarted (deferred)")
             }
         }
@@ -353,6 +362,7 @@ struct JarvisBevyView: UIViewRepresentable {
             bootstrapTask = nil
             displayLink?.invalidate()
             displayLink = nil
+            JarvisDeviceMotion.shared.stop()
             if let r = renderer {
                 jarvis_renderer_free(r)
                 renderer = nil
@@ -401,6 +411,8 @@ struct JarvisBevyView: UIViewRepresentable {
                 let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
                 link.add(to: .main, forMode: .common)
                 self.displayLink = link
+                JarvisDeviceMotion.shared.start()
+                JarvisBevySession.pushDeviceMotionTuning()
                 JarvisIOSLog.recordBevy("startRenderer: CADisplayLink attached")
                 AvatarFirstRunGreeting.scheduleIfNeededAfterBootstrap()
             }

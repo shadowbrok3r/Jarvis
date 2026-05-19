@@ -4,6 +4,9 @@ struct ContentView: View {
     var body: some View {
         MainShellView()
             .onAppear {
+                // Prefs + saved log level must be in the process env before Rust installs the log subscriber.
+                HubProfileSync.applyIosBootEnvironment()
+
                 // Set up persistent crash log FIRST (before Bevy / hub sync)
                 // so that any log line from this point is written to the file.
                 JarvisIOSCrashLog.setup()

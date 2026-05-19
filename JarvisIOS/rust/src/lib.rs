@@ -23,6 +23,8 @@ mod ios_anim_json;
 #[cfg(target_os = "ios")]
 mod ios_anim_layers;
 #[cfg(target_os = "ios")]
+mod ios_device_motion;
+#[cfg(target_os = "ios")]
 mod ios_mem_probe;
 #[cfg(target_os = "ios")]
 mod ios_bevy;
@@ -52,7 +54,27 @@ mod ffi {
 
         fn jarvis_renderer_queue_vrma(ptr: *mut u8, path_ptr: *const u8, path_len: usize, loop_forever: u8);
 
-        fn jarvis_renderer_queue_anim_json(ptr: *mut u8, path_ptr: *const u8, path_len: usize);
+        fn jarvis_renderer_queue_anim_json(ptr: *mut u8, path_ptr: *const u8, path_len: usize, loop_forever: u8);
+
+        fn jarvis_renderer_set_device_motion(
+            ptr: *mut u8,
+            gx: f32,
+            gy: f32,
+            gz: f32,
+            ax: f32,
+            ay: f32,
+            az: f32,
+            enabled: u8,
+        );
+
+        fn jarvis_renderer_set_device_motion_tuning(
+            ptr: *mut u8,
+            gravity_blend: f32,
+            max_tilt_deg: f32,
+            shake_power: f32,
+            max_shake_mult: f32,
+            shake_deadzone: f32,
+        );
 
         fn jarvis_renderer_expressions_snapshot_json(ptr: *mut u8) -> String;
 
@@ -238,7 +260,12 @@ pub fn jarvis_renderer_queue_vrma(
 }
 
 #[cfg(target_os = "ios")]
-pub fn jarvis_renderer_queue_anim_json(ptr: *mut u8, path_ptr: *const u8, path_len: usize) {
+pub fn jarvis_renderer_queue_anim_json(
+    ptr: *mut u8,
+    path_ptr: *const u8,
+    path_len: usize,
+    loop_forever: u8,
+) {
     if ptr.is_null() || path_ptr.is_null() || path_len == 0 {
         return;
     }
@@ -247,12 +274,86 @@ pub fn jarvis_renderer_queue_anim_json(ptr: *mut u8, path_ptr: *const u8, path_l
         return;
     };
     unsafe {
-        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).queue_json_anim_play(s.to_owned());
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).queue_json_anim_play(s.to_owned(), loop_forever != 0);
     }
 }
 
 #[cfg(not(target_os = "ios"))]
-pub fn jarvis_renderer_queue_anim_json(_ptr: *mut u8, _path_ptr: *const u8, _path_len: usize) {}
+pub fn jarvis_renderer_queue_anim_json(
+    _ptr: *mut u8,
+    _path_ptr: *const u8,
+    _path_len: usize,
+    _loop_forever: u8,
+) {
+}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_set_device_motion(
+    ptr: *mut u8,
+    gx: f32,
+    gy: f32,
+    gz: f32,
+    ax: f32,
+    ay: f32,
+    az: f32,
+    enabled: u8,
+) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).set_device_motion(
+            gx, gy, gz, ax, ay, az, enabled != 0,
+        );
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_set_device_motion(
+    _ptr: *mut u8,
+    _gx: f32,
+    _gy: f32,
+    _gz: f32,
+    _ax: f32,
+    _ay: f32,
+    _az: f32,
+    _enabled: u8,
+) {
+}
+
+#[cfg(target_os = "ios")]
+pub fn jarvis_renderer_set_device_motion_tuning(
+    ptr: *mut u8,
+    gravity_blend: f32,
+    max_tilt_deg: f32,
+    shake_power: f32,
+    max_shake_mult: f32,
+    shake_deadzone: f32,
+) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr.cast::<ios_bevy::IosEmbeddedRenderer>()).set_device_motion_tuning(
+            gravity_blend,
+            max_tilt_deg,
+            shake_power,
+            max_shake_mult,
+            shake_deadzone,
+        );
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn jarvis_renderer_set_device_motion_tuning(
+    _ptr: *mut u8,
+    _gravity_blend: f32,
+    _max_tilt_deg: f32,
+    _shake_power: f32,
+    _max_shake_mult: f32,
+    _shake_deadzone: f32,
+) {
+}
 
 fn utf8_from_ptr(path_ptr: *const u8, path_len: usize) -> Option<String> {
     if path_ptr.is_null() || path_len == 0 {

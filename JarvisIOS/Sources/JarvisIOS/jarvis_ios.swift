@@ -24,8 +24,14 @@ public func jarvis_renderer_reload_profile(_ ptr: UnsafeMutablePointer<UInt8>) {
 public func jarvis_renderer_queue_vrma(_ ptr: UnsafeMutablePointer<UInt8>, _ path_ptr: UnsafePointer<UInt8>, _ path_len: UInt, _ loop_forever: UInt8) {
     __swift_bridge__$jarvis_renderer_queue_vrma(ptr, path_ptr, path_len, loop_forever)
 }
-public func jarvis_renderer_queue_anim_json(_ ptr: UnsafeMutablePointer<UInt8>, _ path_ptr: UnsafePointer<UInt8>, _ path_len: UInt) {
-    __swift_bridge__$jarvis_renderer_queue_anim_json(ptr, path_ptr, path_len)
+public func jarvis_renderer_queue_anim_json(_ ptr: UnsafeMutablePointer<UInt8>, _ path_ptr: UnsafePointer<UInt8>, _ path_len: UInt, _ loop_forever: UInt8) {
+    __swift_bridge__$jarvis_renderer_queue_anim_json(ptr, path_ptr, path_len, loop_forever)
+}
+public func jarvis_renderer_set_device_motion(_ ptr: UnsafeMutablePointer<UInt8>, _ gx: Float, _ gy: Float, _ gz: Float, _ ax: Float, _ ay: Float, _ az: Float, _ enabled: UInt8) {
+    __swift_bridge__$jarvis_renderer_set_device_motion(ptr, gx, gy, gz, ax, ay, az, enabled)
+}
+public func jarvis_renderer_set_device_motion_tuning(_ ptr: UnsafeMutablePointer<UInt8>, _ gravity_blend: Float, _ max_tilt_deg: Float, _ shake_power: Float, _ max_shake_mult: Float, _ shake_deadzone: Float) {
+    __swift_bridge__$jarvis_renderer_set_device_motion_tuning(ptr, gravity_blend, max_tilt_deg, shake_power, max_shake_mult, shake_deadzone)
 }
 public func jarvis_renderer_expressions_snapshot_json(_ ptr: UnsafeMutablePointer<UInt8>) -> RustString {
     RustString(ptr: __swift_bridge__$jarvis_renderer_expressions_snapshot_json(ptr))

@@ -111,7 +111,7 @@ pub(crate) struct IosAnimationCatalog {
 #[derive(Resource, Default)]
 pub(crate) struct IosEguiAnimRequests {
     pub vrma: Vec<(String, bool)>,
-    pub json: Vec<String>,
+    pub json: Vec<(String, bool)>,
 }
 
 /// Passed into the app before `DefaultPlugins`; consumed by [`IosEmbedRawHandlesPlugin`].
@@ -664,11 +664,11 @@ fn ios_refresh_animation_catalog(
 
 /// Apply a single JSON pose-clip request. Mirrors `IosEmbeddedRenderer::flush_queued_json_anim_requests`
 /// but as a free function so the egui drain system can reuse it without borrowing the renderer.
-pub(crate) fn ios_apply_json_anim_request(world: &mut World, path: String) {
+pub(crate) fn ios_apply_json_anim_request(world: &mut World, path: String, loop_forever: bool) {
     let old_stopped = world
         .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
         .supersede_stopped_idle_snapshot();
-    let mut clip = crate::ios_anim_json::try_build_clip(&path, world);
+    let mut clip = crate::ios_anim_json::try_build_clip(&path, world, Some(loop_forever));
     if !old_stopped.is_empty() {
         crate::ios_anim_json::resume_idle_vrmas_on_world(world, &old_stopped);
         world.flush();
@@ -730,7 +730,7 @@ fn ios_drain_egui_anim_requests(world: &mut World) {
         ios_apply_vrma_requests(world, vrma);
     }
     if let Some(path) = json.into_iter().last() {
-        ios_apply_json_anim_request(world, path);
+        ios_apply_json_anim_request(world, path.0, path.1);
     }
 }
 
@@ -854,6 +854,7 @@ fn ios_apply_spring_preset_on_vrm_ready(
     vrm_ready: Query<(), (With<Vrm>, Added<Initialized>)>,
     mut springs: Query<(Entity, Option<&Name>, &mut SpringJointProps)>,
     mut colliders: Query<(Entity, Option<&Name>, &mut ColliderShape)>,
+    mut baselines: ResMut<crate::ios_device_motion::IosSpringMotionBaselines>,
 ) {
     if preset.0.is_none() || vrm_ready.is_empty() {
         return;
@@ -873,6 +874,15 @@ fn ios_apply_spring_preset_on_vrm_ready(
         );
     }
     let (jh, jm, ch, cm) = apply_spring_preset(&p, &mut springs, &mut colliders);
+    baselines.capture_from_springs(springs.iter().map(|(e, _, p)| {
+        (
+            e,
+            crate::ios_device_motion::SpringMotionBaseline {
+                gravity_dir: p.gravity_dir,
+                gravity_power: p.gravity_power,
+            },
+        )
+    }));
     crate::jarvis_ios_line!(
         "[JarvisIOS] spring preset applied: joints {}/{} colliders {}/{}",
         jh,
@@ -1093,7 +1103,7 @@ pub struct IosEmbeddedRenderer {
     /// VRMA paths relative to `JARVIS_ASSET_ROOT` (asset server root).
     vrma_play_queue: Mutex<Vec<(String, bool)>>,
     /// Pose-library JSON paths relative to `JARVIS_ASSET_ROOT` (last queued wins).
-    json_anim_queue: Mutex<Vec<String>>,
+    json_anim_queue: Mutex<Vec<(String, bool)>>,
     /// Rolling buffer of recent `app.update()` durations in microseconds; used by the periodic
     /// histogram emit to surface stalls that the slow-frame detector misses (e.g. groups of
     /// frames hovering around 25 ms — visible as judder but never crossing the 32 ms gate).
@@ -1180,6 +1190,7 @@ impl IosEmbeddedRenderer {
         app.add_plugins((VrmPlugin, VrmaPlugin, EguiPlugin::default(), PanOrbitCameraPlugin));
         crate::ios_anim_json::plugin(&mut app);
         app.add_plugins(crate::ios_anim_layers::IosAnimLayersPlugin);
+        app.add_plugins(crate::ios_device_motion::IosDeviceMotionPlugin);
         // When the pointer is over egui (menu bar, windows), PanOrbit must not consume drags/pinch.
         let mut egui_global = bevy_egui::EguiGlobalSettings::default();
         egui_global.enable_absorb_bevy_input_system = true;
@@ -1291,10 +1302,48 @@ impl IosEmbeddedRenderer {
         }
     }
 
-    pub fn queue_json_anim_play(&self, path: String) {
+    pub fn queue_json_anim_play(&self, path: String, loop_forever: bool) {
         if let Ok(mut g) = self.json_anim_queue.lock() {
-            g.push(path);
+            g.push((path, loop_forever));
         }
+    }
+
+    pub fn set_device_motion(
+        &mut self,
+        gx: f32,
+        gy: f32,
+        gz: f32,
+        ax: f32,
+        ay: f32,
+        az: f32,
+        enabled: bool,
+    ) {
+        let mut m = self
+            .app
+            .world_mut()
+            .resource_mut::<crate::ios_device_motion::IosDeviceMotionInput>();
+        m.enabled = enabled;
+        m.gravity_dir = Vec3::new(gx, gy, gz);
+        m.user_accel = Vec3::new(ax, ay, az);
+    }
+
+    pub fn set_device_motion_tuning(
+        &mut self,
+        gravity_blend: f32,
+        max_tilt_deg: f32,
+        shake_power: f32,
+        max_shake_mult: f32,
+        shake_deadzone: f32,
+    ) {
+        let mut t = self
+            .app
+            .world_mut()
+            .resource_mut::<crate::ios_device_motion::IosDeviceMotionTuning>();
+        t.phone_gravity_blend = gravity_blend.clamp(0.0, 1.0);
+        t.max_tilt_from_down_rad = max_tilt_deg.clamp(5.0, 89.0).to_radians();
+        t.shake_power_per_ms2 = shake_power.max(0.0);
+        t.max_power_mult = max_shake_mult.max(1.0);
+        t.shake_deadzone_ms2 = shake_deadzone.max(0.0);
     }
 
     pub fn expressions_snapshot_json(&self) -> String {
@@ -1386,7 +1435,7 @@ impl IosEmbeddedRenderer {
     }
 
     fn flush_queued_json_anim_requests(&mut self) {
-        let drained: Vec<String> = {
+        let drained: Vec<(String, bool)> = {
             let mut g = self.json_anim_queue.lock().unwrap();
             core::mem::take(&mut *g)
         };
@@ -1394,7 +1443,7 @@ impl IosEmbeddedRenderer {
             return;
         }
         let path = drained.into_iter().last().unwrap();
-        ios_apply_json_anim_request(self.app.world_mut(), path);
+        ios_apply_json_anim_request(self.app.world_mut(), path.0, path.1);
     }
 
     fn flush_queued_vrma_requests(&mut self) {
@@ -1455,6 +1504,9 @@ impl IosEmbeddedRenderer {
         world.resource_mut::<crate::ios_anim_layers::IosBoneNameMap>().lower_to_entity.clear();
         world.resource_mut::<crate::ios_anim_layers::IosBoneNameMap>().vrm_entity = None;
         world.resource_mut::<crate::ios_anim_layers::IosRestPoseSnapshot>().captured = 0;
+        world
+            .resource_mut::<crate::ios_device_motion::IosSpringMotionBaselines>()
+            .clear();
         world.flush();
         world
             .resource_mut::<crate::ios_anim_json::IosJsonAnimPlayback>()

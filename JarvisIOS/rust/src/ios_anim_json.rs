@@ -104,10 +104,12 @@ struct IosPoseFile {
 
 /// Load JSON from `JARVIS_ASSET_ROOT` / `rel_path` and snapshot bone entities under the avatar root.
 ///
-/// Supports two formats:
-///  - **Animation** (`{fps, frames:[{bones,expressions},...], looping, holdDuration}`)
-///  - **Pose** (`{bones, expressions, transitionDuration}`) — treated as a single-frame animation.
-pub(crate) fn try_build_clip(rel_path: &str, world: &mut World) -> Option<ActiveJsonClip> {
+/// `loop_override` — when `Some`, wins over the file's `"looping"` field (Swift Play/Loop buttons).
+pub(crate) fn try_build_clip(
+    rel_path: &str,
+    world: &mut World,
+    loop_override: Option<bool>,
+) -> Option<ActiveJsonClip> {
     if !crate::ios_bevy::is_safe_asset_rel(rel_path) {
         crate::jarvis_ios_line!("[JarvisIOS] json anim: rejected unsafe path {rel_path:?}");
         return None;
@@ -172,7 +174,7 @@ pub(crate) fn try_build_clip(rel_path: &str, world: &mut World) -> Option<Active
         30.0
     };
     let frame_duration_secs = (1.0 / fps).max(1.0 / 240.0);
-    let looping = animation.looping.unwrap_or(false);
+    let looping = loop_override.unwrap_or_else(|| animation.looping.unwrap_or(false));
     let hold_duration_secs = animation.hold_duration.unwrap_or(0.35).max(0.05);
 
     crate::jarvis_ios_line!(

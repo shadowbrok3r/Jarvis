@@ -55,6 +55,10 @@ pub fn log_verbosity() -> u8 {
 pub fn set_log_verbosity(level: u8) {
     let clamped = level.min(LOG_VERBOSITY_DEBUG);
     LOG_VERBOSITY.store(clamped, Ordering::Relaxed);
+    #[cfg(target_os = "ios")]
+    {
+        let _ = crate::ios_user_prefs::save_default_log_verbosity(clamped);
+    }
 }
 
 /// Should an ordinary diagnostic line (frame counters, asset stats, slow-frame detector,

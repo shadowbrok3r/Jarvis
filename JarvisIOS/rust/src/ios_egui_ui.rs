@@ -161,7 +161,6 @@ pub fn jarvis_ios_egui_windows(
     if ui_state.show_logging {
         let mut show = true;
         let mut current = crate::debug_log::log_verbosity();
-        let mut save_log_default_status: Option<String> = None;
         egui::Window::new("Logging")
             .default_pos(egui::pos2(320.0, 36.0))
             .default_size(egui::vec2(260.0, 0.0))
@@ -202,18 +201,11 @@ pub fn jarvis_ios_egui_windows(
                 if current != prev {
                     crate::debug_log::set_log_verbosity(current);
                 }
-                ui.separator();
-                if ui.button("Save as default").clicked() {
-                    let ok = crate::ios_user_prefs::save_default_log_verbosity(current);
-                    save_log_default_status = Some(if ok {
-                        "Saved default log level for next launch.".into()
-                    } else {
-                        "Save failed.".into()
-                    });
-                }
-                if let Some(msg) = &save_log_default_status {
-                    ui.label(RichText::new(msg).small().weak());
-                }
+                ui.label(
+                    RichText::new("Saved automatically for the next launch.")
+                        .small()
+                        .weak(),
+                );
             });
         if !show {
             ui_state.show_logging = false;

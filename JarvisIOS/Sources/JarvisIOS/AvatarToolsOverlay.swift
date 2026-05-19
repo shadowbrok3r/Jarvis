@@ -79,6 +79,7 @@ struct AvatarToolsOverlay: View {
                 }
                 .padding(.horizontal, 4)
                 .padding(.bottom, 8)
+                .transaction { $0.animation = nil }
             }
         )
         .padding(.horizontal, 10)
@@ -97,8 +98,6 @@ private struct ExpressionPresetRow: Identifiable {
 private struct AvatarExpressionsPanelView: View {
     @State private var presets: [ExpressionPresetRow] = []
     @State private var status: String = ""
-
-    private let refreshTimer = Timer.publish(every: 0.8, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -128,6 +127,7 @@ private struct AvatarExpressionsPanelView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollIndicators(.visible)
+            .scrollBounceBehavior(.basedOnSize)
 
             HStack {
                 Button("Reset all") {
@@ -143,9 +143,6 @@ private struct AvatarExpressionsPanelView: View {
             .buttonStyle(.bordered)
         }
         .onAppear { refreshFromRenderer() }
-        .onReceive(refreshTimer) { _ in
-            if presets.isEmpty { refreshFromRenderer() }
-        }
     }
 
     private func refreshFromRenderer() {
@@ -167,6 +164,7 @@ private struct AvatarExpressionsPanelView: View {
 
 private struct AvatarMotionPanelView: View {
     @Binding var idleOverrideRel: String
+    @AppStorage("jarvis.ios.phoneSpringGravity") private var phoneSpringGravity = true
     @State private var vrmaPaths: [String] = []
     @State private var jsonPaths: [String] = []
     var body: some View {
@@ -203,6 +201,18 @@ private struct AvatarMotionPanelView: View {
 
                 Divider()
 
+                Toggle("Phone motion → spring hair / cloth", isOn: $phoneSpringGravity)
+                    .onChange(of: phoneSpringGravity) { _, on in
+                        JarvisDeviceMotion.shared.enabled = on
+                    }
+                Text("Tilt for spring hair/cloth gravity; shake for extra bounce. Humanoid bones are not moved — VRMC springs only.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                DeviceMotionLevelView(motion: JarvisDeviceMotion.shared)
+
+                Divider()
+
                 if !vrmaPaths.isEmpty {
                     Text("VRMA clips").font(.headline)
                     ForEach(vrmaPaths, id: \.self) { path in
@@ -223,7 +233,9 @@ private struct AvatarMotionPanelView: View {
                         HStack {
                             Text(path).font(.caption).lineLimit(2)
                             Spacer()
-                            Button("Play") { JarvisBevySession.queueAnimJson(path: path) }
+                            Button("Play") { JarvisBevySession.queueAnimJson(path: path, loopForever: false) }
+                                .buttonStyle(.bordered)
+                            Button("Loop") { JarvisBevySession.queueAnimJson(path: path, loopForever: true) }
                                 .buttonStyle(.bordered)
                         }
                     }
@@ -238,7 +250,12 @@ private struct AvatarMotionPanelView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 8)
         }
-        .onAppear { reloadLists() }
+        .scrollBounceBehavior(.basedOnSize)
+        .onAppear {
+            reloadLists()
+            JarvisDeviceMotion.shared.enabled = phoneSpringGravity
+            JarvisBevySession.pushDeviceMotionTuning()
+        }
     }
 
     private func reloadLists() {
@@ -261,8 +278,6 @@ private struct AvatarLayersPanelView: View {
     @State private var masterEnabled = true
     @State private var layers: [LayerRowModel] = []
     @State private var status: String = ""
-
-    private let refreshTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -318,13 +333,13 @@ private struct AvatarLayersPanelView: View {
                     }
                 }
             }
+            .scrollBounceBehavior(.basedOnSize)
 
             Button("Refresh") { refresh() }
                 .buttonStyle(.bordered)
         }
         .padding(.horizontal, 8)
         .onAppear { refresh() }
-        .onReceive(refreshTimer) { _ in refresh() }
     }
 
     private func refresh() {

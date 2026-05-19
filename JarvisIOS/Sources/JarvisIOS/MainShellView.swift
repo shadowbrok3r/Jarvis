@@ -21,6 +21,7 @@ struct MainShellView: View {
     @State private var gatewayChatModel = GatewayChatViewModel()
     @AppStorage("jarvis.avatarBottomPanel") private var showAvatarBottomPanel = false
     @AppStorage("jarvis.avatarBottomPanelHeight") private var avatarBottomPanelHeight: Double = 380
+    @State private var liveBottomPanelHeight: CGFloat = 380
     @AppStorage("jarvis.avatarBottomPanelTab") private var avatarBottomPanelTabRaw: String = AvatarBottomPanelTab.chat.rawValue
     @AppStorage(HubProfileSync.userDefaultsBaseURLKey) private var hubBaseURL: String = ""
     @AppStorage(HubProfileSync.userDefaultsSecondaryBaseURLKey) private var hubSecondaryBaseURL: String = ""
@@ -92,8 +93,11 @@ struct MainShellView: View {
                                             set: { avatarBottomPanelTabRaw = $0.rawValue }
                                         ),
                                         panelHeight: Binding(
-                                            get: { CGFloat(avatarBottomPanelHeight) },
-                                            set: { avatarBottomPanelHeight = Double($0) }
+                                            get: { liveBottomPanelHeight },
+                                            set: { newHeight in
+                                                liveBottomPanelHeight = newHeight
+                                                avatarBottomPanelHeight = Double(newHeight)
+                                            }
                                         ),
                                         viewportHeight: h,
                                         onDismiss: { showAvatarBottomPanel = false },
@@ -147,6 +151,7 @@ struct MainShellView: View {
         .onAppear {
             gatewayChatModel.onAppear()
             migrateLegacyAvatarChatOverlayFlag()
+            liveBottomPanelHeight = CGFloat(avatarBottomPanelHeight)
         }
     }
 
@@ -159,6 +164,7 @@ struct MainShellView: View {
         if avatarBottomPanelHeight < 160 {
             avatarBottomPanelHeight = 380
         }
+        liveBottomPanelHeight = CGFloat(avatarBottomPanelHeight)
         showAvatarBottomPanel = true
     }
 

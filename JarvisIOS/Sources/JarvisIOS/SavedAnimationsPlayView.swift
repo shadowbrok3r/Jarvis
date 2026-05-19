@@ -32,9 +32,15 @@ struct SavedAnimationsPlayView: View {
                             .lineLimit(2)
                         Spacer()
                         Button("Play") {
-                            JarvisBevySession.queueAnimJson(path: rel)
+                            JarvisBevySession.queueAnimJson(path: rel, loopForever: false)
                             status = "Queued \(rel)"
                             JarvisIOSLog.recordUI("queueAnimJson \(rel)")
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Loop") {
+                            JarvisBevySession.queueAnimJson(path: rel, loopForever: true)
+                            status = "Looping \(rel)"
+                            JarvisIOSLog.recordUI("queueAnimJson loop \(rel)")
                         }
                         .buttonStyle(.borderedProminent)
                     }
