@@ -114,6 +114,23 @@ struct DeviceMotionLevelView: View {
 
     private var tuningSliders: some View {
         VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Spring bones affected")
+                    .font(.caption)
+                Picker("Spring bones affected", selection: $motion.springScope) {
+                    ForEach(DeviceMotionSpringScope.allCases) { scope in
+                        Text(scope.label).tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: motion.springScope) { _, _ in
+                    JarvisBevySession.pushDeviceMotionTuning()
+                }
+                Text("All = every VRMC spring on the model (desktop parity). Hair/cloth only skips humanoid core chains — useful if body springs look unstable.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             tuningSlider("Gravity smoothing", value: $motion.gravitySmoothing, range: 0.05 ... 0.5, format: "%.2f")
             tuningSlider("Shake smoothing", value: $motion.accelSmoothing, range: 0.05 ... 0.5, format: "%.2f")
             tuningSlider("Spring tilt blend", value: $motion.gravityBlend, range: 0 ... 1, format: "%.2f")

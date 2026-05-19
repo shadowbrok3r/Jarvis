@@ -2,6 +2,34 @@ import CoreMotion
 import Foundation
 import Observation
 
+/// Which VRMC spring joints receive phone tilt / shake.
+enum DeviceMotionSpringScope: String, CaseIterable, Identifiable {
+    /// Every spring joint on the VRM (matches desktop spring-bone physics).
+    case allSprings = "all"
+    /// Hair, cloth, accessories — skips humanoid core name tokens.
+    case hairClothOnly = "secondary"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .allSprings: return "All spring bones"
+        case .hairClothOnly: return "Hair / cloth only"
+        }
+    }
+
+    var rustCode: UInt8 {
+        switch self {
+        case .allSprings: return 0
+        case .hairClothOnly: return 1
+        }
+    }
+
+    static func fromStored(_ raw: String) -> Self {
+        Self(rawValue: raw) ?? .allSprings
+    }
+}
+
 /// Streams device gravity + user acceleration into Rust spring bones (VRMC secondary motion only).
 @MainActor
 @Observable
@@ -19,7 +47,7 @@ final class JarvisDeviceMotion {
 
     /// When false, Rust restores per-joint gravity from the VRM / spring preset.
     var enabled: Bool {
-        get { UserDefaults.standard.object(forKey: Keys.enabled) as? Bool ?? true }
+        get { UserDefaults.standard.object(forKey: Keys.enabled) as? Bool ?? false }
         set { UserDefaults.standard.set(newValue, forKey: Keys.enabled) }
     }
 
@@ -65,8 +93,18 @@ final class JarvisDeviceMotion {
         set { UserDefaults.standard.set(clamp(newValue, 0, 1), forKey: Keys.shakeDeadzone) }
     }
 
+    /// Which spring joints phone motion steers (see `DeviceMotionSpringScope`).
+    var springScope: DeviceMotionSpringScope {
+        get {
+            let raw = UserDefaults.standard.string(forKey: Keys.springScope) ?? DeviceMotionSpringScope.allSprings.rawValue
+            return DeviceMotionSpringScope.fromStored(raw)
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Keys.springScope) }
+    }
+
     private enum Keys {
         static let enabled = "jarvis.ios.phoneSpringGravity"
+        static let springScope = "jarvis.ios.motion.springScope"
         static let gravitySmooth = "jarvis.ios.motion.gravitySmooth"
         static let accelSmooth = "jarvis.ios.motion.accelSmooth"
         static let gravityBlend = "jarvis.ios.motion.gravityBlend"
@@ -102,6 +140,10 @@ final class JarvisDeviceMotion {
             let rawA = Self.rawAccelToBevy(motion.userAcceleration)
             self.gravityBevy = Self.smooth(self.gravityBevy, toward: rawG, alpha: gAlpha)
             self.accelBevy = Self.smooth(self.accelBevy, toward: rawA, alpha: aAlpha)
+            // Never feed upward gravity into springs (180° flip source when sensor noise crosses zero).
+            if self.gravityBevy.y > 0 {
+                self.gravityBevy = -self.gravityBevy
+            }
 
             self.gravityDisplay = self.gravityBevy
             self.accelDisplay = self.accelBevy
@@ -127,13 +169,17 @@ final class JarvisDeviceMotion {
     }
 
     func pushToRenderer(_ ptr: UnsafeMutablePointer<UInt8>) {
+        if !enabled {
+            jarvis_renderer_set_device_motion(ptr, 0, -1, 0, 0, 0, 0, 0)
+            return
+        }
         let g = gravityBevy
         let a = accelBevy
         jarvis_renderer_set_device_motion(
             ptr,
             Float(g.x), Float(g.y), Float(g.z),
             Float(a.x), Float(a.y), Float(a.z),
-            enabled ? 1 : 0
+            1
         )
     }
 
@@ -145,7 +191,8 @@ final class JarvisDeviceMotion {
             Float(maxTiltDegrees),
             Float(shakePower),
             Float(maxShakeMultiplier),
-            Float(shakeDeadzone)
+            Float(shakeDeadzone),
+            springScope.rustCode
         )
     }
 
@@ -157,6 +204,7 @@ final class JarvisDeviceMotion {
         shakePower = 0.18
         maxShakeMultiplier = 3
         shakeDeadzone = 0.12
+        springScope = .allSprings
         JarvisBevySession.pushDeviceMotionTuning()
     }
 

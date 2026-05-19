@@ -164,7 +164,7 @@ private struct AvatarExpressionsPanelView: View {
 
 private struct AvatarMotionPanelView: View {
     @Binding var idleOverrideRel: String
-    @AppStorage("jarvis.ios.phoneSpringGravity") private var phoneSpringGravity = true
+    @AppStorage("jarvis.ios.phoneSpringGravity") private var phoneSpringGravity = false
     @State private var vrmaPaths: [String] = []
     @State private var jsonPaths: [String] = []
     var body: some View {
@@ -205,7 +205,7 @@ private struct AvatarMotionPanelView: View {
                     .onChange(of: phoneSpringGravity) { _, on in
                         JarvisDeviceMotion.shared.enabled = on
                     }
-                Text("Tilt for spring hair/cloth gravity; shake for extra bounce. Humanoid bones are not moved — VRMC springs only.")
+                Text("Tilt/shake steers VRMC spring bones (humanoid animation bones are separate). Use spring scope below to test hair-only vs all springs.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
 

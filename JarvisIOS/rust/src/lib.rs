@@ -74,6 +74,7 @@ mod ffi {
             shake_power: f32,
             max_shake_mult: f32,
             shake_deadzone: f32,
+            spring_scope: u8,
         );
 
         fn jarvis_renderer_expressions_snapshot_json(ptr: *mut u8) -> String;
@@ -329,6 +330,7 @@ pub fn jarvis_renderer_set_device_motion_tuning(
     shake_power: f32,
     max_shake_mult: f32,
     shake_deadzone: f32,
+    spring_scope: u8,
 ) {
     if ptr.is_null() {
         return;
@@ -340,6 +342,7 @@ pub fn jarvis_renderer_set_device_motion_tuning(
             shake_power,
             max_shake_mult,
             shake_deadzone,
+            spring_scope,
         );
     }
 }
@@ -352,6 +355,7 @@ pub fn jarvis_renderer_set_device_motion_tuning(
     _shake_power: f32,
     _max_shake_mult: f32,
     _shake_deadzone: f32,
+    _spring_scope: u8,
 ) {
 }
 

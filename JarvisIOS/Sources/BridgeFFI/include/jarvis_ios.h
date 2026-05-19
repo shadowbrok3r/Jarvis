@@ -10,7 +10,7 @@ void __swift_bridge__$jarvis_renderer_reload_profile(uint8_t* ptr);
 void __swift_bridge__$jarvis_renderer_queue_vrma(uint8_t* ptr, uint8_t const * path_ptr, uintptr_t path_len, uint8_t loop_forever);
 void __swift_bridge__$jarvis_renderer_queue_anim_json(uint8_t* ptr, uint8_t const * path_ptr, uintptr_t path_len, uint8_t loop_forever);
 void __swift_bridge__$jarvis_renderer_set_device_motion(uint8_t* ptr, float gx, float gy, float gz, float ax, float ay, float az, uint8_t enabled);
-void __swift_bridge__$jarvis_renderer_set_device_motion_tuning(uint8_t* ptr, float gravity_blend, float max_tilt_deg, float shake_power, float max_shake_mult, float shake_deadzone);
+void __swift_bridge__$jarvis_renderer_set_device_motion_tuning(uint8_t* ptr, float gravity_blend, float max_tilt_deg, float shake_power, float max_shake_mult, float shake_deadzone, uint8_t spring_scope);
 void* __swift_bridge__$jarvis_renderer_expressions_snapshot_json(uint8_t* ptr);
 void __swift_bridge__$jarvis_renderer_set_expression_weight(uint8_t* ptr, uint8_t const * name_ptr, uintptr_t name_len, float weight);
 void __swift_bridge__$jarvis_renderer_apply_expressions(uint8_t* ptr);

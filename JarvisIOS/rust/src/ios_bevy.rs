@@ -385,6 +385,9 @@ fn spawn_ios_viewport(
     orbit.zoom_upper_limit = Some(96.0);
     orbit.touch_enabled = true;
     orbit.touch_controls = TouchControls::OneFingerOrbit;
+    // Prevent camera flipping upside-down (reads as the avatar inverting on screen).
+    orbit.pitch_lower_limit = Some(-std::f32::consts::FRAC_PI_2 + 0.12);
+    orbit.pitch_upper_limit = Some(std::f32::consts::FRAC_PI_2 - 0.12);
     orbit.button_orbit = MouseButton::Left;
     orbit.button_pan = MouseButton::Middle;
     orbit.button_zoom = None;
@@ -739,7 +742,7 @@ fn play_idle_when_vrma_loaded(trigger: On<LoadedVrma>, mut commands: Commands) {
         repeat: RepeatAnimation::Forever,
         transition_duration: Duration::ZERO,
         vrma: trigger.vrma,
-        reset_spring_bones: false,
+        reset_spring_bones: true,
     });
 }
 
@@ -748,7 +751,7 @@ fn observe_vrma_play_forever(trigger: On<LoadedVrma>, mut commands: Commands) {
         repeat: RepeatAnimation::Forever,
         transition_duration: Duration::from_millis(300),
         vrma: trigger.vrma,
-        reset_spring_bones: false,
+        reset_spring_bones: true,
     });
 }
 
@@ -1318,13 +1321,26 @@ impl IosEmbeddedRenderer {
         az: f32,
         enabled: bool,
     ) {
-        let mut m = self
-            .app
-            .world_mut()
-            .resource_mut::<crate::ios_device_motion::IosDeviceMotionInput>();
-        m.enabled = enabled;
-        m.gravity_dir = Vec3::new(gx, gy, gz);
-        m.user_accel = Vec3::new(ax, ay, az);
+        let should_reset = {
+            let world = self.app.world_mut();
+            let prev = world
+                .resource::<crate::ios_device_motion::IosDeviceMotionInput>()
+                .enabled;
+            let mut m = world.resource_mut::<crate::ios_device_motion::IosDeviceMotionInput>();
+            m.enabled = enabled;
+            if enabled {
+                m.gravity_dir = Vec3::new(gx, gy, gz);
+                m.user_accel = Vec3::new(ax, ay, az);
+                false
+            } else {
+                m.gravity_dir = Vec3::new(0.0, -1.0, 0.0);
+                m.user_accel = Vec3::ZERO;
+                prev
+            }
+        };
+        if should_reset {
+            crate::ios_device_motion::ios_reset_springs_after_device_motion_off(self.app.world_mut());
+        }
     }
 
     pub fn set_device_motion_tuning(
@@ -1334,6 +1350,7 @@ impl IosEmbeddedRenderer {
         shake_power: f32,
         max_shake_mult: f32,
         shake_deadzone: f32,
+        spring_scope: u8,
     ) {
         let mut t = self
             .app
@@ -1344,6 +1361,7 @@ impl IosEmbeddedRenderer {
         t.shake_power_per_ms2 = shake_power.max(0.0);
         t.max_power_mult = max_shake_mult.max(1.0);
         t.shake_deadzone_ms2 = shake_deadzone.max(0.0);
+        t.spring_scope = crate::ios_device_motion::IosSpringBoneScope::from_u8(spring_scope);
     }
 
     pub fn expressions_snapshot_json(&self) -> String {
