@@ -3,7 +3,7 @@
 //! so they stay free when the UI is idle.
 
 use bevy::camera::Exposure;
-use bevy::light::GlobalAmbientLight;
+use bevy::light::{EnvironmentMapLight, GlobalAmbientLight};
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use bevy::window::PrimaryWindow;
@@ -97,13 +97,16 @@ pub fn apply_clear_color(settings: Res<Settings>, mut clear: ResMut<ClearColor>)
     clear.0 = Color::linear_rgba(r, g, b, a);
 }
 
-pub fn apply_ambient_light(settings: Res<Settings>, mut ambient: ResMut<GlobalAmbientLight>) {
-    if !settings.is_changed() {
-        return;
-    }
-    let [r, g, b, a] = settings.graphics.ambient_color;
-    ambient.color = Color::linear_rgba(r, g, b, a);
-    ambient.brightness = settings.graphics.ambient_brightness;
+pub fn apply_ambient_light(
+    settings: Res<Settings>,
+    cam_q: Query<(), (With<Camera3d>, With<EnvironmentMapLight>)>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+) {
+    let g = &settings.graphics;
+    let [r, gc, b, _a] = g.ambient_color;
+    ambient.color = Color::linear_rgba(r, gc, b, 1.0);
+    let ibl_active = !cam_q.is_empty();
+    ambient.brightness = g.effective_ambient_brightness(ibl_active);
 }
 
 pub fn apply_exposure(settings: Res<Settings>, mut cam_q: Query<&mut Exposure>) {

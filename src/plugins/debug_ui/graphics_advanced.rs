@@ -15,10 +15,11 @@ use bevy_egui::{EguiContexts, egui};
 use bevy_vrm1::prelude::{MToonMaterial, Vrm};
 
 use jarvis_avatar::config::{
-    BloomSettings, GraphicsAdvancedSettings, LightRigSettings, LightSpec, Settings,
-    msaa_allows_ssao,
+    apply_character_showcase_lighting_preset, BloomSettings, LightRigSettings, LightSpec,
+    Settings, msaa_allows_ssao,
 };
 
+use crate::plugins::graphics_advanced::EnvironmentMapStatus;
 use crate::plugins::material_visibility::{
     MaterialVisibilityStore, std_mesh_material_key,
 };
@@ -257,6 +258,7 @@ fn entity_under_vrm(
 pub fn draw_graphics_advanced_window(
     mut contexts: EguiContexts,
     mut settings: ResMut<Settings>,
+    env_status: Option<Res<EnvironmentMapStatus>>,
     materials: Res<Assets<MToonMaterial>>,
     mtoon_meshes_q: Query<(
         Entity,
@@ -301,11 +303,7 @@ pub fn draw_graphics_advanced_window(
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                draw_post_process(
-                    ui,
-                    settings.graphics.msaa_samples,
-                    &mut settings.graphics.advanced,
-                );
+                draw_post_process(ui, &mut settings, env_status.as_deref());
                 ui.separator();
                 draw_light_rig(ui, &mut settings.light_rig);
                 ui.separator();
@@ -331,7 +329,30 @@ pub fn draw_graphics_advanced_window(
     settings.ui.show_graphics_advanced = open;
 }
 
-fn draw_post_process(ui: &mut egui::Ui, msaa_samples: u32, adv: &mut GraphicsAdvancedSettings) {
+fn draw_post_process(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    env_status: Option<&EnvironmentMapStatus>,
+) {
+    let mut apply_preset = false;
+    ui.horizontal(|ui| {
+        if ui.button("Showcase lighting preset").clicked() {
+            apply_preset = true;
+        }
+    });
+    if apply_preset {
+        apply_character_showcase_lighting_preset(settings);
+    }
+    let msaa_samples = settings.graphics.msaa_samples;
+    let ambient_brightness = settings.graphics.ambient_brightness;
+    let graphics = &mut settings.graphics;
+    let adv = &mut graphics.advanced;
+    ui.separator();
+    ui.heading("Ambient");
+    ui.add(egui::Slider::new(&mut graphics.ambient_brightness, 0.0..=1.5).text("brightness"));
+    rgba_row(ui, &mut graphics.ambient_color);
+    ui.add(egui::Slider::new(&mut graphics.exposure_ev100, -6.0..=17.0).text("exposure_ev100"));
+    ui.separator();
     ui.heading("Post-processing");
     egui::ComboBox::from_label("Tonemapping")
         .selected_text(adv.tonemapping.clone())
@@ -367,12 +388,87 @@ fn draw_post_process(ui: &mut egui::Ui, msaa_samples: u32, adv: &mut GraphicsAdv
         .on_hover_text("Requires HDR.");
 
     ui.separator();
-    ui.label("Environment map")
-        .on_hover_text("Asset stem only: <stem>_diffuse.ktx2 + <stem>_specular.ktx2");
-    ui.text_edit_singleline(&mut adv.environment_map);
+    ui.label("Environment map (IBL)");
+    ui.checkbox(&mut adv.environment_map_enabled, "Attach to camera")
+        .on_hover_text("Uncheck to A/B compare with flat ambient only.");
+    ui.checkbox(&mut adv.environment_map_follow_camera, "Follow camera (skybox)")
+        .on_hover_text(
+            "Cubemap rotates with the view. Turn off for world-fixed studio orientation.",
+        );
+    ui.text_edit_singleline(&mut adv.environment_map)
+        .on_hover_text("assets/<stem>_diffuse.ktx2 + <stem>_specular.ktx2 (e.g. maps/ → maps/_diffuse.ktx2)");
     ui.add(
-        egui::Slider::new(&mut adv.environment_intensity, 0.0..=80.0).text("environment_intensity"),
+        egui::Slider::new(&mut adv.environment_intensity, 0.0..=500.0).text("intensity (nits)"),
     );
+    ui.add(
+        egui::Slider::new(&mut adv.environment_map_mtoon_boost, 0.5..=12.0).text("mtoon_boost"),
+    );
+    ui.add(
+        egui::Slider::new(&mut adv.environment_map_mtoon_body_gain, 0.5..=16.0)
+            .text("mtoon_body_gain"),
+    )
+    .on_hover_text("Extra cubemap strength on MToon only (debug PBR sphere ignores this).");
+    ui.add(
+        egui::Slider::new(&mut adv.environment_map_rotation_yaw_deg, 0.0..=360.0)
+            .text("yaw offset °"),
+    )
+    .on_hover_text("Added on top of camera rotation when Follow camera is on.");
+    ui.add(
+        egui::Slider::new(&mut adv.environment_ambient_scale_when_active, 0.0..=1.0)
+            .text("ambient_scale_when_ibl"),
+    )
+    .on_hover_text(
+        "While attached: flat ambient = ambient_brightness × this. \
+         Drag to 0 with intensity at 30+ and orbit behind the model.",
+    );
+    ui.checkbox(&mut adv.environment_map_debug_sphere, "IBL debug sphere (PBR)")
+        .on_hover_text(
+            "White StandardMaterial ball to the right — if only the ball reacts to IBL, maps are fine and MToon path is the issue.",
+        );
+    ui.checkbox(&mut adv.environment_map_debug_visualize, "MToon IBL debug tint")
+        .on_hover_text(
+            "Shows raw cubemap color on the avatar (toggle off after test). Orbit to see it change.",
+        );
+    ui.horizontal(|ui| {
+        if ui.button("IBL off (intensity 0)").clicked() {
+            adv.environment_intensity = 0.0;
+        }
+        if ui.button("IBL studio (~30 nits)").clicked() {
+            adv.environment_intensity = 30.0;
+        }
+    });
+    if let Some(st) = env_status {
+        let color = if st.attached && st.diffuse_is_cubemap {
+            egui::Color32::from_rgb(120, 200, 140)
+        } else {
+            egui::Color32::from_rgb(210, 160, 90)
+        };
+        ui.colored_label(color, &st.message);
+        ui.small(format!(
+            "Diffuse: {} · {} · {} bytes · sample lum {:.4}",
+            st.diffuse_load_state,
+            st.diffuse_format,
+            st.diffuse_data_bytes,
+            st.diffuse_sample_luminance,
+        ));
+        if st.attached {
+            ui.small(format!(
+                "Live: {:.1} nits on camera · yaw {:.0}° · ambient {:.2}",
+                st.camera_intensity_nits,
+                st.rotation_yaw_deg,
+                st.effective_ambient_brightness,
+            ));
+        }
+        if st.diffuse_loaded && !st.maps_look_valid {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 100, 100),
+                "Maps load but look empty on CPU — re-export with Khronos glTF IBL Sampler.",
+            );
+        }
+        if ambient_brightness > 1.5 && !adv.environment_map.trim().is_empty() {
+            ui.small("Tip: lower ambient_brightness (Graphics section) or ambient_scale_when_ibl.");
+        }
+    }
 
     ui.separator();
     ui.label("SSAO")
@@ -420,14 +516,21 @@ fn draw_bloom(ui: &mut egui::Ui, b: &mut BloomSettings) {
 }
 
 fn draw_light_rig(ui: &mut egui::Ui, rig: &mut LightRigSettings) {
-    ui.heading("Light rig")
-        .on_hover_text("Three directional lights: key, fill, and rim.");
-    ui.checkbox(&mut rig.enabled, "enable rig (disables default sun)");
+    ui.heading("Light rig");
+    ui.checkbox(&mut rig.enabled, "enable rig");
+    ui.checkbox(&mut rig.show_light_gizmos, "show light gizmos");
+    ui.add(egui::Slider::new(&mut rig.gizmo_distance, 0.5..=8.0).text("gizmo distance"));
+    ui.checkbox(&mut rig.use_avatar_focus_for_gizmos, "anchor gizmos on VRM");
     ui.collapsing("Key light", |ui| draw_light_spec(ui, "key", &mut rig.key));
     ui.collapsing("Fill light", |ui| {
         draw_light_spec(ui, "fill", &mut rig.fill)
     });
-    ui.collapsing("Rim light", |ui| draw_light_spec(ui, "rim", &mut rig.rim));
+    ui.collapsing("Rim light (silhouette)", |ui| {
+        draw_light_spec(ui, "rim", &mut rig.rim)
+    });
+    ui.collapsing("Back light (hair / cape)", |ui| {
+        draw_light_spec(ui, "back", &mut rig.back)
+    });
 }
 
 fn draw_light_spec(ui: &mut egui::Ui, tag: &str, l: &mut LightSpec) {
@@ -437,7 +540,7 @@ fn draw_light_spec(ui: &mut egui::Ui, tag: &str, l: &mut LightSpec) {
             .logarithmic(true)
             .text(format!("{tag}.illuminance")),
     );
-    ui.label(format!("{tag}.direction (pointing towards)"));
+    ui.label(format!("{tag}.direction"));
     vec3_row(ui, &format!("{tag}_dir"), &mut l.direction, -5.0..=5.0);
     ui.label(format!("{tag}.color (linear RGB)"));
     rgb_row(ui, &mut l.color);

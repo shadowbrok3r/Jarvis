@@ -10,6 +10,7 @@
 //! "Restore defaults" = delete `config/user.toml` and re-run [`Settings::load`].
 
 use bevy::ecs::resource::Resource;
+use bevy::math::Quat;
 use bevy::render::view::Msaa;
 use bevy::window::PresentMode;
 use config::{Config, Environment, File};
@@ -757,6 +758,66 @@ pub struct GraphicsAdvancedSettings {
     /// Legacy configs used values in the hundreds/thousands; see `sync_environment_map`.
     #[serde(default = "default_env_intensity")]
     pub environment_intensity: f32,
+    /// Extra multiplier on camera IBL for MToon (toon shading hides indirect light).
+    #[serde(default = "default_env_mtoon_boost")]
+    pub environment_map_mtoon_boost: f32,
+    /// Multiplier on [`GraphicsSettings::ambient_brightness`] while the view
+    /// environment map is attached (flat ambient otherwise hides cubemap IBL).
+    #[serde(default = "default_env_ambient_scale_when_active")]
+    pub environment_ambient_scale_when_active: f32,
+    /// Yaw rotation (degrees) applied to the view environment cubemap.
+    #[serde(default)]
+    pub environment_map_rotation_yaw_deg: f32,
+    /// When false, cubemaps are not attached to the camera (sliders still edit settings).
+    #[serde(default = "default_true")]
+    pub environment_map_enabled: bool,
+    /// Spawn a white PBR sphere beside the avatar to verify IBL on standard materials.
+    #[serde(default)]
+    pub environment_map_debug_sphere: bool,
+    /// Replace MToon indirect with raw cubemap tint (confirms shader sampling).
+    #[serde(default)]
+    pub environment_map_debug_visualize: bool,
+    /// Rotate the view IBL cubemap with the camera (skybox-style) plus `rotation_yaw_deg`.
+    #[serde(default = "default_true")]
+    pub environment_map_follow_camera: bool,
+    /// Extra multiplier on MToon-only cubemap samples in `mtoon_fragment.wgsl` (PBR sphere ignores this).
+    #[serde(default = "default_env_mtoon_body_gain")]
+    pub environment_map_mtoon_body_gain: f32,
+}
+
+impl GraphicsAdvancedSettings {
+    /// Diffuse/specular IBL strength sent to [`bevy::light::EnvironmentMapLight`].
+    pub fn environment_nits(&self) -> f32 {
+        environment_intensity_nits(self.environment_intensity)
+            * self.environment_map_mtoon_boost.max(0.1)
+    }
+
+    pub fn environment_rotation(&self, camera_rotation: Quat) -> Quat {
+        let yaw = Quat::from_rotation_y(self.environment_map_rotation_yaw_deg.to_radians());
+        if self.environment_map_follow_camera {
+            camera_rotation * yaw
+        } else {
+            yaw
+        }
+    }
+}
+
+impl GraphicsSettings {
+    pub fn effective_ambient_brightness(&self, ibl_active: bool) -> f32 {
+        let scale = if ibl_active {
+            self.advanced
+                .environment_ambient_scale_when_active
+                .clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.ambient_brightness * scale
+    }
+}
+
+/// Converts UI `environment_intensity` to approximate nits (cd/m²). Slider is linear nits.
+pub fn environment_intensity_nits(raw: f32) -> f32 {
+    raw.max(0.0)
 }
 
 impl Default for GraphicsAdvancedSettings {
@@ -772,8 +833,28 @@ impl Default for GraphicsAdvancedSettings {
             ssao_constant_object_thickness: default_ssao_constant_object_thickness(),
             environment_map: String::new(),
             environment_intensity: default_env_intensity(),
+            environment_map_mtoon_boost: default_env_mtoon_boost(),
+            environment_ambient_scale_when_active: default_env_ambient_scale_when_active(),
+            environment_map_rotation_yaw_deg: 0.0,
+            environment_map_enabled: true,
+            environment_map_debug_sphere: false,
+            environment_map_debug_visualize: false,
+            environment_map_follow_camera: true,
+            environment_map_mtoon_body_gain: default_env_mtoon_body_gain(),
         }
     }
+}
+
+fn default_env_mtoon_boost() -> f32 {
+    2.5
+}
+
+fn default_env_mtoon_body_gain() -> f32 {
+    4.0
+}
+
+fn default_env_ambient_scale_when_active() -> f32 {
+    0.3
 }
 
 fn default_tonemap() -> String {
@@ -903,30 +984,51 @@ fn default_auto_stop_idle_vrma() -> bool {
     true
 }
 
-/// Three-light "anime" rig spawned at startup. Each sub-struct maps to a
-/// `DirectionalLight` entity; disable individually if you want to bring
-/// your own lighting.
+/// Four-light anime rig (key / fill / rim / back) spawned at startup. Each
+/// sub-struct maps to a `DirectionalLight` entity.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LightRigSettings {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Draw Bevy directional-light arrows in the viewport (Blender-style).
+    #[serde(default = "default_true")]
+    pub show_light_gizmos: bool,
+    /// How far from the rig focus point each gizmo anchor sits along the light
+    /// direction (meters). Does not affect lighting — only gizmo placement.
+    #[serde(default = "default_light_gizmo_distance")]
+    pub gizmo_distance: f32,
+    /// Anchor gizmos on the loaded VRM root + `camera.focus_y_lift` instead of
+    /// the static `[camera].focus` point.
+    #[serde(default = "default_true")]
+    pub use_avatar_focus_for_gizmos: bool,
     #[serde(default)]
     pub key: LightSpec,
     #[serde(default = "default_fill_light")]
     pub fill: LightSpec,
     #[serde(default = "default_rim_light")]
     pub rim: LightSpec,
+    /// Dedicated backlight behind the character (hair / cape / silhouette).
+    #[serde(default = "default_back_light")]
+    pub back: LightSpec,
 }
 
 impl Default for LightRigSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            show_light_gizmos: true,
+            gizmo_distance: default_light_gizmo_distance(),
+            use_avatar_focus_for_gizmos: true,
             key: LightSpec::default(),
             fill: default_fill_light(),
             rim: default_rim_light(),
+            back: default_back_light(),
         }
     }
+}
+
+fn default_light_gizmo_distance() -> f32 {
+    2.5
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -970,11 +1072,54 @@ fn default_fill_light() -> LightSpec {
 fn default_rim_light() -> LightSpec {
     LightSpec {
         enabled: true,
-        direction: [0.2, -0.2, 1.0],
-        color: [1.0, 0.9, 0.8],
-        illuminance: 5000.0,
+        // Above-behind the avatar (negative Z = behind in our VRM facing).
+        direction: [-0.25, -0.55, -1.0],
+        color: [1.0, 0.88, 0.78],
+        illuminance: 7500.0,
         shadows: false,
     }
+}
+
+fn default_back_light() -> LightSpec {
+    LightSpec {
+        enabled: true,
+        direction: [0.0, -0.12, -1.0],
+        color: [0.92, 0.94, 1.0],
+        illuminance: 6500.0,
+        shadows: false,
+    }
+}
+
+/// One-click lighting + post preset aimed at high-contrast character showcase
+/// (Girls' Frontline Exilium 2–style rim/back separation).
+pub fn apply_character_showcase_lighting_preset(settings: &mut Settings) {
+    let g = &mut settings.graphics;
+    g.ambient_brightness = 0.12;
+    g.ambient_color = [0.62, 0.66, 0.82, 1.0];
+    g.exposure_ev100 = 10.2;
+
+    let adv = &mut g.advanced;
+    adv.tonemapping = "AgX".to_string();
+    adv.bloom.enabled = true;
+    adv.bloom.intensity = 0.22;
+    adv.bloom.threshold = 0.85;
+    adv.bloom.threshold_softness = 0.35;
+    adv.bloom.low_frequency_boost = 0.85;
+    adv.environment_intensity = 18.0;
+    adv.environment_map_mtoon_boost = 2.5;
+
+    let rig = &mut settings.light_rig;
+    rig.enabled = true;
+    rig.show_light_gizmos = true;
+    rig.gizmo_distance = 2.8;
+    rig.key.illuminance = 8500.0;
+    rig.fill.illuminance = 2800.0;
+    rig.rim = default_rim_light();
+    rig.rim.enabled = true;
+    rig.rim.illuminance = 9000.0;
+    rig.back = default_back_light();
+    rig.back.enabled = true;
+    rig.back.illuminance = 8000.0;
 }
 
 /// Per-material MToon overrides (written to disk as a JSON sidecar). The

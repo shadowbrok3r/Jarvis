@@ -41,9 +41,19 @@ fn default_fill_light() -> IosLightSpec {
 fn default_rim_light() -> IosLightSpec {
     IosLightSpec {
         enabled: true,
-        direction: [0.2, -0.2, 1.0],
-        color: [1.0, 0.9, 0.8],
-        illuminance: 5000.0,
+        direction: [-0.25, -0.55, -1.0],
+        color: [1.0, 0.88, 0.78],
+        illuminance: 7500.0,
+        shadows: false,
+    }
+}
+
+fn default_back_light() -> IosLightSpec {
+    IosLightSpec {
+        enabled: true,
+        direction: [0.0, -0.12, -1.0],
+        color: [0.92, 0.94, 1.0],
+        illuminance: 6500.0,
         shadows: false,
     }
 }
@@ -58,6 +68,8 @@ pub struct IosLightRigSettings {
     pub fill: IosLightSpec,
     #[serde(default = "default_rim_light")]
     pub rim: IosLightSpec,
+    #[serde(default = "default_back_light")]
+    pub back: IosLightSpec,
 }
 
 impl Default for IosLightRigSettings {
@@ -67,6 +79,7 @@ impl Default for IosLightRigSettings {
             key: IosLightSpec::default(),
             fill: default_fill_light(),
             rim: default_rim_light(),
+            back: default_back_light(),
         }
     }
 }

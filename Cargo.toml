@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Rendering (Bevy 0.18 + bevy_vrm1 0.7)
-bevy = { version = "0.18", features = ["wav"] }
+bevy = { version = "0.18", features = ["wav", "ktx2"] }
 bevy_vrm1 = "0.7"
 bevy_egui = { version = "0.39", features = ["serde"] }
 bevy_panorbit_camera = { version = "0.34", features = ["bevy_egui"] }
@@ -75,6 +75,7 @@ parking_lot = "0.12"
 config = "0.15"
 dotenvy = "0.15"
 toml = "1"
+half = "2.4"
 
 # Logging
 tracing = "0.1"

@@ -64,6 +64,7 @@ enum IosLightRigRole {
     Key,
     Fill,
     Rim,
+    Back,
 }
 
 #[derive(Component)]
@@ -300,7 +301,8 @@ fn spawn_ios_lights(commands: &mut Commands, graphics: &IosGraphicsSettings, loo
         spawn_ios_light_one(commands, IosLightRigRole::Key, &rig.key);
         spawn_ios_light_one(commands, IosLightRigRole::Fill, &rig.fill);
         spawn_ios_light_one(commands, IosLightRigRole::Rim, &rig.rim);
-        crate::jarvis_ios_line!("[JarvisIOS] spawned 3-light rig (key/fill/rim)");
+        spawn_ios_light_one(commands, IosLightRigRole::Back, &rig.back);
+        crate::jarvis_ios_line!("[JarvisIOS] spawned 4-light rig (key/fill/rim/back)");
     } else {
         commands.spawn((
             JarvisIosSun,
@@ -327,6 +329,7 @@ fn sync_ios_light_rig(world: &mut World, rig: &IosLightRigSettings) {
             IosLightRigRole::Key => &rig.key,
             IosLightRigRole::Fill => &rig.fill,
             IosLightRigRole::Rim => &rig.rim,
+            IosLightRigRole::Back => &rig.back,
         };
         let effective = rig.enabled && spec.enabled;
         *vis = ios_light_vis(effective);
