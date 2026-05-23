@@ -22,7 +22,7 @@
 //! drives everything through `handle.with_write` — so the UI and the ECS
 //! system never race.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -54,6 +54,8 @@ pub struct AnimLayersUiState {
     pub new_set_name: String,
     /// Filter layer rows by label / slug / kind (case-insensitive substring).
     pub layer_filter: String,
+    /// When true, disabled layers are omitted from the scroll list (toggle with Show disabled).
+    pub hide_disabled_layers: bool,
     /// Collapsed group headers in the layer list (`group_key` strings).
     pub collapsed_groups: std::collections::HashSet<String>,
     /// Selected VRM expression preset for "Expression preset…" add choice.
@@ -101,6 +103,9 @@ const ALL_CHOICES: &[AddDriverChoice] = &[
 
 /// Fixed-height footer toolbar inside the Animation Layers panel.
 const ADD_BAR_HEIGHT: f32 = 34.0;
+/// Layer name field — fixed so transport / reorder buttons stay on one row.
+const LAYER_LABEL_WIDTH: f32 = 120.0;
+const LAYER_WEIGHT_SLIDER_WIDTH: f32 = 96.0;
 
 /// Layer-stack resources for the Animation Layers window.
 #[derive(SystemParam)]
@@ -152,17 +157,7 @@ pub fn draw_anim_layers_window(
                 params.library.as_deref(),
             );
             ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("Filter:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut state.anim_layers.layer_filter)
-                        .hint_text("bone name, label, kind…")
-                        .desired_width(ui.available_width().min(280.0)),
-                );
-                if ui.button("Clear").clicked() {
-                    state.anim_layers.layer_filter.clear();
-                }
-            });
+            layer_filter_bar(ui, &mut state.anim_layers, stack);
             ui.separator();
             egui::TopBottomPanel::bottom("anim_layers_inner_toolbar")
                 .exact_height(ADD_BAR_HEIGHT)
@@ -474,21 +469,319 @@ fn expression_presets(snapshot: Option<&BoneSnapshotHandle>) -> Vec<String> {
     names
 }
 
-fn layer_group_key(layer: &Layer) -> &'static str {
+/// Humanoid groupings for per-bone clip layers (matches Bones tab order).
+const ANIM_LAYER_BONE_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Torso",
+        &["hips", "spine", "chest", "upperChest", "neck", "head"],
+    ),
+    ("Face", &["jaw", "leftEye", "rightEye"]),
+    (
+        "Left Arm",
+        &["leftShoulder", "leftUpperArm", "leftLowerArm", "leftHand"],
+    ),
+    (
+        "Right Arm",
+        &[
+            "rightShoulder",
+            "rightUpperArm",
+            "rightLowerArm",
+            "rightHand",
+        ],
+    ),
+    (
+        "Left Leg",
+        &["leftUpperLeg", "leftLowerLeg", "leftFoot", "leftToes"],
+    ),
+    (
+        "Right Leg",
+        &["rightUpperLeg", "rightLowerLeg", "rightFoot", "rightToes"],
+    ),
+    (
+        "Left Hand Fingers",
+        &[
+            "leftThumbMetacarpal",
+            "leftThumbProximal",
+            "leftThumbDistal",
+            "leftIndexProximal",
+            "leftIndexIntermediate",
+            "leftIndexDistal",
+            "leftMiddleProximal",
+            "leftMiddleIntermediate",
+            "leftMiddleDistal",
+            "leftRingProximal",
+            "leftRingIntermediate",
+            "leftRingDistal",
+            "leftLittleProximal",
+            "leftLittleIntermediate",
+            "leftLittleDistal",
+        ],
+    ),
+    (
+        "Right Hand Fingers",
+        &[
+            "rightThumbMetacarpal",
+            "rightThumbProximal",
+            "rightThumbDistal",
+            "rightIndexProximal",
+            "rightIndexIntermediate",
+            "rightIndexDistal",
+            "rightMiddleProximal",
+            "rightMiddleIntermediate",
+            "rightMiddleDistal",
+            "rightRingProximal",
+            "rightRingIntermediate",
+            "rightRingDistal",
+            "rightLittleProximal",
+            "rightLittleIntermediate",
+            "rightLittleDistal",
+        ],
+    ),
+];
+
+const BONE_SUBGROUP_ORDER: &[&str] = &[
+    "Torso",
+    "Face",
+    "Left Arm",
+    "Right Arm",
+    "Left Leg",
+    "Right Leg",
+    "Left Hand Fingers",
+    "Right Hand Fingers",
+];
+
+fn layer_filter_bar(
+    ui: &mut egui::Ui,
+    ui_state: &mut AnimLayersUiState,
+    stack: &mut LayerStack,
+) {
+    ui.horizontal(|ui| {
+        ui.label("Filter:");
+        ui.add(
+            egui::TextEdit::singleline(&mut ui_state.layer_filter)
+                .hint_text("bone name, label, kind…")
+                .desired_width(ui.available_width().min(220.0)),
+        );
+        if ui.button("Clear").clicked() {
+            ui_state.layer_filter.clear();
+        }
+    });
+
+    let filter = ui_state.layer_filter.trim();
+    let filter_lc = filter.to_ascii_lowercase();
+    let matching_ids: Vec<u64> = stack
+        .layers
+        .iter()
+        .filter(|l| layer_matches_filter(l, filter))
+        .map(|l| l.id)
+        .collect();
+    if !filter_lc.is_empty() && !matching_ids.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(format!("{} matching", matching_ids.len()));
+            if ui
+                .button("Disable filtered")
+                .on_hover_text("disable every layer that matches the filter")
+                .clicked()
+            {
+                for layer in &mut stack.layers {
+                    if matching_ids.contains(&layer.id) {
+                        layer.enabled = false;
+                    }
+                }
+                ui_state.status = Some(format!("disabled {} layer(s)", matching_ids.len()));
+            }
+            if ui
+                .button("Enable filtered")
+                .on_hover_text("re-enable every layer that matches the filter")
+                .clicked()
+            {
+                for layer in &mut stack.layers {
+                    if matching_ids.contains(&layer.id) {
+                        layer.enabled = true;
+                    }
+                }
+                ui_state.status = Some(format!("enabled {} layer(s)", matching_ids.len()));
+            }
+            if ui
+                .button("Delete filtered")
+                .on_hover_text("permanently remove every layer that matches the filter")
+                .clicked()
+            {
+                let n = matching_ids.len();
+                for id in matching_ids {
+                    stack.remove_layer(id);
+                }
+                ui_state.status = Some(format!("deleted {n} layer(s)"));
+            }
+        });
+    }
+
+    let disabled_count = stack.layers.iter().filter(|l| !l.enabled).count();
+    ui.horizontal(|ui| {
+        if ui
+            .checkbox(&mut ui_state.hide_disabled_layers, "Hide disabled")
+            .on_hover_text("omit disabled layers from the list below")
+            .changed()
+            && ui_state.hide_disabled_layers
+        {
+            ui_state.status = Some(format!(
+                "hiding {disabled_count} disabled layer(s) — use Show disabled to reveal"
+            ));
+        }
+        if ui_state.hide_disabled_layers && disabled_count > 0 {
+            if ui
+                .button(format!("Show disabled ({disabled_count})"))
+                .on_hover_text("show disabled layers in the list again")
+                .clicked()
+            {
+                ui_state.hide_disabled_layers = false;
+                ui_state.status = Some(format!("showing {disabled_count} disabled layer(s)"));
+            }
+        }
+    });
+
+    let hide_disabled = ui_state.hide_disabled_layers;
+    let visible_ids: HashSet<u64> = stack
+        .layers
+        .iter()
+        .filter(|l| layer_visible_in_list(l, filter, hide_disabled))
+        .map(|l| l.id)
+        .collect();
+    ui.horizontal(|ui| {
+        if stack.solo_mode {
+            if ui
+                .button(format!("Unsolo ({})", stack.solo_only_ids.len()))
+                .on_hover_text("resume composing every enabled layer")
+                .clicked()
+            {
+                stack.solo_mode = false;
+                stack.solo_only_ids.clear();
+                ui_state.status = Some("solo off — all enabled layers compose again".into());
+            }
+            ui.colored_label(
+                egui::Color32::from_rgb(240, 200, 80),
+                egui::RichText::new("SOLO active").strong(),
+            );
+        } else if ui
+            .button(format!("Solo visible ({})", visible_ids.len()))
+            .on_hover_text(
+                "compose and advance playheads only for layers currently shown in the list",
+            )
+            .clicked()
+        {
+            if visible_ids.is_empty() {
+                ui_state.status = Some("nothing visible to solo".into());
+            } else {
+                stack.solo_mode = true;
+                stack.solo_only_ids = visible_ids;
+                ui_state.status = Some(format!(
+                    "solo: {} layer(s) — only visible layers are composed",
+                    stack.solo_only_ids.len()
+                ));
+            }
+        }
+    });
+}
+
+fn clip_label_parent(label: &str) -> String {
+    label
+        .split('·')
+        .next()
+        .unwrap_or(label)
+        .trim()
+        .to_string()
+}
+
+fn clip_label_suffix(label: &str) -> Option<&str> {
+    label.split('·').nth(1).map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn primary_bone_for_layer(layer: &Layer) -> String {
+    if let Some(bone) = layer.mask.include.first() {
+        return bone.clone();
+    }
+    clip_label_suffix(&layer.label)
+        .map(str::to_string)
+        .unwrap_or_else(|| "?".to_string())
+}
+
+fn def_bone_category_key(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    let rest = lower.strip_prefix("def-")?;
+    if rest.is_empty() {
+        return None;
+    }
+    let end = rest
+        .find(|c: char| c == '.' || c == '_')
+        .unwrap_or(rest.len());
+    let cat = rest[..end].trim_matches('-');
+    (!cat.is_empty()).then(|| cat.to_string())
+}
+
+fn humanoid_bone_group(bone: &str) -> Option<&'static str> {
+    ANIM_LAYER_BONE_GROUPS
+        .iter()
+        .find(|(_, bones)| bones.contains(&bone))
+        .map(|(name, _)| *name)
+}
+
+fn bone_clip_list_group(bone: &str) -> String {
+    if let Some(group) = humanoid_bone_group(bone) {
+        return format!("Bone · {group}");
+    }
+    if let Some(cat) = def_bone_category_key(bone) {
+        return format!("Bone · DEF · {cat}");
+    }
+    let prefix = crate::plugins::spring_preset::bone_name_prefix(bone);
+    format!("Bone · {prefix}")
+}
+
+fn group_sort_key(group: &str) -> (u8, String) {
+    match group {
+        "Procedural" => (0, String::new()),
+        "Pose holds" => (1, String::new()),
+        "Expression presets" => (2, String::new()),
+        s if s.starts_with("Bone · DEF · ") => (3, format!("1{}", &s[13..])),
+        s if s.starts_with("Bone · ") => {
+            let tail = &s[7..];
+            let rank = BONE_SUBGROUP_ORDER
+                .iter()
+                .position(|g| *g == tail)
+                .unwrap_or(BONE_SUBGROUP_ORDER.len());
+            (3, format!("0{rank:02}{tail}"))
+        }
+        s if s.starts_with("Morph · ") => (4, s[8..].to_string()),
+        s if s.starts_with("Clip · ") => (5, s[7..].to_string()),
+        _ => (9, group.to_string()),
+    }
+}
+
+fn layer_list_group_key(layer: &Layer) -> String {
     match layer.driver.kind_label() {
         "breathing" | "auto-blink" | "weight-shift" | "finger-fidget" | "toe-fidget" => {
-            "Procedural"
+            "Procedural".to_string()
         }
-        "expression-hold" => "Expression presets",
-        "pose-hold" => "Pose holds",
-        "clip" if layer.slug.starts_with("bone-") => "Bone clips",
-        "clip" if layer.slug.starts_with("expr-") => "Expression clips",
+        "expression-hold" => "Expression presets".to_string(),
+        "pose-hold" => "Pose holds".to_string(),
+        "clip" if layer.slug.starts_with("bone-") => {
+            bone_clip_list_group(&primary_bone_for_layer(layer))
+        }
+        "clip" if layer.slug.starts_with("expr-") => {
+            format!("Morph · {}", clip_label_parent(&layer.label))
+        }
         "clip" if layer.slug == "expressions" || layer.label.contains("expressions") => {
-            "Expression clips"
+            format!("Morph · {}", clip_label_parent(&layer.label))
         }
-        "clip" => "Clips",
-        _ => "Other",
+        "clip" => format!("Clip · {}", clip_label_parent(&layer.label)),
+        _ => "Other".to_string(),
     }
+}
+
+fn layer_visible_in_list(layer: &Layer, filter: &str, hide_disabled: bool) -> bool {
+    if hide_disabled && !layer.enabled {
+        return false;
+    }
+    layer_matches_filter(layer, filter)
 }
 
 fn layer_matches_filter(layer: &Layer, filter: &str) -> bool {
@@ -496,10 +789,11 @@ fn layer_matches_filter(layer: &Layer, filter: &str) -> bool {
     if f.is_empty() {
         return true;
     }
+    let group = layer_list_group_key(layer);
     layer.label.to_ascii_lowercase().contains(&f)
         || layer.slug.to_ascii_lowercase().contains(&f)
         || layer.driver.kind_label().contains(&f)
-        || layer_group_key(layer).to_ascii_lowercase().contains(&f)
+        || group.to_ascii_lowercase().contains(&f)
         || layer.mask.include.iter().any(|b| b.to_ascii_lowercase().contains(&f))
 }
 
@@ -514,17 +808,19 @@ fn layer_list(
     let mut to_move: Option<(usize, isize)> = None;
 
     let filter = ui_state.layer_filter.clone();
-    let mut groups: std::collections::BTreeMap<&'static str, Vec<(usize, u64)>> =
-        std::collections::BTreeMap::new();
+    let hide_disabled = ui_state.hide_disabled_layers;
+    let mut groups: HashMap<String, Vec<(usize, u64)>> = HashMap::new();
     for (idx, layer) in stack.layers.iter().enumerate() {
-        if !layer_matches_filter(layer, &filter) {
+        if !layer_visible_in_list(layer, &filter, hide_disabled) {
             continue;
         }
         groups
-            .entry(layer_group_key(layer))
+            .entry(layer_list_group_key(layer))
             .or_default()
             .push((idx, layer.id));
     }
+    let mut group_keys: Vec<String> = groups.keys().cloned().collect();
+    group_keys.sort_by(|a, b| group_sort_key(a).cmp(&group_sort_key(b)));
 
     egui::ScrollArea::vertical()
         .id_salt("anim_layers_list")
@@ -538,12 +834,20 @@ fn layer_list(
                 });
                 return;
             }
-            if groups.is_empty() {
-                ui.label(egui::RichText::new("No layers match filter").italics());
+            if group_keys.is_empty() {
+                if hide_disabled && stack.layers.iter().any(|l| !l.enabled) {
+                    ui.label(egui::RichText::new("All visible layers are hidden (disabled)").italics());
+                    ui.small("Click Show disabled above to reveal them.");
+                } else {
+                    ui.label(egui::RichText::new("No layers match filter").italics());
+                }
                 return;
             }
-            for (group, entries) in groups {
-                let mut open = !ui_state.collapsed_groups.contains(group);
+            for group in group_keys {
+                let Some(entries) = groups.get(&group) else {
+                    continue;
+                };
+                let mut open = !ui_state.collapsed_groups.contains(&group);
                 ui.horizontal(|ui| {
                     if ui
                         .small_button(if open { "▼" } else { "▶" })
@@ -552,27 +856,29 @@ fn layer_list(
                     {
                         open = !open;
                     }
-                    ui.label(egui::RichText::new(format!("{group} ({})", entries.len())).strong());
+                    ui.label(
+                        egui::RichText::new(format!("{group} ({})", entries.len())).strong(),
+                    );
                 });
                 if open {
-                    ui_state.collapsed_groups.remove(group);
+                    ui_state.collapsed_groups.remove(&group);
                     ui.indent(format!("grp_{group}"), |ui| {
-                        for (idx, id) in &entries {
-                            let Some(layer) = stack.layers.iter_mut().find(|l| l.id == *id) else {
+                        for &(idx, id) in entries {
+                            let Some(layer) = stack.layers.iter_mut().find(|l| l.id == id) else {
                                 continue;
                             };
                             let action =
-                                layer_row(ui, ui_state, *idx, layer, bone_names, hierarchy);
+                                layer_row(ui, ui_state, idx, layer, bone_names, hierarchy);
                             match action {
                                 Some(LayerAction::Delete) => to_remove = Some(layer.id),
-                                Some(LayerAction::MoveUp) => to_move = Some((*idx, -1)),
-                                Some(LayerAction::MoveDown) => to_move = Some((*idx, 1)),
+                                Some(LayerAction::MoveUp) => to_move = Some((idx, -1)),
+                                Some(LayerAction::MoveDown) => to_move = Some((idx, 1)),
                                 None => {}
                             }
                         }
                     });
                 } else {
-                    ui_state.collapsed_groups.insert(group.to_string());
+                    ui_state.collapsed_groups.insert(group);
                 }
             }
         });
@@ -625,13 +931,15 @@ fn layer_row(
             ui.horizontal(|ui| {
                 ui.checkbox(&mut layer.enabled, "");
                 ui.colored_label(header_color, format!("[{}]", layer.driver.kind_label()));
-                let label_w = (ui.available_width() * 0.55).clamp(220.0, 520.0);
                 ui.add(
-                    egui::TextEdit::singleline(&mut layer.label).desired_width(label_w),
+                    egui::TextEdit::singleline(&mut layer.label)
+                        .desired_width(LAYER_LABEL_WIDTH)
+                        .min_size(egui::vec2(LAYER_LABEL_WIDTH, 0.0)),
                 );
                 ui.separator();
                 ui.label("wgt");
-                ui.add(
+                ui.add_sized(
+                    [LAYER_WEIGHT_SLIDER_WIDTH, ui.spacing().interact_size.y],
                     egui::Slider::new(&mut layer.weight, 0.0..=1.0)
                         .fixed_decimals(2)
                         .show_value(true),
@@ -644,29 +952,27 @@ fn layer_row(
                 if ui.button("Rewind").on_hover_text("rewind").clicked() {
                     layer.time = 0.0;
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Del").on_hover_text("delete layer").clicked() {
-                        action = Some(LayerAction::Delete);
+                if ui.button("^").on_hover_text("move up").clicked() {
+                    action = Some(LayerAction::MoveUp);
+                }
+                if ui.button("v").on_hover_text("move down").clicked() {
+                    action = Some(LayerAction::MoveDown);
+                }
+                let expand_icon = if expanded { "-" } else { "+" };
+                if ui
+                    .button(expand_icon)
+                    .on_hover_text("expand / collapse driver params")
+                    .clicked()
+                {
+                    if expanded {
+                        ui_state.expanded.remove(&layer.id);
+                    } else {
+                        ui_state.expanded.insert(layer.id);
                     }
-                    if ui.button("v").on_hover_text("move down").clicked() {
-                        action = Some(LayerAction::MoveDown);
-                    }
-                    if ui.button("^").on_hover_text("move up").clicked() {
-                        action = Some(LayerAction::MoveUp);
-                    }
-                    let expand_icon = if expanded { "-" } else { "+" };
-                    if ui
-                        .button(expand_icon)
-                        .on_hover_text("expand / collapse driver params")
-                        .clicked()
-                    {
-                        if expanded {
-                            ui_state.expanded.remove(&layer.id);
-                        } else {
-                            ui_state.expanded.insert(layer.id);
-                        }
-                    }
-                });
+                }
+                if ui.button("Del").on_hover_text("delete layer").clicked() {
+                    action = Some(LayerAction::Delete);
+                }
             });
 
             // Row 2: timeline
@@ -770,6 +1076,22 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             if let Some(name) = remove {
                 expressions.remove(&name);
             }
+            ui.horizontal(|ui| {
+                ui.label("duration (s)");
+                let mut dur = layer.duration.unwrap_or(2.0);
+                if ui
+                    .add(egui::Slider::new(&mut dur, 0.1..=12.0).fixed_decimals(2))
+                    .changed()
+                {
+                    layer.duration = Some(dur);
+                }
+                ui.label("speed");
+                ui.add(egui::Slider::new(&mut layer.speed, 0.0..=2.5).fixed_decimals(2));
+                ui.checkbox(&mut layer.looping, "loop");
+            });
+            ui.small(
+                "Preset weight follows the layer timeline (ramp or triangle pulse when looping).",
+            );
         }
         DriverKind::Breathing {
             rate_hz,
@@ -1244,13 +1566,17 @@ fn try_build_layer(
             let slug = format!("expr-{}", slugify(&preset));
             let mut expressions = HashMap::new();
             expressions.insert(preset.clone(), 1.0);
-            Layer::new(
+            let mut layer = Layer::new(
                 slug,
                 preset.clone(),
                 DriverKind::ExpressionHold { expressions },
             )
             .blend(BlendMode::Override)
-            .weight(1.0)
+            .weight(1.0);
+            layer.duration = Some(2.0);
+            layer.looping = true;
+            layer.playing = true;
+            layer
         }
     };
     // Mirror the per-kind blend default into a new struct with a fresh mask.

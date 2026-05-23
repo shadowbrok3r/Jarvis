@@ -59,7 +59,7 @@
 //! [`crate::plugins::pose_driver::normalized_from_local`] using the cached
 //! rest-local and rest-world snapshot so MCP / UI reset and layers agree.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -186,6 +186,12 @@ pub struct LayerStack {
     /// Monotonic seconds counter — used as the `t` input to drivers so
     /// pausing the stack doesn't rewind phase.
     pub clock: f32,
+    /// When true, only layers listed in [`Self::solo_only_ids`] are sampled
+    /// and advanced — used by the Animation Layers UI "Solo visible" control.
+    pub solo_mode: bool,
+    /// Layer ids included in solo playback (captured from the current filter
+    /// + visibility when solo is toggled on).
+    pub solo_only_ids: HashSet<u64>,
     /// Next id issued by `add_layer`; monotonically increasing so deleting
     /// + re-adding a layer gives it a fresh id (egui needs stable widget
     /// ids).
@@ -547,7 +553,7 @@ impl DriverKind {
                 Some(animation.frames.len() as f32 / fps)
             }
             Self::PoseHold { .. } => None,
-            Self::ExpressionHold { .. } => None,
+            Self::ExpressionHold { .. } => Some(2.0),
             _ => None,
         }
     }
@@ -698,8 +704,9 @@ fn advance_and_apply_layers(
             return;
         }
 
+        let solo = stack.solo_mode.then_some(stack.solo_only_ids.clone());
         let (accumulator, expressions) =
-            compose_layers(&mut stack.layers, &snap, hierarchy, dt);
+            compose_layers(&mut stack.layers, &snap, hierarchy, dt, solo.as_ref());
         expressions_out = expressions;
 
         // Only emit bones whose composed rotation differs meaningfully
@@ -748,8 +755,17 @@ fn advance_and_apply_layers(
 }
 
 /// Advance playheads for every layer (used by live tick and offline bake).
-pub fn advance_layer_playheads(layers: &mut [Layer], dt: f32) {
+pub fn advance_layer_playheads(
+    layers: &mut [Layer],
+    dt: f32,
+    solo_only_ids: Option<&HashSet<u64>>,
+) {
     for layer in layers {
+        if let Some(ids) = solo_only_ids {
+            if !ids.contains(&layer.id) {
+                continue;
+            }
+        }
         if !layer.playing {
             continue;
         }
@@ -775,16 +791,22 @@ pub fn compose_layers(
     snap: &RestPoseSnapshot,
     hierarchy: Option<&BoneHierarchy>,
     dt: f32,
+    solo_only_ids: Option<&HashSet<u64>>,
 ) -> (HashMap<String, Quat>, HashMap<String, f32>) {
     let mut accumulator: HashMap<String, Quat> = snap.rest.clone();
     let mut expressions_out: HashMap<String, f32> = HashMap::new();
 
     for layer in &mut *layers {
+        if let Some(ids) = solo_only_ids {
+            if !ids.contains(&layer.id) {
+                continue;
+            }
+        }
         if !layer.enabled || layer.weight <= 0.0 {
             continue;
         }
 
-        let sample = sample_driver(&mut layer.driver, layer.time, dt, snap);
+        let sample = sample_layer(layer, snap, dt);
         let weight = layer.weight.clamp(0.0, 1.0);
 
         for (bone, quat) in sample.bones {
@@ -804,13 +826,17 @@ pub fn compose_layers(
         }
 
         for (name, weight_in) in sample.expressions {
-            let entry = expressions_out.entry(name).or_insert(0.0);
-            *entry = (*entry + weight_in * weight).clamp(0.0, 1.0);
+            let current = expressions_out.get(&name).copied().unwrap_or(0.0);
+            let folded = match layer.blend_mode {
+                BlendMode::Override => current + (weight_in - current) * weight,
+                BlendMode::RestRelative => (current + weight_in * weight).clamp(0.0, 1.0),
+            };
+            expressions_out.insert(name, folded.clamp(0.0, 1.0));
         }
     }
 
     if dt > 0.0 {
-        advance_layer_playheads(layers, dt);
+        advance_layer_playheads(layers, dt, solo_only_ids);
     }
 
     (accumulator, expressions_out)
@@ -1106,7 +1132,7 @@ pub fn bake_layer_stack_to_animation(
 
     for _ in 0..frame_count {
         let (accumulator, expressions) =
-            compose_layers(&mut work.layers, snap, hierarchy, dt);
+            compose_layers(&mut work.layers, snap, hierarchy, dt, None);
 
         let mut bones = HashMap::with_capacity(accumulator.len());
         for (name, q_raw) in &accumulator {
@@ -1161,6 +1187,32 @@ fn quat_close(a: Quat, b: Quat, eps: f32) -> bool {
 // ============================================================================
 // Per-driver sampling
 // ============================================================================
+
+/// 0→1 ramp (one-shot) or triangle pulse (looping) for expression-hold layers.
+fn expression_hold_envelope(t: f32, duration: Option<f32>, looping: bool) -> f32 {
+    let d = duration.unwrap_or(2.0).max(0.01);
+    if looping {
+        let phase = t.rem_euclid(d) / d;
+        if phase <= 0.5 {
+            phase * 2.0
+        } else {
+            (1.0 - phase) * 2.0
+        }
+    } else {
+        (t / d).clamp(0.0, 1.0)
+    }
+}
+
+fn sample_layer(layer: &mut Layer, snap: &RestPoseSnapshot, dt: f32) -> DriverSample {
+    let mut sample = sample_driver(&mut layer.driver, layer.time, dt, snap);
+    if matches!(layer.driver, DriverKind::ExpressionHold { .. }) {
+        let env = expression_hold_envelope(layer.time, layer.duration, layer.looping);
+        for w in sample.expressions.values_mut() {
+            *w *= env;
+        }
+    }
+    sample
+}
 
 fn sample_driver(
     driver: &mut DriverKind,
@@ -1248,15 +1300,63 @@ fn sample_clip(animation: &AnimationFile, t: f32, snap: &RestPoseSnapshot) -> Dr
     }
     let fps = animation.fps.max(1.0) as f32;
     let total = animation.frames.len();
-    let idx = ((t * fps) as usize).min(total.saturating_sub(1));
-    let frame = &animation.frames[idx];
-    let mut bones = HashMap::with_capacity(frame.bones.len());
-    for (name, r) in &frame.bones {
-        let [x, y, z, w] = r.rotation;
-        let normalized = Quat::from_xyzw(x, y, z, w);
-        bones.insert(name.clone(), convert_normalized_to_local(name, normalized, snap));
+    if total == 1 {
+        let frame = &animation.frames[0];
+        let mut bones = HashMap::with_capacity(frame.bones.len());
+        for (name, r) in &frame.bones {
+            let [x, y, z, w] = r.rotation;
+            let normalized = Quat::from_xyzw(x, y, z, w);
+            bones.insert(name.clone(), convert_normalized_to_local(name, normalized, snap));
+        }
+        return DriverSample {
+            bones,
+            expressions: frame.expressions.clone(),
+        };
     }
-    let expressions = frame.expressions.clone();
+    let frame_f = (t * fps).clamp(0.0, (total - 1) as f32);
+    let idx0 = frame_f.floor() as usize;
+    let idx1 = (idx0 + 1).min(total - 1);
+    let frac = frame_f.fract();
+    let a = &animation.frames[idx0];
+    let b = &animation.frames[idx1];
+
+    let mut bone_names: std::collections::BTreeSet<&String> = a.bones.keys().collect();
+    bone_names.extend(b.bones.keys());
+    let mut bones = HashMap::with_capacity(bone_names.len());
+    for name in bone_names {
+        let qa = a.bones.get(name).map(|r| {
+            Quat::from_xyzw(r.rotation[0], r.rotation[1], r.rotation[2], r.rotation[3])
+        });
+        let qb = b.bones.get(name).map(|r| {
+            Quat::from_xyzw(r.rotation[0], r.rotation[1], r.rotation[2], r.rotation[3])
+        });
+        let normalized = match (qa, qb) {
+            (Some(qa), Some(qb)) => {
+                if frac > 0.0 {
+                    qa.slerp(qb, frac)
+                } else {
+                    qa
+                }
+            }
+            (Some(qa), None) => qa,
+            (None, Some(qb)) => qb,
+            (None, None) => continue,
+        };
+        bones.insert(
+            name.clone(),
+            convert_normalized_to_local(name, normalized, snap),
+        );
+    }
+
+    let mut expr_names: std::collections::BTreeSet<&String> = a.expressions.keys().collect();
+    expr_names.extend(b.expressions.keys());
+    let mut expressions = HashMap::with_capacity(expr_names.len());
+    for name in expr_names {
+        let wa = a.expressions.get(name).copied().unwrap_or(0.0);
+        let wb = b.expressions.get(name).copied().unwrap_or(wa);
+        expressions.insert(name.clone(), wa + (wb - wa) * frac);
+    }
+
     DriverSample { bones, expressions }
 }
 
