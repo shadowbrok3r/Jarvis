@@ -73,6 +73,8 @@ pub struct MaterialDraft {
     pub override_outline_color: bool,
     pub outline_lighting_mix_factor: f32,
     pub override_outline_lighting_mix_factor: bool,
+    pub gi_equalization_factor: f32,
+    pub override_gi_equalization_factor: bool,
 }
 
 impl MaterialDraft {
@@ -132,6 +134,8 @@ impl MaterialDraft {
             override_outline_color: false,
             outline_lighting_mix_factor: m.outline.lighting_mix_factor,
             override_outline_lighting_mix_factor: false,
+            gi_equalization_factor: m.gi_equalization_factor,
+            override_gi_equalization_factor: false,
         };
         if let Some(e) = existing {
             if let Some(v) = e.base_color {
@@ -187,8 +191,98 @@ impl MaterialDraft {
                 d.outline_lighting_mix_factor = v;
                 d.override_outline_lighting_mix_factor = true;
             }
+            if let Some(v) = e.gi_equalization_factor {
+                d.gi_equalization_factor = v;
+                d.override_gi_equalization_factor = true;
+            }
         }
         d
+    }
+
+    /// After widgets render, compare to a pre-edit snapshot. Any field whose
+    /// **value** changed (regardless of its toggle state) auto-ticks its
+    /// `override_*` flag so Save persists what the user actually moved. The
+    /// per-field toggle still lets the user manually opt out by un-checking it
+    /// after editing, or by clicking **Clear override** at the bottom.
+    fn diff_and_tick(&mut self, prev: &MaterialDraft) {
+        fn changed_vec(a: [f32; 4], b: [f32; 4]) -> bool {
+            (a[0] - b[0]).abs() > f32::EPSILON
+                || (a[1] - b[1]).abs() > f32::EPSILON
+                || (a[2] - b[2]).abs() > f32::EPSILON
+                || (a[3] - b[3]).abs() > f32::EPSILON
+        }
+        fn changed_f32(a: f32, b: f32) -> bool {
+            (a - b).abs() > f32::EPSILON
+        }
+        if changed_vec(self.base_color, prev.base_color) {
+            self.override_base_color = true;
+        }
+        if changed_vec(self.emissive, prev.emissive) {
+            self.override_emissive = true;
+        }
+        if changed_vec(self.shade_color, prev.shade_color) {
+            self.override_shade_color = true;
+        }
+        if changed_f32(self.shading_shift_factor, prev.shading_shift_factor) {
+            self.override_shading_shift_factor = true;
+        }
+        if changed_f32(self.toony_factor, prev.toony_factor) {
+            self.override_toony_factor = true;
+        }
+        if changed_vec(self.rim_color, prev.rim_color) {
+            self.override_rim_color = true;
+        }
+        if changed_f32(self.rim_fresnel_power, prev.rim_fresnel_power) {
+            self.override_rim_fresnel_power = true;
+        }
+        if changed_f32(self.rim_lift_factor, prev.rim_lift_factor) {
+            self.override_rim_lift_factor = true;
+        }
+        if changed_f32(self.rim_mix_factor, prev.rim_mix_factor) {
+            self.override_rim_mix_factor = true;
+        }
+        if self.outline_mode_world != prev.outline_mode_world {
+            self.override_outline_mode = true;
+        }
+        if changed_f32(self.outline_width_factor, prev.outline_width_factor) {
+            self.override_outline_width_factor = true;
+        }
+        if changed_vec(self.outline_color, prev.outline_color) {
+            self.override_outline_color = true;
+        }
+        if changed_f32(
+            self.outline_lighting_mix_factor,
+            prev.outline_lighting_mix_factor,
+        ) {
+            self.override_outline_lighting_mix_factor = true;
+        }
+        if changed_f32(self.gi_equalization_factor, prev.gi_equalization_factor) {
+            self.override_gi_equalization_factor = true;
+        }
+    }
+
+    /// Number of `override_*` flags currently true — surfaced above the Save
+    /// button so the user can see how many fields will actually be written.
+    fn override_count(&self) -> usize {
+        [
+            self.override_base_color,
+            self.override_emissive,
+            self.override_shade_color,
+            self.override_shading_shift_factor,
+            self.override_toony_factor,
+            self.override_rim_color,
+            self.override_rim_fresnel_power,
+            self.override_rim_lift_factor,
+            self.override_rim_mix_factor,
+            self.override_outline_mode,
+            self.override_outline_width_factor,
+            self.override_outline_color,
+            self.override_outline_lighting_mix_factor,
+            self.override_gi_equalization_factor,
+        ]
+        .into_iter()
+        .filter(|b| *b)
+        .count()
     }
 
     fn to_entry(&self) -> MToonOverrideEntry {
@@ -222,6 +316,9 @@ impl MaterialDraft {
             outline_lighting_mix_factor: self
                 .override_outline_lighting_mix_factor
                 .then_some(self.outline_lighting_mix_factor),
+            gi_equalization_factor: self
+                .override_gi_equalization_factor
+                .then_some(self.gi_equalization_factor),
         }
     }
 }
@@ -722,73 +819,72 @@ fn draw_mtoon_editor(
         return;
     };
 
+    // Snapshot the draft *before* the widgets render this frame. After widgets,
+    // `diff_and_tick` auto-enables `override_*` for any field the user moved,
+    // so dragging a slider is enough — no need to tick the checkbox manually.
+    let prev_draft = draft.clone();
+
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_base_color, "base_color");
-        ui.add_enabled_ui(draft.override_base_color, |ui| {
-            rgba_row(ui, &mut draft.base_color)
-        });
+        rgba_row(ui, &mut draft.base_color);
     });
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_emissive, "emissive");
-        ui.add_enabled_ui(draft.override_emissive, |ui| {
-            rgba_row(ui, &mut draft.emissive)
-        });
+        rgba_row(ui, &mut draft.emissive);
     });
 
     ui.separator();
     ui.label("Shade");
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_shade_color, "shade_color");
-        ui.add_enabled_ui(draft.override_shade_color, |ui| {
-            rgba_row(ui, &mut draft.shade_color)
-        });
+        rgba_row(ui, &mut draft.shade_color);
     });
     ui.horizontal(|ui| {
         ui.checkbox(
             &mut draft.override_shading_shift_factor,
             "shading_shift_factor",
         );
-        ui.add_enabled(
-            draft.override_shading_shift_factor,
-            egui::Slider::new(&mut draft.shading_shift_factor, -1.0..=1.0),
-        );
+        ui.add(egui::Slider::new(
+            &mut draft.shading_shift_factor,
+            -1.0..=1.0,
+        ));
     });
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_toony_factor, "toony_factor");
-        ui.add_enabled(
-            draft.override_toony_factor,
-            egui::Slider::new(&mut draft.toony_factor, 0.0..=1.0),
+        ui.add(egui::Slider::new(&mut draft.toony_factor, 0.0..=1.0));
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(
+            &mut draft.override_gi_equalization_factor,
+            "gi_equalization_factor",
+        )
+        .on_hover_text(
+            "Per-material IBL strength. Lower toward 0 on saturated/dark cloth so the \
+             environment map can't lift it toward gray; 1.0 leaves it untouched.",
         );
+        ui.add(egui::Slider::new(
+            &mut draft.gi_equalization_factor,
+            0.0..=1.0,
+        ));
     });
 
     ui.separator();
     ui.label("Rim");
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_rim_color, "rim_color");
-        ui.add_enabled_ui(draft.override_rim_color, |ui| {
-            rgba_row(ui, &mut draft.rim_color)
-        });
+        rgba_row(ui, &mut draft.rim_color);
     });
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_rim_fresnel_power, "rim_fresnel_power");
-        ui.add_enabled(
-            draft.override_rim_fresnel_power,
-            egui::Slider::new(&mut draft.rim_fresnel_power, 0.0..=16.0),
-        );
+        ui.add(egui::Slider::new(&mut draft.rim_fresnel_power, 0.0..=16.0));
     });
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_rim_lift_factor, "rim_lift_factor");
-        ui.add_enabled(
-            draft.override_rim_lift_factor,
-            egui::Slider::new(&mut draft.rim_lift_factor, 0.0..=1.0),
-        );
+        ui.add(egui::Slider::new(&mut draft.rim_lift_factor, 0.0..=1.0));
     });
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_rim_mix_factor, "rim_mix_factor");
-        ui.add_enabled(
-            draft.override_rim_mix_factor,
-            egui::Slider::new(&mut draft.rim_mix_factor, 0.0..=1.0),
-        );
+        ui.add(egui::Slider::new(&mut draft.rim_mix_factor, 0.0..=1.0));
     });
 
     ui.separator();
@@ -796,44 +892,40 @@ fn draw_mtoon_editor(
         .on_hover_text("Try worldCoordinates with width around 0.002–0.01 depending on scale.");
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_outline_mode, "outline_mode");
-        ui.add_enabled(
-            draft.override_outline_mode,
-            egui::Checkbox::new(
-                &mut draft.outline_mode_world,
-                "worldCoordinates (off = None)",
-            ),
-        );
+        ui.add(egui::Checkbox::new(
+            &mut draft.outline_mode_world,
+            "worldCoordinates (off = None)",
+        ));
     });
     ui.horizontal(|ui| {
         ui.checkbox(
             &mut draft.override_outline_width_factor,
             "outline_width_factor",
         );
-        let slider_enabled = draft.override_outline_width_factor
-            && (!draft.override_outline_mode || draft.outline_mode_world);
-        ui.add_enabled(
-            slider_enabled,
-            egui::Slider::new(&mut draft.outline_width_factor, 0.0..=0.1),
-        );
+        ui.add(egui::Slider::new(&mut draft.outline_width_factor, 0.0..=0.1));
     });
     ui.horizontal(|ui| {
         ui.checkbox(&mut draft.override_outline_color, "outline_color");
-        ui.add_enabled_ui(draft.override_outline_color, |ui| {
-            rgba_row(ui, &mut draft.outline_color)
-        });
+        rgba_row(ui, &mut draft.outline_color);
     });
     ui.horizontal(|ui| {
         ui.checkbox(
             &mut draft.override_outline_lighting_mix_factor,
             "outline_lighting_mix_factor",
         );
-        ui.add_enabled(
-            draft.override_outline_lighting_mix_factor,
-            egui::Slider::new(&mut draft.outline_lighting_mix_factor, 0.0..=1.0),
-        );
+        ui.add(egui::Slider::new(
+            &mut draft.outline_lighting_mix_factor,
+            0.0..=1.0,
+        ));
     });
 
-    ui.small("Live preview; save to persist.");
+    draft.diff_and_tick(&prev_draft);
+
+    ui.small("Live preview; save to persist. Editing a value auto-ticks its override.");
+    ui.label(format!(
+        "{} field(s) will be written on save.",
+        draft.override_count(),
+    ));
     ui.separator();
     ui.horizontal(|ui| {
         if ui.button("Save to overrides").clicked() {

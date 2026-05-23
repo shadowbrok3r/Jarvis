@@ -287,6 +287,11 @@ pub struct SaveCurrentPoseArgs {
     /// arms-down rest) without freezing the legs / hips.
     #[serde(default)]
     pub bones: Option<Vec<String>>,
+    /// Capture live VRM expression weights (any preset with an active override:
+    /// e.g. `happy`, `aa`, `blink`) alongside the bones. Defaults to **true** so
+    /// pose snapshots round-trip the face. Set to `false` to save bones only,
+    /// e.g. when authoring a body-only foundation pose that should compose with
+    /// whatever expression is active at playback time.
     #[serde(default)]
     pub include_expressions: Option<bool>,
 }
@@ -1166,15 +1171,18 @@ impl JarvisMcpServer {
                     .to_string(),
             );
         }
-        let _include_expressions = args.include_expressions.unwrap_or(false);
+        let include_expressions = args.include_expressions.unwrap_or(true);
+        let expressions = if include_expressions {
+            snap.expressions.clone()
+        } else {
+            HashMap::new()
+        };
         let pose = PoseFile {
             name: args.name.clone(),
             description: args.description.unwrap_or_default(),
             category: args.category.unwrap_or_else(|| "general".into()),
             bones,
-            // BoneSnapshot does not currently track expression state; reserve
-            // the API surface so a future snapshot upgrade can fill this in.
-            expressions: HashMap::new(),
+            expressions,
             transition_duration: 0.4,
         };
         if let Err(e) = self.library.save_pose(&pose) {

@@ -1170,7 +1170,7 @@ fn library_tab(
                     description: String::new(),
                     category: state.snapshot_category.trim().to_string(),
                     bones,
-                    expressions: HashMap::new(),
+                    expressions: snap.expressions.clone(),
                     transition_duration: 0.4,
                 };
                 match library.library.save_pose(&pose) {

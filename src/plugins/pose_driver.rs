@@ -267,6 +267,13 @@ pub struct BoneSnapshot {
     /// `bevy_vrm1::ExpressionEntityMap`. Empty until the rig finishes expression init.
     #[serde(default)]
     pub expression_presets: Vec<String>,
+    /// Live expression weights, keyed by VRM preset / custom name. Only
+    /// expressions with an active `ExpressionOverride` appear here — natural
+    /// animation-driven weights aren't captured, only what the user (or MCP /
+    /// chat) is actively driving. Used by pose save so a saved pose round-trips
+    /// the face state, not just the skeleton.
+    #[serde(default)]
+    pub expressions: HashMap<String, f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1447,12 +1454,33 @@ fn collect_expression_preset_names(world: &mut World) -> Vec<String> {
     names
 }
 
+/// Read every expression entity's [`ExpressionOverride`] (if present) into a
+/// `name → weight` map. Only actively-overridden expressions appear; expressions
+/// driven purely by VRMA animation have no override component and are skipped.
+fn collect_expression_overrides(world: &mut World) -> HashMap<String, f32> {
+    let pairs: Vec<(String, Entity)> = {
+        let mut q = world.query_filtered::<&ExpressionEntityMap, With<Vrm>>();
+        q.iter(world)
+            .flat_map(|map| map.iter().map(|(k, &e)| (k.0.clone(), e)))
+            .collect()
+    };
+    let mut out = HashMap::new();
+    for (name, entity) in pairs {
+        if let Some(ovr) = world.get::<ExpressionOverride>(entity) {
+            out.insert(name, ovr.0);
+        }
+    }
+    out
+}
+
 fn publish_bone_snapshot(world: &mut World) {
     let handle = world.resource::<BoneSnapshotHandle>().clone();
     let preset_names = collect_expression_preset_names(world);
+    let expression_weights = collect_expression_overrides(world);
     {
         let mut w = handle.0.write();
         w.expression_presets.clone_from(&preset_names);
+        w.expressions.clone_from(&expression_weights);
     }
 
     let Some(index) = world.get_resource::<BoneEntityIndex>() else {
@@ -1463,6 +1491,7 @@ fn publish_bone_snapshot(world: &mut World) {
     }
     let mut snap = BoneSnapshot::default();
     snap.expression_presets = preset_names;
+    snap.expressions = expression_weights;
     // Humanoid keys: normalized-humanoid space (Airi / pose-controller).
     for (name, &e) in &index.by_name {
         let Some(tf) = world.get::<Transform>(e) else {

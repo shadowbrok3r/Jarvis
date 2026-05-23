@@ -94,6 +94,10 @@ pub struct MToonOverrideEntry {
     pub outline_width_factor: Option<f32>,
     pub outline_color: Option<[f32; 4]>,
     pub outline_lighting_mix_factor: Option<f32>,
+    /// Per-material IBL strength multiplier. 0.0 silences cubemap contribution
+    /// on this material (use on saturated dark cloth so a bright environment
+    /// can't lift it toward gray); 1.0 leaves the VRM-baked value untouched.
+    pub gi_equalization_factor: Option<f32>,
 }
 
 /// Cloneable wrapper around the in-memory override table + the sidecar path.
@@ -284,6 +288,9 @@ pub fn apply_override_entry(material: &mut MToonMaterial, entry: &MToonOverrideE
     }
     if let Some([r, g, b, a]) = entry.emissive {
         material.emissive = LinearRgba::new(r, g, b, a);
+    }
+    if let Some(v) = entry.gi_equalization_factor {
+        material.gi_equalization_factor = v;
     }
     apply_shade(&mut material.shade, entry);
     apply_rim(&mut material.rim_lighting, entry);
