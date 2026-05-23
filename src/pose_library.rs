@@ -300,6 +300,29 @@ impl PoseLibrary {
         Ok(out)
     }
 
+    pub fn save_animation(&self, anim: &AnimationFile) -> Result<PathBuf, LibraryError> {
+        fs::create_dir_all(&self.animations_dir)?;
+        let path = self
+            .animations_dir
+            .join(format!("{}.json", slugify(&anim.name)));
+        let body = serde_json::to_string_pretty(anim)?;
+        fs::write(&path, body)?;
+        Ok(path)
+    }
+
+    /// Overwrite an existing animation file by library filename (e.g. `wave.json`).
+    pub fn write_animation_at(
+        &self,
+        filename: &str,
+        anim: &AnimationFile,
+    ) -> Result<PathBuf, LibraryError> {
+        fs::create_dir_all(&self.animations_dir)?;
+        let path = self.animations_dir.join(filename);
+        let body = serde_json::to_string_pretty(anim)?;
+        fs::write(&path, body)?;
+        Ok(path)
+    }
+
     pub fn load_animation(&self, filename: &str) -> Result<AnimationFile, LibraryError> {
         let path = self.animations_dir.join(filename);
         if !path.exists() {

@@ -15,7 +15,9 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("info,rmcp=warn,naga=warn")
+                }),
         )
         .init();
 
@@ -94,6 +96,8 @@ fn main() {
             plugins::idle_tick::IdleTickPlugin,
             plugins::anim_layers::AnimLayersPlugin,
             plugins::anim_layer_sets::AnimLayerSetsPlugin,
+            plugins::avatar_defaults::AvatarDefaultsPlugin,
+            plugins::vrma_clip_import::VrmaClipImportPlugin,
             plugins::emotion_map::EmotionMapPlugin,
             plugins::service_status::ServiceStatusPlugin,
             plugins::undo_history::UndoHistoryPlugin,

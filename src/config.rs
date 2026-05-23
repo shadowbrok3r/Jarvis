@@ -354,6 +354,9 @@ pub struct AnimLayersSettings {
     /// the stack is still empty has no effect until layers exist).
     #[serde(default = "default_true")]
     pub master_enabled_default: bool,
+    /// Optional named layer set loaded on boot (after auto-install). Empty = skip.
+    #[serde(default)]
+    pub boot_layer_set: String,
 }
 
 impl Default for AnimLayersSettings {
@@ -361,6 +364,7 @@ impl Default for AnimLayersSettings {
         Self {
             auto_install_procedural: true,
             master_enabled_default: true,
+            boot_layer_set: String::new(),
         }
     }
 }
@@ -589,6 +593,14 @@ pub struct AvatarSettings {
     /// Off by default — use Rig editor export/import for explicit workflows.
     #[serde(default)]
     pub auto_load_spring_preset: bool,
+    /// Apply `config/ModelOverrides/{stem}/avatar_defaults.json` once the VRM
+    /// and bone index are ready (expressions, optional pose, layer set / idle clip).
+    #[serde(default = "default_true")]
+    pub auto_apply_avatar_defaults: bool,
+    /// When true, base idle comes from the animation layer stack (`avatar_defaults.idle_clip`)
+    /// instead of spawning the VRMA child from `idle_vrma_path`.
+    #[serde(default)]
+    pub idle_use_layer_stack: bool,
 }
 
 fn default_one() -> f32 {

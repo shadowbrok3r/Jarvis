@@ -133,6 +133,7 @@ impl Plugin for PoseDriverPlugin {
             .insert_resource(BoneSnapshotHandle(snapshot))
             .init_resource::<BoneEntityIndex>()
             .init_resource::<IndexedBones>()
+            .init_resource::<BoneHierarchy>()
             .init_resource::<ActiveTransitions>()
             .init_resource::<ExpressionAnimationPlayback>()
             // Order: right after `AnimationSystems` (so VRMA sampling doesn't
@@ -314,6 +315,78 @@ impl IndexedBones {
     }
     pub fn entity(&self, bone: &str) -> Option<Entity> {
         self.entities.get(bone).copied()
+    }
+}
+
+/// Parent/child links between indexed bones (glTF `ChildOf` chain). Used by
+/// animation-layer bone masks to include or exclude whole subtrees (e.g.
+/// `leftFoot` → all toe DEF bones).
+#[derive(Resource, Default, Clone, PartialEq, Eq)]
+pub struct BoneHierarchy {
+    parent_by_name: HashMap<String, String>,
+    children_by_name: HashMap<String, Vec<String>>,
+}
+
+impl BoneHierarchy {
+    pub fn build(world: &World, indexed: &IndexedBones) -> Self {
+        let entity_to_name: HashMap<Entity, String> = indexed
+            .entities
+            .iter()
+            .map(|(n, e)| (*e, n.clone()))
+            .collect();
+        let mut parent_by_name = HashMap::new();
+        let mut children_by_name: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, entity) in &indexed.entities {
+            let Some(child_of) = world.get::<ChildOf>(*entity) else {
+                continue;
+            };
+            let Some(parent_name) = entity_to_name.get(&child_of.0).cloned() else {
+                continue;
+            };
+            parent_by_name.insert(name.clone(), parent_name.clone());
+            children_by_name
+                .entry(parent_name)
+                .or_default()
+                .push(name.clone());
+        }
+        for kids in children_by_name.values_mut() {
+            kids.sort();
+        }
+        Self {
+            parent_by_name,
+            children_by_name,
+        }
+    }
+
+    /// True when `bone` is `root` or a descendant of `root` in the indexed tree.
+    pub fn is_under(&self, bone: &str, root: &str) -> bool {
+        if bone == root {
+            return true;
+        }
+        let mut cur = bone;
+        while let Some(p) = self.parent_by_name.get(cur) {
+            if p == root {
+                return true;
+            }
+            cur = p;
+        }
+        false
+    }
+
+    pub fn descendants(&self, root: &str) -> Vec<String> {
+        let mut out = vec![root.to_string()];
+        let mut stack = vec![root.to_string()];
+        while let Some(cur) = stack.pop() {
+            if let Some(kids) = self.children_by_name.get(&cur) {
+                for k in kids {
+                    if !out.iter().any(|x| x == k) {
+                        out.push(k.clone());
+                        stack.push(k.clone());
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
@@ -615,10 +688,31 @@ fn sync_extra_skin_bones(world: &mut World) {
     }
 }
 
+fn refresh_bone_hierarchy(world: &mut World) {
+    let Some(indexed) = world.get_resource::<IndexedBones>().cloned() else {
+        return;
+    };
+    if indexed.is_empty() {
+        return;
+    }
+    let built = BoneHierarchy::build(world, &indexed);
+    match world.get_resource_mut::<BoneHierarchy>() {
+        Some(mut existing) => {
+            if *existing != built {
+                *existing = built;
+            }
+        }
+        None => {
+            world.insert_resource(built);
+        }
+    }
+}
+
 pub(crate) fn sync_bone_entity_index(world: &mut World) {
     sync_humanoid_bone_entities(world);
     sync_extra_skin_bones(world);
     refresh_indexed_bones_merged(world);
+    refresh_bone_hierarchy(world);
 }
 
 /// A command that wants to own the rig's pose this frame — we stop every
@@ -1045,6 +1139,8 @@ fn execute_avatar_vrm_hot_swap(world: &mut World, asset_path: &str) {
     }
     clear_expression_animation_playback(world, false);
     *world.resource::<BoneSnapshotHandle>().0.write() = BoneSnapshot::default();
+
+    crate::plugins::avatar_defaults::request_apply_avatar_defaults(world);
 
     info!(target: "pose_driver", "hot-swapped VRM to {asset_path}");
 }
@@ -1473,7 +1569,7 @@ fn collect_expression_overrides(world: &mut World) -> HashMap<String, f32> {
     out
 }
 
-fn publish_bone_snapshot(world: &mut World) {
+pub(crate) fn publish_bone_snapshot(world: &mut World) {
     let handle = world.resource::<BoneSnapshotHandle>().clone();
     let preset_names = collect_expression_preset_names(world);
     let expression_weights = collect_expression_overrides(world);

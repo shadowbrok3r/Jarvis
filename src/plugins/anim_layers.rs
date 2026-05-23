@@ -36,8 +36,8 @@
 //!
 //! ## Non-goals (v1)
 //!
-//! * Bone masking beyond include / exclude lists. Regex-style masks can be
-//!   added by expanding [`BoneMask`].
+//! * Bone masking: flat include/exclude plus subtree roots (`include_subtrees` /
+//!   `exclude_subtrees`) that match a bone and all indexed descendants.
 //! * IK. CCDIK integration is a separate module.
 //! * Gaze. `look_at.rs` already owns the eye bones; we leave it be.
 //! * Conflict resolution with the per-slider `ApplyBones` in the Bones
@@ -60,6 +60,7 @@
 //! rest-local and rest-world snapshot so MCP / UI reset and layers agree.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use bevy::app::AnimationSystems;
@@ -72,7 +73,7 @@ use jarvis_avatar::config::Settings;
 use jarvis_avatar::pose_library::{AnimationFile, PoseFile};
 
 use crate::plugins::pose_driver::{
-    IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES, apply_pose_commands,
+    BoneHierarchy, IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES, apply_pose_commands,
     local_from_normalized, normalized_from_local, sync_bone_entity_index,
 };
 
@@ -105,14 +106,32 @@ impl Plugin for AnimLayersPlugin {
     }
 }
 
-fn maybe_auto_install_default_layers(settings: Res<Settings>, stack: Res<LayerStackHandle>) {
+fn maybe_auto_install_default_layers(
+    settings: Res<Settings>,
+    stack: Res<LayerStackHandle>,
+    layer_sets: Option<Res<crate::plugins::anim_layer_sets::LayerSetsStore>>,
+    library: Option<Res<crate::plugins::pose_library_assets::PoseLibraryAssets>>,
+) {
     if !settings.anim_layers.auto_install_procedural {
         return;
     }
     let master = settings.anim_layers.master_enabled_default;
+    let boot_set = settings.anim_layers.boot_layer_set.trim().to_string();
     stack.with_write(|s| {
         if !s.layers.is_empty() {
             return;
+        }
+        if !boot_set.is_empty() {
+            if let (Some(store), Some(lib)) = (layer_sets.as_deref(), library.as_deref()) {
+                match store.load_into(&boot_set, s, &lib.library) {
+                    Ok(n) => {
+                        s.master_enabled = master;
+                        info!("boot layer set '{boot_set}': {n} layer(s) loaded");
+                    }
+                    Err(e) => warn!("boot layer set '{boot_set}': {e}"),
+                }
+                return;
+            }
         }
         s.install_default_procedural_layers();
         s.master_enabled = master;
@@ -154,7 +173,7 @@ impl LayerStackHandle {
 // ============================================================================
 
 /// Master container for all animation layers.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LayerStack {
     /// When `false`, the system short-circuits and emits nothing — so the
     /// rig is entirely driven by manual / MCP / idle_tick writes and feels
@@ -198,6 +217,33 @@ impl LayerStack {
 
     pub fn find_mut(&mut self, id: u64) -> Option<&mut Layer> {
         self.layers.iter_mut().find(|l| l.id == id)
+    }
+
+    /// Insert (or replace) a looping clip layer at the bottom of the stack for base idle motion.
+    pub fn install_idle_clip_at_base(
+        &mut self,
+        animation: AnimationFile,
+        looping: bool,
+    ) {
+        self.layers.retain(|l| l.slug != "idle-base");
+        let mut layer = Layer::new(
+            "idle-base",
+            "Idle (clip)",
+            DriverKind::Clip {
+                animation: Box::new(animation),
+            },
+        )
+        .blend(BlendMode::Override)
+        .weight(1.0);
+        layer.looping = looping;
+        layer.enabled = true;
+        layer.playing = true;
+        if let Some(d) = layer.driver.duration_hint() {
+            layer.duration = Some(d);
+        }
+        self.next_id = self.next_id.saturating_add(1);
+        layer.id = self.next_id;
+        self.layers.insert(0, layer);
     }
 
     /// Convenience for the UI: build the default built-in stack —
@@ -336,21 +382,50 @@ impl BlendMode {
 }
 
 /// Bone inclusion / exclusion list. Both empty → all bones allowed.
+///
+/// Flat `include` / `exclude` match exact bone names. `include_subtrees` /
+/// `exclude_subtrees` match the named root **and every indexed descendant**
+/// (e.g. `leftFoot` → toe DEF chains).
 #[derive(Debug, Clone, Default)]
 pub struct BoneMask {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
+    pub include_subtrees: Vec<String>,
+    pub exclude_subtrees: Vec<String>,
 }
 
 impl BoneMask {
-    pub fn allows(&self, bone: &str) -> bool {
-        if !self.include.is_empty() && !self.include.iter().any(|n| n == bone) {
-            return false;
+    pub fn allows(&self, bone: &str, hierarchy: Option<&BoneHierarchy>) -> bool {
+        if let Some(h) = hierarchy {
+            if self
+                .exclude_subtrees
+                .iter()
+                .any(|root| h.is_under(bone, root))
+            {
+                return false;
+            }
         }
         if self.exclude.iter().any(|n| n == bone) {
             return false;
         }
-        true
+        let restricted =
+            !self.include.is_empty() || !self.include_subtrees.is_empty();
+        if !restricted {
+            return true;
+        }
+        if self.include.iter().any(|n| n == bone) {
+            return true;
+        }
+        if let Some(h) = hierarchy {
+            if self
+                .include_subtrees
+                .iter()
+                .any(|root| h.is_under(bone, root))
+            {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -370,6 +445,10 @@ pub enum DriverKind {
     /// Holds one [`PoseFile`] from the pose library (static bones + optional
     /// expression weights). Emits absolute rotations — use [`BlendMode::Override`].
     PoseHold { pose: Box<PoseFile> },
+    /// Pin VRM expression / morph preset weights (no bones).
+    ExpressionHold {
+        expressions: HashMap<String, f32>,
+    },
     /// Sinusoidal chest / upper-chest pitch + roll. Emits rest-relative
     /// deltas — use [`BlendMode::RestRelative`].
     Breathing {
@@ -450,6 +529,7 @@ impl DriverKind {
         match self {
             Self::Clip { .. } => "clip",
             Self::PoseHold { .. } => "pose-hold",
+            Self::ExpressionHold { .. } => "expression-hold",
             Self::Breathing { .. } => "breathing",
             Self::Blink { .. } => "auto-blink",
             Self::WeightShift { .. } => "weight-shift",
@@ -467,6 +547,7 @@ impl DriverKind {
                 Some(animation.frames.len() as f32 / fps)
             }
             Self::PoseHold { .. } => None,
+            Self::ExpressionHold { .. } => None,
             _ => None,
         }
     }
@@ -598,6 +679,7 @@ fn advance_and_apply_layers(
     sender: Option<Res<PoseCommandSender>>,
     snap: Res<RestPoseSnapshot>,
     indexed: Option<Res<IndexedBones>>,
+    hierarchy: Option<Res<BoneHierarchy>>,
 ) {
     let Some(sender) = sender else { return };
     let Some(indexed) = indexed else { return };
@@ -605,6 +687,7 @@ fn advance_and_apply_layers(
         return;
     }
     let dt = time.delta_secs().min(0.05);
+    let hierarchy = hierarchy.as_deref();
 
     let mut bones_out: HashMap<String, [f32; 4]> = HashMap::new();
     let mut expressions_out: HashMap<String, f32> = HashMap::new();
@@ -615,58 +698,9 @@ fn advance_and_apply_layers(
             return;
         }
 
-        // Seed the accumulator with rest-pose rotations so procedural
-        // `RestRelative` layers have something meaningful to multiply
-        // against, and so any bone no layer touches lands back at rest.
-        let mut accumulator: HashMap<String, Quat> = snap.rest.clone();
-
-        for layer in &mut stack.layers {
-            if !layer.enabled || layer.weight <= 0.0 {
-                continue;
-            }
-
-            // Advance playhead.
-            if layer.playing {
-                let advance = dt * layer.speed;
-                layer.time += advance;
-                if let Some(duration) = layer.duration {
-                    if layer.time >= duration {
-                        if layer.looping {
-                            layer.time = layer.time.rem_euclid(duration);
-                        } else {
-                            layer.time = duration;
-                            layer.playing = false;
-                        }
-                    }
-                }
-            }
-
-            let sample = sample_driver(&mut layer.driver, layer.time, dt, &snap);
-
-            let weight = layer.weight.clamp(0.0, 1.0);
-
-            for (bone, quat) in sample.bones {
-                if !layer.mask.allows(&bone) {
-                    continue;
-                }
-                let rest = snap.rest.get(&bone).copied().unwrap_or(Quat::IDENTITY);
-                let current = accumulator.get(&bone).copied().unwrap_or(rest);
-                let folded = match layer.blend_mode {
-                    BlendMode::Override => current.slerp(quat, weight),
-                    BlendMode::RestRelative => {
-                        // quat is a delta — scale by weight, multiply onto current.
-                        let scaled = Quat::IDENTITY.slerp(quat, weight);
-                        current * scaled
-                    }
-                };
-                accumulator.insert(bone, folded);
-            }
-
-            for (name, weight_in) in sample.expressions {
-                let entry = expressions_out.entry(name).or_insert(0.0);
-                *entry = (*entry + weight_in * weight).clamp(0.0, 1.0);
-            }
-        }
+        let (accumulator, expressions) =
+            compose_layers(&mut stack.layers, &snap, hierarchy, dt);
+        expressions_out = expressions;
 
         // Only emit bones whose composed rotation differs meaningfully
         // from rest — otherwise we'd overwrite every bone in the rig with
@@ -713,6 +747,411 @@ fn advance_and_apply_layers(
     }
 }
 
+/// Advance playheads for every layer (used by live tick and offline bake).
+pub fn advance_layer_playheads(layers: &mut [Layer], dt: f32) {
+    for layer in layers {
+        if !layer.playing {
+            continue;
+        }
+        let advance = dt * layer.speed;
+        layer.time += advance;
+        if let Some(duration) = layer.duration {
+            if layer.time >= duration {
+                if layer.looping {
+                    layer.time = layer.time.rem_euclid(duration);
+                } else {
+                    layer.time = duration;
+                    layer.playing = false;
+                }
+            }
+        }
+    }
+}
+
+/// Sample every enabled layer once and fold into raw-local bone rotations +
+/// expression weights. Also advances layer playheads when `dt > 0`.
+pub fn compose_layers(
+    layers: &mut [Layer],
+    snap: &RestPoseSnapshot,
+    hierarchy: Option<&BoneHierarchy>,
+    dt: f32,
+) -> (HashMap<String, Quat>, HashMap<String, f32>) {
+    let mut accumulator: HashMap<String, Quat> = snap.rest.clone();
+    let mut expressions_out: HashMap<String, f32> = HashMap::new();
+
+    for layer in &mut *layers {
+        if !layer.enabled || layer.weight <= 0.0 {
+            continue;
+        }
+
+        let sample = sample_driver(&mut layer.driver, layer.time, dt, snap);
+        let weight = layer.weight.clamp(0.0, 1.0);
+
+        for (bone, quat) in sample.bones {
+            if !layer.mask.allows(&bone, hierarchy) {
+                continue;
+            }
+            let rest = snap.rest.get(&bone).copied().unwrap_or(Quat::IDENTITY);
+            let current = accumulator.get(&bone).copied().unwrap_or(rest);
+            let folded = match layer.blend_mode {
+                BlendMode::Override => current.slerp(quat, weight),
+                BlendMode::RestRelative => {
+                    let scaled = Quat::IDENTITY.slerp(quat, weight);
+                    current * scaled
+                }
+            };
+            accumulator.insert(bone, folded);
+        }
+
+        for (name, weight_in) in sample.expressions {
+            let entry = expressions_out.entry(name).or_insert(0.0);
+            *entry = (*entry + weight_in * weight).clamp(0.0, 1.0);
+        }
+    }
+
+    if dt > 0.0 {
+        advance_layer_playheads(layers, dt);
+    }
+
+    (accumulator, expressions_out)
+}
+
+fn reset_driver_transient_state(driver: &mut DriverKind) {
+    if let DriverKind::Blink {
+        next_in,
+        phase,
+        phase_t,
+        mean_interval,
+        ..
+    } = driver
+    {
+        *next_in = *mean_interval;
+        *phase = BlinkPhase::Idle;
+        *phase_t = 0.0;
+    }
+}
+
+/// Layer-set name used when editing a library animation via the stack.
+pub fn animation_edit_layer_set_name(filename: &str) -> String {
+    format!("anim-edit:{filename}")
+}
+
+/// Default JSON library filename for the configured idle VRMA path stem.
+pub fn idle_clip_library_filename(idle_vrma_path: &str) -> String {
+    let stem = Path::new(idle_vrma_path.trim())
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("idle_loop");
+    format!("{stem}.json")
+}
+
+/// Collect every bone name that appears in any keyframe.
+pub fn bones_in_animation(anim: &AnimationFile) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for frame in &anim.frames {
+        for name in frame.bones.keys() {
+            set.insert(name.clone());
+        }
+    }
+    let mut bones: Vec<String> = set.into_iter().collect();
+    bones.sort_by(|a, b| {
+        let ia = VRM_BONE_NAMES.iter().position(|&n| n == a.as_str());
+        let ib = VRM_BONE_NAMES.iter().position(|&n| n == b.as_str());
+        match (ia, ib) {
+            (Some(i), Some(j)) => i.cmp(&j),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()),
+        }
+    });
+    bones
+}
+
+fn animation_has_expressions(anim: &AnimationFile) -> bool {
+    anim.frames.iter().any(|f| !f.expressions.is_empty())
+}
+
+fn expressions_in_animation(anim: &AnimationFile) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for frame in &anim.frames {
+        for name in frame.expressions.keys() {
+            set.insert(name.clone());
+        }
+    }
+    let mut names: Vec<String> = set.into_iter().collect();
+    names.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+    names
+}
+
+/// One morph preset's keyframes only (bones empty).
+fn slice_animation_for_expression(source: &AnimationFile, preset: &str) -> AnimationFile {
+    use jarvis_avatar::pose_library::AnimationFrame;
+    let frames: Vec<AnimationFrame> = source
+        .frames
+        .iter()
+        .map(|f| {
+            let mut expressions = HashMap::new();
+            if let Some(w) = f.expressions.get(preset) {
+                expressions.insert(preset.to_string(), *w);
+            }
+            AnimationFrame {
+                bones: HashMap::new(),
+                duration_ms: f.duration_ms,
+                expressions,
+            }
+        })
+        .collect();
+    AnimationFile {
+        name: format!("{} · {preset}", source.name),
+        prompt: source.prompt.clone(),
+        fps: source.fps,
+        frame_count: frames.len(),
+        frames,
+        category: source.category.clone(),
+        looping: source.looping,
+        hold_duration: source.hold_duration,
+    }
+}
+
+/// One bone's keyframes only (no morphs — those go in a separate expressions layer).
+fn slice_animation_for_bone(source: &AnimationFile, bone: &str) -> AnimationFile {
+    use jarvis_avatar::pose_library::AnimationFrame;
+    let frames: Vec<AnimationFrame> = source
+        .frames
+        .iter()
+        .map(|f| {
+            let mut bones = HashMap::new();
+            if let Some(r) = f.bones.get(bone) {
+                bones.insert(bone.to_string(), r.clone());
+            }
+            AnimationFrame {
+                bones,
+                duration_ms: f.duration_ms,
+                expressions: HashMap::new(),
+            }
+        })
+        .collect();
+    AnimationFile {
+        name: format!("{} · {bone}", source.name),
+        prompt: source.prompt.clone(),
+        fps: source.fps,
+        frame_count: frames.len(),
+        frames,
+        category: source.category.clone(),
+        looping: source.looping,
+        hold_duration: source.hold_duration,
+    }
+}
+
+/// Expression-only keyframes (bones empty) — legacy helper; prefer [`slice_animation_for_expression`].
+#[allow(dead_code)]
+fn slice_animation_expressions(source: &AnimationFile) -> AnimationFile {
+    use jarvis_avatar::pose_library::AnimationFrame;
+    let frames: Vec<AnimationFrame> = source
+        .frames
+        .iter()
+        .map(|f| AnimationFrame {
+            bones: HashMap::new(),
+            duration_ms: f.duration_ms,
+            expressions: f.expressions.clone(),
+        })
+        .collect();
+    AnimationFile {
+        name: format!("{} · expressions", source.name),
+        prompt: source.prompt.clone(),
+        fps: source.fps,
+        frame_count: frames.len(),
+        frames,
+        category: source.category.clone(),
+        looping: source.looping,
+        hold_duration: source.hold_duration,
+    }
+}
+
+fn layer_from_clip(
+    slug: &str,
+    label: &str,
+    animation: AnimationFile,
+    mask: BoneMask,
+    looping: bool,
+) -> Layer {
+    let mut layer = Layer::new(
+        slug,
+        label,
+        DriverKind::Clip {
+            animation: Box::new(animation),
+        },
+    )
+    .blend(BlendMode::Override)
+    .weight(1.0);
+    layer.mask = mask;
+    layer.looping = looping;
+    layer.playing = true;
+    if let Some(d) = layer.driver.duration_hint() {
+        layer.duration = Some(d);
+    }
+    layer
+}
+
+/// Explode a library clip into one layer per animated bone (+ optional expressions layer).
+pub fn layers_from_animation_per_bone(anim: AnimationFile, looping: bool) -> Vec<Layer> {
+    let parent = anim.name.clone();
+    let mut layers = Vec::new();
+    for bone in bones_in_animation(&anim) {
+        let slug = format!("bone-{}", bone.replace('.', "_"));
+        let sliced = slice_animation_for_bone(&anim, &bone);
+        let mut mask = BoneMask::default();
+        mask.include.push(bone.clone());
+        layers.push(layer_from_clip(
+            &slug,
+            &format!("{parent} · {bone}"),
+            sliced,
+            mask,
+            looping,
+        ));
+    }
+    if animation_has_expressions(&anim) {
+        for preset in expressions_in_animation(&anim) {
+            let slug = format!("expr-{}", preset.replace('.', "_"));
+            let sliced = slice_animation_for_expression(&anim, &preset);
+            layers.push(layer_from_clip(
+                &slug,
+                &format!("{parent} · {preset}"),
+                sliced,
+                BoneMask {
+                    exclude: bones_in_animation(&anim),
+                    ..Default::default()
+                },
+                looping,
+            ));
+        }
+    }
+    layers
+}
+
+/// Replace the stack with per-bone clip layers (bottom → top bone order).
+pub fn install_animation_per_bone_layers(
+    stack: &mut LayerStack,
+    animation: AnimationFile,
+    looping: bool,
+) {
+    stack.layers.clear();
+    for layer in layers_from_animation_per_bone(animation, looping) {
+        stack.add_layer(layer);
+    }
+}
+
+/// Load (or bootstrap) a layer stack for editing a pose-library animation.
+pub fn begin_library_animation_edit(
+    filename: &str,
+    library: &jarvis_avatar::pose_library::PoseLibrary,
+    layer_sets: &crate::plugins::anim_layer_sets::LayerSetsStore,
+    stack: &LayerStackHandle,
+) -> Result<String, String> {
+    let set_name = animation_edit_layer_set_name(filename);
+    stack.with_write(|s| {
+        let loaded = layer_sets.load_into(&set_name, s, library).unwrap_or(0);
+        if loaded == 0 {
+            s.layers.clear();
+            let anim = library
+                .load_animation(filename)
+                .map_err(|e| e.to_string())?;
+            let looping = anim.looping.unwrap_or(false);
+            install_animation_per_bone_layers(s, anim, looping);
+        }
+        s.master_enabled = true;
+        for layer in &mut s.layers {
+            layer.playing = true;
+        }
+        Ok(format!(
+            "layer edit: {set_name} ({} bone/morph layers)",
+            s.layers.len()
+        ))
+    })
+}
+
+fn bake_duration(stack: &LayerStack, fallback: f32) -> f32 {
+    stack
+        .layers
+        .iter()
+        .filter(|l| l.enabled)
+        .filter_map(|l| l.duration)
+        .fold(fallback, f32::max)
+        .max(1.0 / 30.0)
+}
+
+/// Offline sample of the full layer stack into a pose-library animation file.
+pub fn bake_layer_stack_to_animation(
+    stack: &LayerStack,
+    snap: &RestPoseSnapshot,
+    hierarchy: Option<&BoneHierarchy>,
+    fps: f64,
+    duration: Option<f32>,
+) -> AnimationFile {
+    use jarvis_avatar::pose_library::{AnimationFrame, BoneRotation};
+
+    let mut work = stack.clone();
+    for layer in &mut work.layers {
+        layer.time = 0.0;
+        layer.playing = true;
+        reset_driver_transient_state(&mut layer.driver);
+    }
+    work.clock = 0.0;
+
+    let fps = fps.max(1.0);
+    let dt = (1.0 / fps) as f32;
+    let dur = duration.unwrap_or_else(|| bake_duration(&work, 3.0));
+    let frame_count = ((dur * fps as f32).ceil() as usize).max(1);
+    let mut frames = Vec::with_capacity(frame_count);
+
+    for _ in 0..frame_count {
+        let (accumulator, expressions) =
+            compose_layers(&mut work.layers, snap, hierarchy, dt);
+
+        let mut bones = HashMap::with_capacity(accumulator.len());
+        for (name, q_raw) in &accumulator {
+            let rest_local = snap.rest.get(name).copied().unwrap_or(Quat::IDENTITY);
+            if quat_close(*q_raw, rest_local, 1e-4) {
+                continue;
+            }
+            let rest_world = snap.rest_world.get(name).copied().unwrap_or(Quat::IDENTITY);
+            let pose_q = normalized_from_local(rest_local, rest_world, *q_raw);
+            bones.insert(
+                name.clone(),
+                BoneRotation {
+                    rotation: [pose_q.x, pose_q.y, pose_q.z, pose_q.w],
+                },
+            );
+        }
+        frames.push(AnimationFrame {
+            bones,
+            duration_ms: Some((1000.0 / fps).max(1.0)),
+            expressions,
+        });
+        work.clock += dt;
+    }
+
+    let name = work
+        .layers
+        .iter()
+        .find_map(|l| match &l.driver {
+            DriverKind::Clip { animation } => Some(animation.name.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "baked".into());
+
+    AnimationFile {
+        name,
+        prompt: String::new(),
+        fps,
+        frame_count: frames.len(),
+        frames,
+        category: None,
+        looping: None,
+        hold_duration: None,
+    }
+}
+
 fn quat_close(a: Quat, b: Quat, eps: f32) -> bool {
     // Quaternions represent the same rotation iff they're equal OR antipodal.
     let dot = a.dot(b).abs();
@@ -733,6 +1172,10 @@ fn sample_driver(
     match driver {
         DriverKind::Clip { animation } => sample_clip(animation, t, snap),
         DriverKind::PoseHold { pose } => sample_pose_hold(pose, snap),
+        DriverKind::ExpressionHold { expressions } => DriverSample {
+            bones: HashMap::new(),
+            expressions: expressions.clone(),
+        },
         DriverKind::Breathing {
             rate_hz,
             pitch_deg,

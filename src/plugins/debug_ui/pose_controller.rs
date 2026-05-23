@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use bevy::animation::RepeatAnimation;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::egui::Layout;
 use bevy_egui::{EguiContexts, egui};
@@ -37,17 +38,35 @@ use crate::mcp::pose_intents::{
 use crate::mcp::pose_safety::PoseSafetyReport;
 use crate::mcp::semantic_intent_calibration::SemanticIntentCalibration;
 use crate::kimodo::{GenerateRequest, KimodoClient};
+use crate::plugins::anim_layer_sets::LayerSetsStore;
+use crate::plugins::anim_layers::{
+    LayerStackHandle, RestPoseSnapshot, animation_edit_layer_set_name,
+    bake_layer_stack_to_animation, begin_library_animation_edit,
+};
 use crate::plugins::native_anim_player::{ActiveNativeAnimation, StreamingAnimation};
 use crate::plugins::pose_driver::{
-    IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES, def_toe_big_yaw_slider_extra_deg,
-    is_vrm_humanoid_bone,
+    BoneHierarchy, IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES,
+    def_toe_big_yaw_slider_extra_deg, is_vrm_humanoid_bone,
 };
-use crate::plugins::intent_calibration::SemanticIntentCalibrationHandle;
+use crate::plugins::intent_calibration::{
+    IntentCalibrationWizardHandle, SemanticIntentCalibrationHandle,
+};
+use crate::mcp::intent_calibration_wizard::{ConfirmVerdict, WIZARD_STEPS, WizardPhase};
 use crate::plugins::pose_library_assets::PoseLibraryAssets;
 use crate::plugins::rig_editor::{HoverSource, RigEditAxis};
 use crate::plugins::shared_runtime::SharedTokio;
 use crate::plugins::undo_history::UndoHistory;
 use crate::plugins::vrm_preset_key;
+
+/// Layer-stack resources for the Animation tab (keeps `draw_pose_controller_window`
+/// under Bevy's system-param limit).
+#[derive(SystemParam)]
+pub struct AnimationLayerEditUiParams<'w> {
+    pub stack: Option<Res<'w, LayerStackHandle>>,
+    pub layer_sets: Option<Res<'w, LayerSetsStore>>,
+    pub rest: Option<Res<'w, RestPoseSnapshot>>,
+    pub hierarchy: Option<Res<'w, BoneHierarchy>>,
+}
 
 /// Visual groupings for the manual Bones tab. Order matters — the UI renders
 /// each group as a `CollapsingHeader` in this order.
@@ -265,6 +284,7 @@ pub struct PoseControllerUiState {
     pub anim_rename_buf: HashMap<String, String>,
     pub anim_category_buf: HashMap<String, String>,
     pub anim_hold_buf: HashMap<String, f32>,
+    pub anim_loop_buf: HashMap<String, bool>,
     pub gen_prompt: String,
     pub gen_duration: f32,
     pub gen_steps: u32,
@@ -306,8 +326,11 @@ pub struct PoseControllerUiState {
     pub editing_pose: Option<String>,
     /// Animation file currently in inline-rename mode.
     pub renaming_animation: Option<String>,
-    /// Animation file currently in edit mode.
+    /// Animation file currently in edit mode (layer-stack authoring).
     pub editing_animation: Option<String>,
+    /// When set, the animation tab is driving playback through the layer stack
+    /// and Done will bake + save both the library clip and layer-set preset.
+    pub animation_layer_edit: Option<AnimationLayerEditSession>,
     /// "New category" creation form: pose-name → user-typed new category.
     /// When `Some`, the row's category combobox shows a text input + save
     /// instead of the dropdown.
@@ -332,6 +355,7 @@ impl Default for PoseControllerUiState {
             anim_rename_buf: HashMap::new(),
             anim_category_buf: HashMap::new(),
             anim_hold_buf: HashMap::new(),
+            anim_loop_buf: HashMap::new(),
             gen_prompt: "waving energetically with both arms".into(),
             gen_duration: 3.0,
             gen_steps: 100,
@@ -356,10 +380,27 @@ impl Default for PoseControllerUiState {
             editing_pose: None,
             renaming_animation: None,
             editing_animation: None,
+            animation_layer_edit: None,
             new_category_buf: HashMap::new(),
             per_side_active: HashMap::new(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct AnimationLayerEditSession {
+    pub filename: String,
+    pub layer_set_name: String,
+    /// Stack snapshot taken before edit — restored on Cancel.
+    pub stack_backup: crate::plugins::anim_layers::LayerStack,
+}
+
+/// Resources needed by the Animation tab for layer-stack editing.
+struct AnimationTabLayerContext<'a> {
+    stack: Option<&'a LayerStackHandle>,
+    layer_sets: Option<&'a LayerSetsStore>,
+    rest: Option<&'a RestPoseSnapshot>,
+    hierarchy: Option<&'a BoneHierarchy>,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
@@ -446,9 +487,11 @@ pub fn draw_pose_controller_window(
     snapshot: Option<Res<crate::plugins::pose_driver::BoneSnapshotHandle>>,
     indexed: Option<Res<IndexedBones>>,
     intent_cal: Option<Res<SemanticIntentCalibrationHandle>>,
+    intent_wizard: Option<Res<IntentCalibrationWizardHandle>>,
     undo: Res<UndoHistory>,
     mut state: ResMut<super::DebugUiState>,
     mut rig_params: super::rig_editor::RigTabSystemParam,
+    layer_edit: AnimationLayerEditUiParams,
 ) {
     if !settings.ui.show_pose_controller {
         return;
@@ -533,6 +576,13 @@ pub fn draw_pose_controller_window(
     let mut pending_panel_width: Option<f32> = None;
     let mut pending_panel_height: Option<f32> = None;
 
+    let layer_ctx = AnimationTabLayerContext {
+        stack: layer_edit.stack.as_deref(),
+        layer_sets: layer_edit.layer_sets.as_deref(),
+        rest: layer_edit.rest.as_deref(),
+        hierarchy: layer_edit.hierarchy.as_deref(),
+    };
+
     let dock_width = settings.ui.pose_controller_dock_width.max(280.0);
     let dock_height = settings.ui.pose_controller_dock_bottom_height.max(180.0);
 
@@ -561,8 +611,10 @@ pub fn draw_pose_controller_window(
                     &mut rig_params,
                     &mut settings,
                     intent_cal.as_deref(),
+                    intent_wizard.as_deref(),
                     Some(&*undo),
                     &mut pending_side_changes,
+                    &layer_ctx,
                 );
             });
         pending_panel_height = Some(resp.response.rect.height());
@@ -590,8 +642,10 @@ pub fn draw_pose_controller_window(
                     &mut rig_params,
                     &mut settings,
                     intent_cal.as_deref(),
+                    intent_wizard.as_deref(),
                     Some(&*undo),
                     &mut pending_side_changes,
+                    &layer_ctx,
                 );
             });
         pending_panel_width = Some(resp.response.rect.width());
@@ -619,8 +673,10 @@ pub fn draw_pose_controller_window(
                     &mut rig_params,
                     &mut settings,
                     intent_cal.as_deref(),
+                    intent_wizard.as_deref(),
                     Some(&*undo),
                     &mut pending_side_changes,
+                    &layer_ctx,
                 );
             });
         // `pending_panel_width` only tracks the most recently rendered side
@@ -655,7 +711,9 @@ pub fn draw_pose_controller_window(
                         &mut rig_params,
                         &mut settings,
                         intent_cal.as_deref(),
+                        intent_wizard.as_deref(),
                         Some(&*undo),
+                        &layer_ctx,
                     );
                 });
             if !keep_open {
@@ -726,8 +784,10 @@ fn render_side_panel(
     rig_params: &mut super::rig_editor::RigTabSystemParam,
     settings: &mut Settings,
     intent_cal: Option<&SemanticIntentCalibrationHandle>,
+    intent_wizard: Option<&IntentCalibrationWizardHandle>,
     undo: Option<&UndoHistory>,
     pending_side_changes: &mut Vec<(PoseControllerTab, &'static str)>,
+    layer_ctx: &AnimationTabLayerContext<'_>,
 ) {
     if tabs.is_empty() {
         ui.label(egui::RichText::new("(no tabs assigned to this panel)").italics());
@@ -774,7 +834,9 @@ fn render_side_panel(
         rig_params,
         settings,
         intent_cal,
+        intent_wizard,
         undo,
+        layer_ctx,
     );
 
     egui::TopBottomPanel::bottom(format!("pose_controller_{side}_status_strip")).show_inside(
@@ -900,7 +962,9 @@ fn render_tab_body(
     rig_params: &mut super::rig_editor::RigTabSystemParam,
     settings: &mut Settings,
     intent_cal: Option<&SemanticIntentCalibrationHandle>,
+    intent_wizard: Option<&IntentCalibrationWizardHandle>,
     undo: Option<&UndoHistory>,
+    layer_ctx: &AnimationTabLayerContext<'_>,
 ) {
     match tab {
         PoseControllerTab::Library => library_tab(ui, pc, library, sender, snapshot, undo),
@@ -913,6 +977,8 @@ fn render_tab_body(
             kimodo_client,
             tokio_rt,
             &mut settings.pose_controller,
+            &mut settings.ui.show_anim_layers,
+            layer_ctx,
         ),
         PoseControllerTab::Bones => bones_with_expressions_tab(
             ui,
@@ -934,7 +1000,16 @@ fn render_tab_body(
             rig_params,
         ),
         PoseControllerTab::IntentLab => {
-            intent_lab_tab(ui, pc, &*settings, sender, intent_cal, snapshot, undo)
+            intent_lab_tab(
+                ui,
+                pc,
+                &*settings,
+                sender,
+                intent_cal,
+                intent_wizard,
+                snapshot,
+                undo,
+            )
         }
     }
 }
@@ -1469,6 +1544,8 @@ fn animation_tab(
     kimodo: Option<&KimodoClientRes>,
     tokio_rt: Option<&SharedTokio>,
     pose_settings: &mut jarvis_avatar::config::PoseControllerSettings,
+    show_anim_layers: &mut bool,
+    layer_ctx: &AnimationTabLayerContext<'_>,
 ) {
     let cats = collect_animation_categories(library);
 
@@ -1544,7 +1621,16 @@ fn animation_tab(
                     .default_open(false)
                     .show(ui, |ui| {
                         for meta in metas {
-                            anim_row(ui, state, library, active_anim, kimodo, meta);
+                            anim_row(
+                                ui,
+                                state,
+                                library,
+                                active_anim,
+                                kimodo,
+                                meta,
+                                show_anim_layers,
+                                layer_ctx,
+                            );
                         }
                     });
             }
@@ -1568,6 +1654,106 @@ fn collect_animation_categories(library: &PoseLibraryAssets) -> Vec<String> {
     out
 }
 
+fn cancel_animation_layer_edit(
+    session: &AnimationLayerEditSession,
+    state: &mut PoseControllerUiState,
+    layer_ctx: &AnimationTabLayerContext<'_>,
+) {
+    if let Some(stack) = layer_ctx.stack {
+        stack.with_write(|s| *s = session.stack_backup.clone());
+    }
+    state.editing_animation = None;
+    state.animation_layer_edit = None;
+    state.status = Some(format!(
+        "cancelled layer edit for {} (stack restored)",
+        session.filename
+    ));
+}
+
+fn commit_animation_layer_edit(
+    filename: &str,
+    meta: &AnimationMeta,
+    state: &mut PoseControllerUiState,
+    library: &PoseLibraryAssets,
+    layer_ctx: &AnimationTabLayerContext<'_>,
+) {
+    let Some(stack) = layer_ctx.stack else {
+        state.status = Some("layer stack unavailable".into());
+        return;
+    };
+    let Some(rest) = layer_ctx.rest else {
+        state.status = Some("rest pose not ready — wait for VRM to load".into());
+        return;
+    };
+    if rest.captured == 0 {
+        state.status = Some("rest pose not ready — wait for VRM to load".into());
+        return;
+    }
+    let fallback_dur = meta.frame_count as f32 / meta.fps.max(1.0) as f32;
+    let baked = stack.with_read(|s| {
+        bake_layer_stack_to_animation(
+            s,
+            rest,
+            layer_ctx.hierarchy,
+            meta.fps,
+            Some(fallback_dur),
+        )
+    });
+    let cat_buf = state
+        .anim_category_buf
+        .get(filename)
+        .cloned()
+        .unwrap_or_else(|| meta.category.clone());
+    let hold = state
+        .anim_hold_buf
+        .get(filename)
+        .copied()
+        .unwrap_or(meta.hold_duration);
+    let looping = state
+        .anim_loop_buf
+        .get(filename)
+        .copied()
+        .unwrap_or(meta.looping);
+    let mut out = baked;
+    out.name = meta.name.clone();
+    out.category = {
+        let c = cat_buf.trim();
+        if c.is_empty() {
+            None
+        } else {
+            Some(c.to_string())
+        }
+    };
+    out.looping = Some(looping);
+    out.hold_duration = Some(hold);
+
+    match library.library.write_animation_at(filename, &out) {
+        Err(e) => {
+            state.status = Some(format!("save animation failed: {e}"));
+            return;
+        }
+        Ok(path) => {
+            if let Some(store) = layer_ctx.layer_sets {
+                let set_name = animation_edit_layer_set_name(filename);
+                stack.with_read(|s| store.save_current(&set_name, s));
+                store.persist();
+                state.status = Some(format!(
+                    "saved {} + layer set '{set_name}' ({})",
+                    path.display(),
+                    out.frame_count
+                ));
+            } else {
+                state.status = Some(format!(
+                    "saved {} ({} frames; layer set store unavailable)",
+                    path.display(),
+                    out.frame_count
+                ));
+            }
+            library.mark_dirty();
+        }
+    }
+}
+
 fn anim_row(
     ui: &mut egui::Ui,
     state: &mut PoseControllerUiState,
@@ -1575,6 +1761,8 @@ fn anim_row(
     active_anim: &mut ResMut<ActiveNativeAnimation>,
     kimodo: Option<&KimodoClientRes>,
     meta: &AnimationMeta,
+    show_anim_layers: &mut bool,
+    layer_ctx: &AnimationTabLayerContext<'_>,
 ) {
     let editing = state.editing_animation.as_deref() == Some(meta.filename.as_str());
     let renaming = state.renaming_animation.as_deref() == Some(meta.filename.as_str());
@@ -1647,15 +1835,66 @@ fn anim_row(
                     }
                 }
                 if editing {
-                    if ui.button("done").clicked() {
+                    if ui
+                        .button("done")
+                        .on_hover_text(
+                            "Bake layer stack → overwrite library clip + save layer-set preset",
+                        )
+                        .clicked()
+                    {
+                        commit_animation_layer_edit(
+                            &meta.filename,
+                            meta,
+                            state,
+                            library,
+                            layer_ctx,
+                        );
                         state.editing_animation = None;
+                        state.animation_layer_edit = None;
+                    }
+                    if ui
+                        .button("cancel")
+                        .on_hover_text("Discard layer-stack edits and restore the previous stack")
+                        .clicked()
+                    {
+                        if let Some(session) = state.animation_layer_edit.clone() {
+                            cancel_animation_layer_edit(&session, state, layer_ctx);
+                        }
                     }
                 } else if ui
                     .button("🖊")
-                    .on_hover_text("Enter edit mode (rename, change category/loop/hold, delete)")
+                    .on_hover_text(
+                        "Edit via animation layer stack — one layer per bone (opens Layers panel; Done bakes + saves)",
+                    )
                     .clicked()
                 {
+                    active_anim.stop();
+                    *show_anim_layers = true;
+                    let set_name = animation_edit_layer_set_name(&meta.filename);
+                    let stack_backup = layer_ctx
+                        .stack
+                        .map(|h| h.with_read(|s| s.clone()))
+                        .unwrap_or_default();
+                    if let (Some(stack), Some(store)) = (layer_ctx.stack, layer_ctx.layer_sets) {
+                        match begin_library_animation_edit(
+                            &meta.filename,
+                            &library.library,
+                            store,
+                            stack,
+                        ) {
+                            Ok(msg) => state.status = Some(msg),
+                            Err(e) => state.status = Some(format!("layer edit failed: {e}")),
+                        }
+                    } else {
+                        state.status =
+                            Some("layer stack / layer sets unavailable".into());
+                    }
                     state.editing_animation = Some(meta.filename.clone());
+                    state.animation_layer_edit = Some(AnimationLayerEditSession {
+                        filename: meta.filename.clone(),
+                        layer_set_name: set_name,
+                        stack_backup,
+                    });
                 }
                 ui.separator();
                 ui.label(
@@ -1668,6 +1907,26 @@ fn anim_row(
             });
         });
         if editing {
+            let layer_editing = state
+                .animation_layer_edit
+                .as_ref()
+                .is_some_and(|s| s.filename == meta.filename);
+            if layer_editing {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(160, 200, 255),
+                        "Layer-stack edit (one layer per bone) — use Animation Layers panel, then Done to bake",
+                    );
+                    if ui.button("Layers").clicked() {
+                        *show_anim_layers = true;
+                    }
+                    if ui.button("Cancel edit").clicked() {
+                        if let Some(session) = state.animation_layer_edit.clone() {
+                            cancel_animation_layer_edit(&session, state, layer_ctx);
+                        }
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 let cat_buf = state
                     .anim_category_buf
@@ -1675,8 +1934,11 @@ fn anim_row(
                     .or_insert_with(|| meta.category.clone());
                 ui.label("Category");
                 ui.add(egui::TextEdit::singleline(cat_buf).desired_width(110.0));
-                let mut looping = meta.looping;
-                ui.checkbox(&mut looping, "Looping");
+                let looping = state
+                    .anim_loop_buf
+                    .entry(meta.filename.clone())
+                    .or_insert(meta.looping);
+                ui.checkbox(looping, "Looping");
                 let hold_buf = state
                     .anim_hold_buf
                     .entry(meta.filename.clone())
@@ -1686,6 +1948,7 @@ fn anim_row(
                 if ui.button("Save").clicked() {
                     let new_cat = cat_buf.trim().to_string();
                     let new_hold = *hold_buf;
+                    let new_loop = *looping;
                     let _ = library.library.update_animation_metadata(
                         &meta.filename,
                         if new_cat.is_empty() {
@@ -1693,7 +1956,7 @@ fn anim_row(
                         } else {
                             Some(new_cat)
                         },
-                        Some(looping),
+                        Some(new_loop),
                         Some(new_hold),
                     );
                     library.mark_dirty();
@@ -1704,6 +1967,7 @@ fn anim_row(
                         state.status = Some(format!("deleted {}", meta.filename));
                         library.mark_dirty();
                         state.editing_animation = None;
+                        state.animation_layer_edit = None;
                     }
                 }
             });
@@ -2186,14 +2450,14 @@ fn intent_lab_tab(
     settings: &Settings,
     sender: Option<&PoseCommandSender>,
     cal_handle: Option<&SemanticIntentCalibrationHandle>,
+    wizard_handle: Option<&IntentCalibrationWizardHandle>,
     snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
     undo: Option<&UndoHistory>,
 ) {
     ui.label(egui::RichText::new("Intent Lab — semantic MCP tools").strong());
     ui.label(
         "Tune sign multipliers per loaded VRM so AI-facing tools (raise_leg, bend_knee, arms_down_rest) \
-move the body the way you expect. \"Apply\" uses the calibration sliders below (test before Save). \
-\"Save\" writes config/semantic_intent_calibration/<key>.toml — MCP tools read that file.",
+move the body the way you expect. Use the AI wizard for a guided probe → confirm loop.",
     );
 
     let Some(cal_h) = cal_handle else {
@@ -2212,7 +2476,109 @@ move the body the way you expect. \"Apply\" uses the calibration sliders below (
 
     ui.monospace(format!("model_path: {}", settings.avatar.model_path));
     ui.monospace(format!("semantic_vrm_key: {key}"));
+
     ui.separator();
+    ui.label(egui::RichText::new("AI calibration wizard").strong());
+    ui.label(
+        "Ask the agent to call begin_intent_calibration_wizard, then intent_calibration_probe \
+each step. While awaiting confirm, answer in chat or use the buttons below.",
+    );
+    if let Some(wiz_h) = wizard_handle {
+        let mut wiz = wiz_h.0.write().unwrap();
+        match &wiz.phase {
+            WizardPhase::Idle => {
+                ui.label(egui::RichText::new("No active wizard session.").weak());
+            }
+            WizardPhase::Active {
+                draft,
+                step_index,
+                awaiting,
+                log,
+                ..
+            } => {
+                pc.intent_lab_cal = draft.clone();
+                ui.label(format!(
+                    "Active — step {} / {}",
+                    step_index + 1,
+                    WIZARD_STEPS.len()
+                ));
+                if log.is_empty() {
+                    ui.label("Completed steps: none yet");
+                } else {
+                    ui.label(format!("Completed steps: {}", log.len()));
+                }
+                if let Some(pending) = awaiting.clone() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(240, 200, 80),
+                        "AWAITING YOUR CONFIRM",
+                    );
+                    ui.label(egui::RichText::new(&pending.label).strong());
+                    ui.label(&pending.user_question);
+                    let step_id = pending.step_id.clone();
+                    ui.horizontal(|ui| {
+                        if ui.button("Correct").clicked() {
+                            match wiz.confirm(&step_id, ConfirmVerdict::Correct) {
+                                Ok(_) => pc.status = Some(format!("wizard: {step_id} → correct")),
+                                Err(e) => pc.status = Some(format!("wizard confirm: {e}")),
+                            }
+                        }
+                        if ui.button("Flip sign").clicked() {
+                            match wiz.confirm(&step_id, ConfirmVerdict::Flip) {
+                                Ok(_) => pc.status = Some(format!("wizard: {step_id} → flip")),
+                                Err(e) => pc.status = Some(format!("wizard confirm: {e}")),
+                            }
+                        }
+                        if ui.button("Skip").clicked() {
+                            match wiz.confirm(&step_id, ConfirmVerdict::Skip) {
+                                Ok(_) => pc.status = Some(format!("wizard: {step_id} → skip")),
+                                Err(e) => pc.status = Some(format!("wizard confirm: {e}")),
+                            }
+                        }
+                    });
+                    if let Some(d) = wiz.draft_if_active() {
+                        pc.intent_lab_cal = d.clone();
+                    }
+                } else if ui.button("Apply probe locally (same as MCP)").clicked() {
+                    match wiz.probe_bones() {
+                        Ok((bones, pending)) => {
+                            if let Some(s) = sender {
+                                s.send(PoseCommand::ResetPose);
+                            }
+                            intent_lab_apply(
+                                sender,
+                                pc,
+                                &bones,
+                                &format!("wizard probe {}", pending.label),
+                                snapshot,
+                                undo,
+                            );
+                        }
+                        Err(e) => pc.status = Some(format!("wizard probe: {e}")),
+                    }
+                }
+            }
+            WizardPhase::Complete { draft, log, .. } => {
+                pc.intent_lab_cal = draft.clone();
+                ui.colored_label(
+                    egui::Color32::from_rgb(120, 220, 140),
+                    format!(
+                        "Wizard complete — {} step(s) recorded. Save below or tell the agent save_intent_calibration.",
+                        log.len()
+                    ),
+                );
+            }
+        }
+        if ui.button("Abort wizard").clicked() {
+            wiz.abort();
+            pc.status = Some("wizard aborted".into());
+        }
+    }
+
+    ui.separator();
+    ui.label(
+        "Manual calibration: sliders apply to \"Try\" buttons and MCP tools after Save. \
+\"Save\" writes config/semantic_intent_calibration/<key>.toml.",
+    );
 
     egui::CollapsingHeader::new("Default rules (what each sign scales)")
         .default_open(false)

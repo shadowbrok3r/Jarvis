@@ -32,13 +32,14 @@ use jarvis_avatar::config::Settings;
 use jarvis_avatar::paths::expand_home;
 use jarvis_avatar::pose_library::PoseLibrary;
 
+use super::intent_calibration_wizard::IntentCalibrationWizardSession;
 use super::{build_a2f_client, JarvisMcpServer, KimodoDefaults};
 use super::semantic_intent_calibration::SemanticIntentCalibrationStore;
 use crate::plugins::anim_layer_sets::LayerSetsStore;
 use crate::plugins::anim_layers::LayerStackHandle;
 use crate::plugins::channel_server::HubBroadcast;
 use crate::plugins::intent_calibration::{
-    SemanticIntentCalibrationHandle, SemanticIntentModelPath,
+    IntentCalibrationWizardHandle, SemanticIntentCalibrationHandle, SemanticIntentModelPath,
 };
 use crate::plugins::pose_capture::CaptureCommandSender;
 use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommandSender, PoseDriverPlugin};
@@ -65,6 +66,7 @@ fn start_mcp_server(
     snapshot: Option<Res<BoneSnapshotHandle>>,
     intent_model_path: Option<Res<SemanticIntentModelPath>>,
     intent_calibration: Option<Res<SemanticIntentCalibrationHandle>>,
+    intent_wizard: Option<Res<IntentCalibrationWizardHandle>>,
     traffic: Option<Res<TrafficLogSink>>,
     layer_stack: Option<Res<LayerStackHandle>>,
     layer_sets: Option<Res<LayerSetsStore>>,
@@ -142,6 +144,9 @@ fn start_mcp_server(
                 "config/semantic_intent_calibration",
             ))))
         });
+    let intent_calibration_wizard = intent_wizard
+        .map(|r| r.0.clone())
+        .unwrap_or_else(|| Arc::new(RwLock::new(IntentCalibrationWizardSession::default())));
 
     thread::Builder::new()
         .name("jarvis-mcp".into())
@@ -177,6 +182,7 @@ fn start_mcp_server(
                     layer_sets_val,
                     semantic_model_path,
                     semantic_calibration,
+                    intent_calibration_wizard,
                 ),
                 traffic,
             ));

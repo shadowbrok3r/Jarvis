@@ -1,6 +1,7 @@
 //! Bevy plugins (binary crate).
 
 pub mod avatar;
+pub mod avatar_defaults;
 pub mod debug_ui;
 pub mod environment;
 pub mod expressions;
@@ -39,4 +40,5 @@ mod spring_preset;
 pub use spring_preset::vrm_preset_key;
 pub mod traffic_log;
 pub mod tts;
+pub mod vrma_clip_import;
 pub mod undo_history;

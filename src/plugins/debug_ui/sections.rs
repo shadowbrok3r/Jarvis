@@ -8,16 +8,26 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::act::Emotion;
+use jarvis_avatar::avatar_defaults::{avatar_defaults_path, load_avatar_defaults};
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::model_catalog::{list_vrm_models, models_dir, resolve_vrm_load_argument};
 
 use super::widgets::{rgb_row, rgba_row, vec3_row};
-use super::{AvatarVrmPickerState, DebugUiState};
+use super::{AvatarDefaultsUiState, AvatarVrmPickerState, DebugUiState};
 use crate::plugins::avatar::AvatarDebugStats;
+use crate::plugins::avatar_defaults::{
+    apply_avatar_defaults_now, save_avatar_defaults_from_snapshot, AvatarDefaultsStatus,
+};
 use crate::plugins::channel_server::{
     ChatCompleteMessage, HubBroadcast, HubState, LookAtRequestMessage, TtsSpeakMessage,
 };
-use crate::plugins::pose_driver::{PoseCommand, PoseCommandSender};
+use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommand, PoseCommandSender};
+use crate::plugins::anim_layer_sets::LayerSetsStore;
+use crate::plugins::anim_layers::{
+    begin_library_animation_edit, idle_clip_library_filename, LayerStackHandle,
+};
+use crate::plugins::pose_library_assets::PoseLibraryAssets;
+use crate::plugins::vrma_clip_import::{StartVrmaClipImport, VrmaClipImportState};
 
 // ---------- Avatar ------------------------------------------------------------
 
@@ -27,6 +37,13 @@ pub fn draw_avatar_window(
     mut state: ResMut<DebugUiState>,
     stats: Res<AvatarDebugStats>,
     pose_tx: Option<Res<PoseCommandSender>>,
+    snapshot: Option<Res<BoneSnapshotHandle>>,
+    defaults_status: Option<Res<AvatarDefaultsStatus>>,
+    layer_sets: Option<Res<LayerSetsStore>>,
+    library: Option<Res<PoseLibraryAssets>>,
+    stack: Option<Res<LayerStackHandle>>,
+    import_state: Option<Res<VrmaClipImportState>>,
+    mut import_events: MessageWriter<StartVrmaClipImport>,
 ) {
     if !settings.ui.show_avatar {
         return;
@@ -35,6 +52,10 @@ pub fn draw_avatar_window(
         return;
     };
     let mut open = settings.ui.show_avatar;
+    let mut pending_save_defaults = false;
+    let mut pending_apply_defaults = false;
+    let mut pending_import_idle = false;
+    let mut pending_edit_idle_layers = false;
     egui::Window::new("Avatar")
         .default_width(380.0)
         .open(&mut open)
@@ -126,8 +147,100 @@ pub fn draw_avatar_window(
             }
 
             ui.separator();
-            ui.label("Default idle VRMA (spawned with VRM; edit in config to change):");
-            ui.add_enabled(false, egui::TextEdit::singleline(&mut a.idle_vrma_path));
+            ui.label("Default idle VRMA (spawned with VRM unless idle_use_layer_stack):");
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    false,
+                    egui::TextEdit::singleline(&mut a.idle_vrma_path).desired_width(220.0),
+                );
+                ui.checkbox(
+                    &mut a.idle_use_layer_stack,
+                    "idle via layer stack",
+                )
+                .on_hover_text(
+                    "When enabled, skip VRMA autoplay and drive base idle from avatar_defaults.idle_clip / imported JSON clip layer.",
+                );
+            });
+            ui.checkbox(
+                &mut a.auto_apply_avatar_defaults,
+                "auto-apply avatar defaults on load",
+            );
+
+            ui.separator();
+            ui.label("Avatar defaults (per model):");
+            ui.monospace(avatar_defaults_path(&a.model_path).display().to_string());
+            ui.small(
+                "Saves current expression overrides (+ optional rest pose / layer set) to config/ModelOverrides/{stem}/avatar_defaults.json",
+            );
+            let defaults_ui = &mut state.avatar_defaults;
+            ui.horizontal(|ui| {
+                ui.label("rest_pose:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut defaults_ui.rest_pose)
+                        .hint_text("optional pose library name")
+                        .desired_width(160.0),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("layer_set:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut defaults_ui.layer_set)
+                        .hint_text("optional anim_layer_sets name")
+                        .desired_width(160.0),
+                );
+            });
+            ui.horizontal(|ui| {
+                let can_save = snapshot.is_some();
+                if ui
+                    .add_enabled(can_save, egui::Button::new("Save defaults"))
+                    .on_hover_text("Capture current expression overrides")
+                    .clicked()
+                {
+                    pending_save_defaults = true;
+                }
+                if ui
+                    .add_enabled(
+                        pose_tx.is_some() && library.is_some() && stack.is_some(),
+                        egui::Button::new("Apply now"),
+                    )
+                    .clicked()
+                {
+                    pending_apply_defaults = true;
+                }
+                if ui.button("Import idle VRMA → layers").on_hover_text(
+                    "Bake [avatar].idle_vrma_path to JSON @ 10 fps, one layer-stack layer per bone, enable idle via layer stack",
+                ).clicked() {
+                    pending_import_idle = true;
+                }
+                if ui
+                    .button("Edit idle in layer stack")
+                    .on_hover_text(
+                        "Open Animation Layers with one layer per bone. Import idle VRMA first if no JSON clip exists.",
+                    )
+                    .clicked()
+                {
+                    pending_edit_idle_layers = true;
+                }
+            });
+            if let Some(msg) = &defaults_ui.message {
+                ui.colored_label(egui::Color32::from_rgb(160, 200, 160), msg);
+            }
+            if let Some(st) = defaults_status.as_deref() {
+                if let Some(msg) = &st.last_message {
+                    ui.small(msg);
+                }
+                if let Some(err) = &st.last_error {
+                    ui.colored_label(egui::Color32::from_rgb(220, 120, 120), err);
+                }
+            }
+            if let Some(import) = import_state.as_deref() {
+                if let Some(s) = &import.status {
+                    ui.small(s);
+                }
+                if let Some(e) = &import.error {
+                    ui.colored_label(egui::Color32::from_rgb(220, 120, 120), e);
+                }
+            }
 
             ui.separator();
             ui.label("world_position (pulls rig toward origin/focus):");
@@ -172,6 +285,86 @@ pub fn draw_avatar_window(
             a.window_height = h.max(0) as u32;
         });
     settings.ui.show_avatar = open;
+
+    if pending_save_defaults {
+        let defaults_ui = &mut state.avatar_defaults;
+        if let Some(snap) = snapshot.as_ref() {
+            let rest = optional_trim(&defaults_ui.rest_pose);
+            let set = optional_trim(&defaults_ui.layer_set);
+            match save_avatar_defaults_from_snapshot(
+                &settings.avatar.model_path,
+                &snap.0.read(),
+                rest,
+                set,
+                None,
+                settings.avatar.idle_use_layer_stack,
+            ) {
+                Ok(p) => {
+                    defaults_ui.message = Some(format!("saved → {}", p.display()));
+                }
+                Err(e) => defaults_ui.message = Some(e),
+            }
+        }
+    }
+    if pending_apply_defaults {
+        let defaults_ui = &mut state.avatar_defaults;
+        if let (Some(tx), Some(lib), Some(sets), Some(st)) = (
+            pose_tx.as_deref(),
+            library.as_deref(),
+            layer_sets.as_deref(),
+            stack.as_deref(),
+        ) {
+            if let Some(file) = load_avatar_defaults(&settings.avatar.model_path) {
+                match apply_avatar_defaults_now(&settings, &file, tx, lib, sets, st) {
+                    Ok(msg) => defaults_ui.message = Some(msg),
+                    Err(e) => defaults_ui.message = Some(e),
+                }
+            } else {
+                defaults_ui.message =
+                    Some("no avatar_defaults.json for this model".into());
+            }
+        }
+    }
+    if pending_import_idle {
+        import_events.write(StartVrmaClipImport {
+            vrma_path: String::new(),
+            output_name: String::new(),
+            sample_fps: 10.0,
+            add_as_base_layer: true,
+            save_to_defaults: true,
+            use_layer_stack_for_idle: true,
+            per_bone_layers: true,
+        });
+    }
+    if pending_edit_idle_layers {
+        settings.ui.show_anim_layers = true;
+        settings.avatar.idle_use_layer_stack = true;
+        let filename = load_avatar_defaults(&settings.avatar.model_path)
+            .and_then(|d| d.idle_clip)
+            .unwrap_or_else(|| idle_clip_library_filename(&settings.avatar.model_path));
+        let defaults_ui = &mut state.avatar_defaults;
+        if let (Some(stack), Some(store), Some(lib)) =
+            (stack.as_deref(), layer_sets.as_deref(), library.as_deref())
+        {
+            match begin_library_animation_edit(&filename, &lib.library, store, stack) {
+                Ok(msg) => defaults_ui.message = Some(msg),
+                Err(e) => defaults_ui.message = Some(format!(
+                    "idle layer edit failed: {e} — run Import idle VRMA → layers first"
+                )),
+            }
+        } else {
+            defaults_ui.message = Some("layer stack / library unavailable".into());
+        }
+    }
+}
+
+fn optional_trim(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 fn queue_avatar_vrm_load(

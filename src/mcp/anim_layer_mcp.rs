@@ -82,6 +82,10 @@ pub struct AddLayerArgs {
     #[serde(default)]
     pub mask_exclude: Option<Vec<String>>,
     #[serde(default)]
+    pub mask_include_subtrees: Option<Vec<String>>,
+    #[serde(default)]
+    pub mask_exclude_subtrees: Option<Vec<String>>,
+    #[serde(default)]
     pub speed: Option<f32>,
     #[serde(default)]
     pub looping: Option<bool>,
@@ -142,6 +146,10 @@ pub struct UpdateLayerArgs {
     pub mask_include: Option<Vec<String>>,
     #[serde(default)]
     pub mask_exclude: Option<Vec<String>>,
+    #[serde(default)]
+    pub mask_include_subtrees: Option<Vec<String>>,
+    #[serde(default)]
+    pub mask_exclude_subtrees: Option<Vec<String>>,
     #[serde(default)]
     pub speed: Option<f32>,
     #[serde(default)]
@@ -353,6 +361,12 @@ pub fn build_layer(library: &PoseLibrary, args: &AddLayerArgs) -> Result<Layer, 
     if let Some(exc) = &args.mask_exclude {
         layer.mask.exclude = exc.clone();
     }
+    if let Some(inc) = &args.mask_include_subtrees {
+        layer.mask.include_subtrees = inc.clone();
+    }
+    if let Some(exc) = &args.mask_exclude_subtrees {
+        layer.mask.exclude_subtrees = exc.clone();
+    }
     if let Some(sp) = args.speed {
         layer.speed = sp.max(0.01);
     }
@@ -408,8 +422,11 @@ pub fn apply_driver_patch(d: &mut DriverKind, p: &DriverParamsPatch) -> Result<(
         return Ok(());
     }
     match d {
-        DriverKind::Clip { .. } | DriverKind::PoseHold { .. } => Err(
-            "driver_params cannot change clip/pose_hold — remove_layer then add_layer".into(),
+        DriverKind::Clip { .. }
+        | DriverKind::PoseHold { .. }
+        | DriverKind::ExpressionHold { .. } => Err(
+            "driver_params cannot change clip/pose_hold/expression_hold — remove_layer then add_layer"
+                .into(),
         ),
         DriverKind::Breathing {
             rate_hz,
@@ -507,6 +524,12 @@ pub fn apply_layer_row_patch(layer: &mut Layer, args: &UpdateLayerArgs) -> Resul
     if let Some(exc) = &args.mask_exclude {
         layer.mask.exclude = exc.clone();
     }
+    if let Some(inc) = &args.mask_include_subtrees {
+        layer.mask.include_subtrees = inc.clone();
+    }
+    if let Some(exc) = &args.mask_exclude_subtrees {
+        layer.mask.exclude_subtrees = exc.clone();
+    }
     if let Some(sp) = args.speed {
         layer.speed = sp.max(0.01);
     }
@@ -529,6 +552,9 @@ fn driver_to_json(d: &DriverKind) -> Value {
         }
         DriverKind::PoseHold { pose } => {
             json!({"kind": "pose_hold", "poseName": pose.name, "boneCount": pose.bones.len()})
+        }
+        DriverKind::ExpressionHold { expressions } => {
+            json!({"kind": "expression_hold", "expressions": expressions})
         }
         DriverKind::Breathing {
             rate_hz,

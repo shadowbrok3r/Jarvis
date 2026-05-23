@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock};
 use bevy::prelude::*;
 use jarvis_avatar::config::Settings;
 
+use crate::mcp::intent_calibration_wizard::IntentCalibrationWizardSession;
 use crate::mcp::semantic_intent_calibration::SemanticIntentCalibrationStore;
 
 /// Mirrors [`Settings::avatar::model_path`] every frame for MCP tool handlers.
@@ -16,6 +17,10 @@ pub struct SemanticIntentModelPath(pub Arc<RwLock<String>>);
 /// Per-VRM hex-key → calibration; persisted under `config/semantic_intent_calibration/`.
 #[derive(Resource, Clone)]
 pub struct SemanticIntentCalibrationHandle(pub Arc<RwLock<SemanticIntentCalibrationStore>>);
+
+/// MCP + Intent Lab guided calibration wizard (one probe, then forced confirm).
+#[derive(Resource, Clone)]
+pub struct IntentCalibrationWizardHandle(pub Arc<RwLock<IntentCalibrationWizardSession>>);
 
 pub struct IntentCalibrationPlugin;
 
@@ -27,6 +32,9 @@ fn startup_init(mut commands: Commands, settings: Res<Settings>) {
     ))));
     commands.insert_resource(SemanticIntentCalibrationHandle(Arc::new(RwLock::new(
         store,
+    ))));
+    commands.insert_resource(IntentCalibrationWizardHandle(Arc::new(RwLock::new(
+        IntentCalibrationWizardSession::default(),
     ))));
 }
 

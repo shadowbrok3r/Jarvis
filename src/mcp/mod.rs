@@ -18,6 +18,7 @@ pub mod pose_authoring;
 pub mod pose_intents;
 pub mod pose_safety;
 pub mod semantic_intent_calibration;
+pub mod intent_calibration_wizard;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -63,6 +64,7 @@ use pose_intents::{
 };
 use pose_safety::{is_arm_bone, is_leg_bone, PoseSafetyReport};
 use semantic_intent_calibration::{SemanticIntentCalibration, SemanticIntentCalibrationStore};
+use intent_calibration_wizard::{ConfirmVerdict, IntentCalibrationWizardSession, WIZARD_STEPS};
 
 use crate::plugins::anim_layer_sets::LayerSetsStore;
 use crate::plugins::anim_layers::LayerStackHandle;
@@ -89,6 +91,7 @@ pub struct JarvisMcpServer {
     /// Matches `[avatar].model_path` — drives which per-VRM semantic calibration applies.
     pub semantic_model_path: Arc<RwLock<String>>,
     pub semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
+    pub intent_calibration_wizard: Arc<RwLock<IntentCalibrationWizardSession>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -116,6 +119,7 @@ impl JarvisMcpServer {
         layer_sets: LayerSetsStore,
         semantic_model_path: Arc<RwLock<String>>,
         semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
+        intent_calibration_wizard: Arc<RwLock<IntentCalibrationWizardSession>>,
     ) -> Self {
         Self::with_kimodo(
             pose_tx,
@@ -133,6 +137,7 @@ impl JarvisMcpServer {
             layer_sets,
             semantic_model_path,
             semantic_calibration,
+            intent_calibration_wizard,
         )
     }
 
@@ -156,6 +161,7 @@ impl JarvisMcpServer {
         layer_sets: LayerSetsStore,
         semantic_model_path: Arc<RwLock<String>>,
         semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
+        intent_calibration_wizard: Arc<RwLock<IntentCalibrationWizardSession>>,
     ) -> Self {
         Self {
             pose_tx,
@@ -173,6 +179,7 @@ impl JarvisMcpServer {
             layer_sets,
             semantic_model_path,
             semantic_calibration,
+            intent_calibration_wizard,
             tool_router: Self::tool_router(),
         }
     }
@@ -185,6 +192,14 @@ impl JarvisMcpServer {
 }
 
 // ---------- tool parameter types ---------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IntentCalibrationConfirmArgs {
+    /// Must match the `stepId` from the latest `intent_calibration_probe` response.
+    pub step_id: String,
+    /// Human verdict after they inspected the pose: `correct`, `flip`, or `skip`.
+    pub verdict: String,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ApplyPoseArgs {
@@ -1013,6 +1028,144 @@ impl JarvisMcpServer {
         self.apply_intent_bones("arms_down_rest", &bones, dry_run, false, true)
     }
 
+    #[tool(description = "Start the Intent Lab calibration wizard for the loaded VRM. Returns step checklist + agent workflow: (1) call intent_calibration_probe once per step — it resets pose and applies a test intent; (2) STOP and ask the human to verify in the viewport or Intent Lab; (3) only after the human answers, call intent_calibration_confirm with their verdict; (4) repeat until complete; (5) save_intent_calibration. Probes are BLOCKED until the previous step is confirmed.")]
+    async fn begin_intent_calibration_wizard(&self) -> CallToolResult {
+        let path = self.semantic_model_path.read().unwrap().clone();
+        let key = crate::plugins::vrm_preset_key(&path);
+        let baseline = self.semantic_calibration.read().unwrap().get(&key);
+        let mut wiz = self.intent_calibration_wizard.write().unwrap();
+        wiz.begin(key.clone(), path.clone(), baseline);
+        let steps: Vec<_> = WIZARD_STEPS
+            .iter()
+            .map(|s| {
+                json!({
+                    "id": s.id,
+                    "label": s.label,
+                    "userQuestion": s.user_question,
+                })
+            })
+            .collect();
+        ok_json(&json!({
+            "started": true,
+            "vrmKey": key,
+            "logicalPath": path,
+            "steps": steps,
+            "agentWorkflow": [
+                "Call intent_calibration_probe — applies one test pose and sets awaitingUserConfirm.",
+                "STOP. Ask the human the userQuestion from the response. Do NOT call another probe or skip confirm.",
+                "When the human answers, call intent_calibration_confirm with step_id + verdict (correct | flip | skip).",
+                "If flip: the relevant calibration sign is multiplied by -1 and the next probe uses the new sign.",
+                "Repeat probe → human confirm until wizardComplete. Then save_intent_calibration.",
+                "Optional: capture_pose_views (left, right, back) after each probe to help the human decide.",
+            ],
+        }))
+    }
+
+    #[tool(description = "Wizard: apply the current calibration probe (resets pose first). BLOCKS if a previous probe is still awaiting human confirm. Returns awaitingUserConfirm=true and the question you MUST ask the human before calling intent_calibration_confirm.")]
+    async fn intent_calibration_probe(&self) -> CallToolResult {
+        let mut wiz = self.intent_calibration_wizard.write().unwrap();
+        let (bones, pending) = match wiz.probe_bones() {
+            Ok(v) => v,
+            Err(e) => return err_text(e),
+        };
+        drop(wiz);
+
+        self.pose_tx.send(PoseCommand::ResetPose);
+        if let Err(msg) = self.dispatch_intent_bones_map(
+            &bones,
+            pending.step_id == "arms_down_rest",
+        ) {
+            return err_text(msg);
+        }
+
+        ok_json(&json!({
+            "awaitingUserConfirm": true,
+            "stepId": pending.step_id,
+            "label": pending.label,
+            "userQuestion": pending.user_question,
+            "appliedBones": pending.applied_bone_keys,
+            "instruction": "STOP — ask the human this question. Do not probe again until intent_calibration_confirm succeeds.",
+        }))
+    }
+
+    #[tool(description = "Wizard: record the human's verdict after intent_calibration_probe. REQUIRED step_id (must match awaiting step) and verdict: correct (sign stays), flip (multiply relevant sign by -1), or skip (leave sign, advance).")]
+    async fn intent_calibration_confirm(
+        &self,
+        Parameters(args): Parameters<IntentCalibrationConfirmArgs>,
+    ) -> CallToolResult {
+        let verdict = match args.verdict.as_str() {
+            "correct" => ConfirmVerdict::Correct,
+            "flip" => ConfirmVerdict::Flip,
+            "skip" => ConfirmVerdict::Skip,
+            other => {
+                return err_text(format!(
+                    "invalid verdict {other:?} — use correct, flip, or skip"
+                ));
+            }
+        };
+        let mut wiz = self.intent_calibration_wizard.write().unwrap();
+        match wiz.confirm(&args.step_id, verdict) {
+            Ok(v) => ok_json(&v),
+            Err(e) => err_text(e),
+        }
+    }
+
+    #[tool(description = "Wizard: read session phase, current step, awaitingUserConfirm flag, draft calibration, and completed step log.")]
+    async fn get_intent_calibration_wizard_status(&self) -> CallToolResult {
+        let wiz = self.intent_calibration_wizard.read().unwrap();
+        ok_json(&wiz.status_snapshot())
+    }
+
+    #[tool(description = "Persist semantic intent calibration for the loaded VRM. When a wizard session is active or complete, saves its draft multipliers; otherwise saves the stored calibration unchanged.")]
+    async fn save_intent_calibration(&self) -> CallToolResult {
+        let path = self.semantic_model_path.read().unwrap().clone();
+        let key = crate::plugins::vrm_preset_key(&path);
+        let wiz = self.intent_calibration_wizard.read().unwrap();
+        let (cal, save_path) = match &wiz.phase {
+            intent_calibration_wizard::WizardPhase::Active {
+                draft,
+                logical_path,
+                ..
+            }
+            | intent_calibration_wizard::WizardPhase::Complete {
+                draft,
+                logical_path,
+                ..
+            } => (draft.clone(), logical_path.clone()),
+            intent_calibration_wizard::WizardPhase::Idle => {
+                drop(wiz);
+                let cal = self.semantic_calibration.read().unwrap().get(&key);
+                let mut store = self.semantic_calibration.write().unwrap();
+                store.insert(key.clone(), cal.clone());
+                return match store.save_file(&key, &path, &cal) {
+                    Ok(()) => ok_json(&json!({
+                        "saved": true,
+                        "vrmKey": key,
+                        "calibration": cal,
+                    })),
+                    Err(e) => err_text(e),
+                };
+            }
+        };
+        drop(wiz);
+        let mut store = self.semantic_calibration.write().unwrap();
+        store.insert(key.clone(), cal.clone());
+        match store.save_file(&key, &save_path, &cal) {
+            Ok(()) => ok_json(&json!({
+                "saved": true,
+                "vrmKey": key,
+                "calibration": cal,
+            })),
+            Err(e) => err_text(e),
+        }
+    }
+
+    #[tool(description = "Wizard: abort the in-progress calibration session without saving.")]
+    async fn abort_intent_calibration_wizard(&self) -> CallToolResult {
+        self.intent_calibration_wizard.write().unwrap().abort();
+        ok_text("intent calibration wizard aborted")
+    }
+
     #[tool(description = "Blend both hands toward a canned fist (amount 0..1). Fingers stay within safe curl templates — use for believable grips instead of hand-tuning many quaternions.")]
     async fn make_fist(&self, Parameters(args): Parameters<MakeFistArgs>) -> CallToolResult {
         let do_left = args.left.unwrap_or(true);
@@ -1765,6 +1918,44 @@ impl JarvisMcpServer {
 }
 
 impl JarvisMcpServer {
+    fn dispatch_intent_bones_map(
+        &self,
+        bones: &HashMap<String, BoneEulerDeg>,
+        _touches_arms_hint: bool,
+    ) -> Result<usize, String> {
+        if bones.is_empty() {
+            return Err("empty bone map".into());
+        }
+        let snap = self.snapshot.0.read();
+        for bone in bones.keys() {
+            if !mcp_allows_pose_bone_key(bone, &snap) {
+                return Err(format!(
+                    "bone \"{bone}\" not on the loaded VRM — load a rig first"
+                ));
+            }
+        }
+        drop(snap);
+
+        let safety = PoseSafetyReport::from_euler_map(bones);
+        if let Some(reason) = safety.should_block(false, false) {
+            return Err(format!(
+                "unsafe map ({}): {reason}",
+                safety.severity.as_str()
+            ));
+        }
+
+        let (quats, _warnings) = bone_map_from_euler_deg(bones);
+        let (sanitized, _w2) = sanitize_bone_map(quats);
+        let count = sanitized.len();
+        self.pose_tx.send(PoseCommand::ApplyBones {
+            bones: sanitized,
+            preserve_omitted_bones: true,
+            blend_weight: None,
+            transition_seconds: None,
+        });
+        Ok(count)
+    }
+
     /// Common dispatch path for the semantic intent tools (`raise_leg`,
     /// `bend_knee`, `arms_down_rest`). Validates bone keys against the live
     /// snapshot, runs the same hybrid-safety + sanitize pipeline as

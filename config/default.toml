@@ -44,6 +44,10 @@ lock_vrm_root_y = true
 # When true, after the VRM is initialized, auto-apply `config/spring_presets/<vrm_key>.toml` if present.
 # Default off — export tuning from the Rig editor first, then enable for hands-free reloads.
 auto_load_spring_preset = false
+# When true, idle motion uses the layer-stack clip from avatar_defaults instead of VRMA autoplay.
+idle_use_layer_stack = false
+# Apply config/ModelOverrides/{stem}/avatar_defaults.json after the rig is ready.
+auto_apply_avatar_defaults = true
 background_color = [0.05, 0.05, 0.08, 1.0]
 window_width = 800
 window_height = 900
@@ -138,6 +142,8 @@ animations_dir = "~/.config/@proj-airi/stage-tamagotchi/plugins/v1/CustomPlugins
 # On first run (empty layer stack), install the default procedural stack and turn composing on.
 auto_install_procedural = true
 master_enabled_default = true
+# Optional named set from config/anim_layer_sets.json loaded on boot (after auto-install).
+boot_layer_set = ""
 
 [graphics.advanced]
 tonemapping = "TonyMcMapface"

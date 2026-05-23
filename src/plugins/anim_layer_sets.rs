@@ -227,6 +227,10 @@ pub struct LayerBlueprint {
     pub mask_include: Vec<String>,
     #[serde(default)]
     pub mask_exclude: Vec<String>,
+    #[serde(default)]
+    pub mask_include_subtrees: Vec<String>,
+    #[serde(default)]
+    pub mask_exclude_subtrees: Vec<String>,
     #[serde(default = "one")]
     pub speed: f32,
     #[serde(default = "yes")]
@@ -254,6 +258,8 @@ impl LayerBlueprint {
             },
             mask_include: layer.mask.include.clone(),
             mask_exclude: layer.mask.exclude.clone(),
+            mask_include_subtrees: layer.mask.include_subtrees.clone(),
+            mask_exclude_subtrees: layer.mask.exclude_subtrees.clone(),
             speed: layer.speed,
             looping: layer.looping,
         }
@@ -277,6 +283,8 @@ impl LayerBlueprint {
             mask: BoneMask {
                 include: self.mask_include.clone(),
                 exclude: self.mask_exclude.clone(),
+                include_subtrees: self.mask_include_subtrees.clone(),
+                exclude_subtrees: self.mask_exclude_subtrees.clone(),
             },
             time: 0.0,
             speed: self.speed,
@@ -330,6 +338,9 @@ pub enum DriverBlueprint {
         frequency_hz: f32,
         seed: u64,
     },
+    ExpressionHold {
+        expressions: HashMap<String, f32>,
+    },
 }
 
 impl DriverBlueprint {
@@ -343,6 +354,9 @@ impl DriverBlueprint {
             },
             DriverKind::PoseHold { pose } => Self::PoseHold {
                 pose_ref: format!("{}.json", slugify(&pose.name)),
+            },
+            DriverKind::ExpressionHold { expressions } => Self::ExpressionHold {
+                expressions: expressions.clone(),
             },
             DriverKind::Breathing {
                 rate_hz,
@@ -413,6 +427,9 @@ impl DriverBlueprint {
                     pose: Box::new(pose),
                 }
             }
+            Self::ExpressionHold { expressions } => DriverKind::ExpressionHold {
+                expressions: expressions.clone(),
+            },
             Self::Breathing {
                 rate_hz,
                 pitch_deg,

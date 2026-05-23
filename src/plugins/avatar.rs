@@ -85,7 +85,7 @@ pub(crate) fn spawn_avatar_vrm(
         VrmHandle(asset_server.load(vrm_path)),
     ));
 
-    if !vrma_path.trim().is_empty() {
+    if !vrma_path.trim().is_empty() && !settings.avatar.idle_use_layer_stack {
         vrm.with_children(|parent| {
             parent
                 .spawn(VrmaHandle(asset_server.load(vrma_path)))

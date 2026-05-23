@@ -3,6 +3,7 @@
 pub mod a2f;
 pub mod act;
 pub mod arkit;
+pub mod avatar_defaults;
 pub mod config;
 pub mod egui_theme;
 pub mod emotions;

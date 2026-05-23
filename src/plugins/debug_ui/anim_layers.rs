@@ -22,6 +22,9 @@
 //! drives everything through `handle.with_write` — so the UI and the ECS
 //! system never race.
 
+use std::collections::HashMap;
+
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
@@ -30,9 +33,9 @@ use jarvis_avatar::pose_library::{AnimationFile, slugify};
 
 use crate::plugins::anim_layer_sets::LayerSetsStore;
 use crate::plugins::anim_layers::{
-    BlendMode, BoneMask, DriverKind, Layer, LayerStack, LayerStackHandle, RestPoseSnapshot,
+    BlendMode, BoneMask, DriverKind, Layer, LayerStack, RestPoseSnapshot,
 };
-use crate::plugins::pose_driver::{IndexedBones, VRM_BONE_NAMES};
+use crate::plugins::pose_driver::{BoneHierarchy, BoneSnapshotHandle, IndexedBones, VRM_BONE_NAMES};
 use crate::plugins::pose_library_assets::PoseLibraryAssets;
 
 /// Transient per-window state kept on `DebugUiState`. Holds nothing that
@@ -49,6 +52,12 @@ pub struct AnimLayersUiState {
     pub picked_set: String,
     /// Scratch buffer for the "Save as…" text input.
     pub new_set_name: String,
+    /// Filter layer rows by label / slug / kind (case-insensitive substring).
+    pub layer_filter: String,
+    /// Collapsed group headers in the layer list (`group_key` strings).
+    pub collapsed_groups: std::collections::HashSet<String>,
+    /// Selected VRM expression preset for "Expression preset…" add choice.
+    pub picked_expression: String,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
@@ -61,6 +70,7 @@ pub enum AddDriverChoice {
     ToeFidget,
     ClipFromLibrary,
     PoseFromLibrary,
+    ExpressionPreset,
 }
 
 impl AddDriverChoice {
@@ -73,6 +83,7 @@ impl AddDriverChoice {
             Self::ToeFidget => "Toe Fidget",
             Self::ClipFromLibrary => "Clip from Library…",
             Self::PoseFromLibrary => "Pose from Library…",
+            Self::ExpressionPreset => "Expression preset…",
         }
     }
 }
@@ -85,25 +96,37 @@ const ALL_CHOICES: &[AddDriverChoice] = &[
     AddDriverChoice::ToeFidget,
     AddDriverChoice::ClipFromLibrary,
     AddDriverChoice::PoseFromLibrary,
+    AddDriverChoice::ExpressionPreset,
 ];
+
+/// Fixed-height footer toolbar inside the Animation Layers panel.
+const ADD_BAR_HEIGHT: f32 = 34.0;
+
+/// Layer-stack resources for the Animation Layers window.
+#[derive(SystemParam)]
+pub struct AnimLayersWindowParams<'w> {
+    pub handle: Option<Res<'w, crate::plugins::anim_layers::LayerStackHandle>>,
+    pub library: Option<Res<'w, PoseLibraryAssets>>,
+    pub rest: Option<Res<'w, crate::plugins::anim_layers::RestPoseSnapshot>>,
+    pub indexed: Option<Res<'w, IndexedBones>>,
+    pub hierarchy: Option<Res<'w, BoneHierarchy>>,
+    pub layer_sets: Option<Res<'w, LayerSetsStore>>,
+    pub snapshot: Option<Res<'w, BoneSnapshotHandle>>,
+}
 
 pub fn draw_anim_layers_window(
     mut contexts: EguiContexts,
     mut settings: ResMut<Settings>,
     mut state: ResMut<super::DebugUiState>,
-    handle: Option<Res<LayerStackHandle>>,
-    library: Option<Res<PoseLibraryAssets>>,
-    rest: Option<Res<RestPoseSnapshot>>,
-    indexed: Option<Res<IndexedBones>>,
-    layer_sets: Option<Res<LayerSetsStore>>,
+    params: AnimLayersWindowParams,
 ) {
     if !settings.ui.show_anim_layers {
         return;
     }
     let Ok(ctx) = contexts.ctx_mut() else { return };
-    let Some(handle) = handle else { return };
+    let Some(handle) = params.handle.as_ref() else { return };
 
-    let available_bones = available_bone_names(indexed.as_deref());
+    let available_bones = available_bone_names(params.indexed.as_deref());
 
     let dock_side = settings.ui.anim_layers_dock_side.clone();
     let bottom_h = settings.ui.anim_layers_bottom_height.max(160.0);
@@ -119,24 +142,52 @@ pub fn draw_anim_layers_window(
         anim_layers_dock_header(ui, &dock_side, &mut requested_dock_side);
         ui.separator();
         handle.with_write(|stack| {
-            top_bar(ui, &mut state.anim_layers, stack, rest.as_deref());
+            top_bar(ui, &mut state.anim_layers, stack, params.rest.as_deref());
             ui.separator();
             layer_sets_bar(
                 ui,
                 &mut state.anim_layers,
                 stack,
-                layer_sets.as_deref(),
-                library.as_deref(),
+                params.layer_sets.as_deref(),
+                params.library.as_deref(),
             );
             ui.separator();
-            layer_list(ui, &mut state.anim_layers, stack, &available_bones);
+            ui.horizontal(|ui| {
+                ui.label("Filter:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.anim_layers.layer_filter)
+                        .hint_text("bone name, label, kind…")
+                        .desired_width(ui.available_width().min(280.0)),
+                );
+                if ui.button("Clear").clicked() {
+                    state.anim_layers.layer_filter.clear();
+                }
+            });
             ui.separator();
-            add_layer_bar(ui, &mut state.anim_layers, stack, library.as_deref());
+            egui::TopBottomPanel::bottom("anim_layers_inner_toolbar")
+                .exact_height(ADD_BAR_HEIGHT)
+                .show_inside(ui, |ui| {
+                    let presets = expression_presets(params.snapshot.as_deref());
+                    add_layer_bar(
+                        ui,
+                        &mut state.anim_layers,
+                        stack,
+                        params.library.as_deref(),
+                        &presets,
+                    );
+                });
+            layer_list(
+                ui,
+                &mut state.anim_layers,
+                stack,
+                &available_bones,
+                params.hierarchy.as_deref(),
+            );
             if let Some(msg) = &state.anim_layers.status {
                 ui.add_space(4.0);
                 ui.colored_label(egui::Color32::from_rgb(160, 200, 160), msg);
             }
-            if let Some(store) = layer_sets.as_deref() {
+            if let Some(store) = params.layer_sets.as_deref() {
                 let guard = store.inner.read();
                 if let Some(err) = &guard.last_error {
                     ui.colored_label(egui::Color32::from_rgb(220, 120, 120), err);
@@ -414,35 +465,114 @@ fn layer_sets_bar(
     });
 }
 
+fn expression_presets(snapshot: Option<&BoneSnapshotHandle>) -> Vec<String> {
+    let mut names: Vec<String> = snapshot
+        .map(|s| s.0.read().expression_presets.clone())
+        .unwrap_or_default();
+    names.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+    names.dedup();
+    names
+}
+
+fn layer_group_key(layer: &Layer) -> &'static str {
+    match layer.driver.kind_label() {
+        "breathing" | "auto-blink" | "weight-shift" | "finger-fidget" | "toe-fidget" => {
+            "Procedural"
+        }
+        "expression-hold" => "Expression presets",
+        "pose-hold" => "Pose holds",
+        "clip" if layer.slug.starts_with("bone-") => "Bone clips",
+        "clip" if layer.slug.starts_with("expr-") => "Expression clips",
+        "clip" if layer.slug == "expressions" || layer.label.contains("expressions") => {
+            "Expression clips"
+        }
+        "clip" => "Clips",
+        _ => "Other",
+    }
+}
+
+fn layer_matches_filter(layer: &Layer, filter: &str) -> bool {
+    let f = filter.trim().to_ascii_lowercase();
+    if f.is_empty() {
+        return true;
+    }
+    layer.label.to_ascii_lowercase().contains(&f)
+        || layer.slug.to_ascii_lowercase().contains(&f)
+        || layer.driver.kind_label().contains(&f)
+        || layer_group_key(layer).to_ascii_lowercase().contains(&f)
+        || layer.mask.include.iter().any(|b| b.to_ascii_lowercase().contains(&f))
+}
+
 fn layer_list(
     ui: &mut egui::Ui,
     ui_state: &mut AnimLayersUiState,
     stack: &mut LayerStack,
     bone_names: &[String],
+    hierarchy: Option<&BoneHierarchy>,
 ) {
     let mut to_remove: Option<u64> = None;
     let mut to_move: Option<(usize, isize)> = None;
 
+    let filter = ui_state.layer_filter.clone();
+    let mut groups: std::collections::BTreeMap<&'static str, Vec<(usize, u64)>> =
+        std::collections::BTreeMap::new();
+    for (idx, layer) in stack.layers.iter().enumerate() {
+        if !layer_matches_filter(layer, &filter) {
+            continue;
+        }
+        groups
+            .entry(layer_group_key(layer))
+            .or_default()
+            .push((idx, layer.id));
+    }
+
     egui::ScrollArea::vertical()
         .id_salt("anim_layers_list")
         .auto_shrink([false, false])
-        .max_height(340.0)
         .show(ui, |ui| {
             if stack.layers.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(24.0);
                     ui.label(egui::RichText::new("No layers yet").italics());
-                    ui.small("Use + Add or Install defaults.");
+                    ui.small("Use + Add or Install defaults in the toolbar below.");
                 });
                 return;
             }
-            for (idx, layer) in stack.layers.iter_mut().enumerate() {
-                let action = layer_row(ui, ui_state, idx, layer, bone_names);
-                match action {
-                    Some(LayerAction::Delete) => to_remove = Some(layer.id),
-                    Some(LayerAction::MoveUp) => to_move = Some((idx, -1)),
-                    Some(LayerAction::MoveDown) => to_move = Some((idx, 1)),
-                    None => {}
+            if groups.is_empty() {
+                ui.label(egui::RichText::new("No layers match filter").italics());
+                return;
+            }
+            for (group, entries) in groups {
+                let mut open = !ui_state.collapsed_groups.contains(group);
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button(if open { "▼" } else { "▶" })
+                        .on_hover_text("expand / collapse group")
+                        .clicked()
+                    {
+                        open = !open;
+                    }
+                    ui.label(egui::RichText::new(format!("{group} ({})", entries.len())).strong());
+                });
+                if open {
+                    ui_state.collapsed_groups.remove(group);
+                    ui.indent(format!("grp_{group}"), |ui| {
+                        for (idx, id) in &entries {
+                            let Some(layer) = stack.layers.iter_mut().find(|l| l.id == *id) else {
+                                continue;
+                            };
+                            let action =
+                                layer_row(ui, ui_state, *idx, layer, bone_names, hierarchy);
+                            match action {
+                                Some(LayerAction::Delete) => to_remove = Some(layer.id),
+                                Some(LayerAction::MoveUp) => to_move = Some((*idx, -1)),
+                                Some(LayerAction::MoveDown) => to_move = Some((*idx, 1)),
+                                None => {}
+                            }
+                        }
+                    });
+                } else {
+                    ui_state.collapsed_groups.insert(group.to_string());
                 }
             }
         });
@@ -472,6 +602,7 @@ fn layer_row(
     idx: usize,
     layer: &mut Layer,
     bone_names: &[String],
+    hierarchy: Option<&BoneHierarchy>,
 ) -> Option<LayerAction> {
     let mut action: Option<LayerAction> = None;
     let header_color = kind_color(layer.driver.kind_label());
@@ -494,7 +625,10 @@ fn layer_row(
             ui.horizontal(|ui| {
                 ui.checkbox(&mut layer.enabled, "");
                 ui.colored_label(header_color, format!("[{}]", layer.driver.kind_label()));
-                ui.add(egui::TextEdit::singleline(&mut layer.label).desired_width(140.0));
+                let label_w = (ui.available_width() * 0.55).clamp(220.0, 520.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut layer.label).desired_width(label_w),
+                );
                 ui.separator();
                 ui.label("wgt");
                 ui.add(
@@ -544,7 +678,7 @@ fn layer_row(
                 ui.separator();
                 driver_params(ui, layer);
                 ui.separator();
-                mask_and_blend(ui, layer, bone_names);
+                mask_and_blend(ui, layer, bone_names, hierarchy);
             }
         });
     let _ = idx;
@@ -618,6 +752,25 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
                 format!("{}.json", slugify(&pose.name)),
             )));
         }
+        DriverKind::ExpressionHold { expressions } => {
+            ui.label(format!(
+                "expression preset layer · {} weight(s)",
+                expressions.len()
+            ));
+            let mut remove: Option<String> = None;
+            for (name, weight) in expressions.iter_mut() {
+                ui.horizontal(|ui| {
+                    ui.monospace(name);
+                    ui.add(egui::Slider::new(weight, 0.0..=1.0).fixed_decimals(2));
+                    if ui.button("×").clicked() {
+                        remove = Some(name.clone());
+                    }
+                });
+            }
+            if let Some(name) = remove {
+                expressions.remove(&name);
+            }
+        }
         DriverKind::Breathing {
             rate_hz,
             pitch_deg,
@@ -687,7 +840,12 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
     }
 }
 
-fn mask_and_blend(ui: &mut egui::Ui, layer: &mut Layer, bone_names: &[String]) {
+fn mask_and_blend(
+    ui: &mut egui::Ui,
+    layer: &mut Layer,
+    bone_names: &[String],
+    hierarchy: Option<&BoneHierarchy>,
+) {
     ui.horizontal(|ui| {
         ui.label("blend");
         egui::ComboBox::from_id_salt(("blend_mode", layer.id))
@@ -709,20 +867,25 @@ fn mask_and_blend(ui: &mut egui::Ui, layer: &mut Layer, bone_names: &[String]) {
         egui::Id::new(("mask_include", layer.id)),
         "include",
         &mut layer.mask.include,
+        &mut layer.mask.include_subtrees,
         bone_names,
+        hierarchy,
     );
     bone_mask_editor(
         ui,
         egui::Id::new(("mask_exclude", layer.id)),
         "exclude",
         &mut layer.mask.exclude,
+        &mut layer.mask.exclude_subtrees,
         bone_names,
+        hierarchy,
     );
-    ui.small("Empty include = all bones.");
+    ui.small("Empty include = all bones. Subtree chips (↓) match that bone and all descendants.");
 }
 
 /// Chip-style bone mask editor:
 /// * chips for each currently-selected bone with an × to remove
+/// * subtree-root chips show ↓ and include all indexed descendants at runtime
 /// * `+ bone…` combo box listing every unselected bone from the VRM's
 ///   indexed humanoid set
 /// * free-text input for bones that aren't in the humanoid set (rare,
@@ -732,12 +895,19 @@ fn bone_mask_editor(
     id: egui::Id,
     label: &str,
     selection: &mut Vec<String>,
+    subtrees: &mut Vec<String>,
     all_bones: &[String],
+    hierarchy: Option<&BoneHierarchy>,
 ) {
+    let subtree_id = id.with("subtree_mode");
+    let mut subtree_mode: bool = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(subtree_id).unwrap_or(false));
+
     ui.horizontal_wrapped(|ui| {
         ui.label(format!("{label}:"));
 
-        let mut to_remove: Option<usize> = None;
+        let mut flat_remove: Option<usize> = None;
         for (i, bone) in selection.iter().enumerate() {
             ui.scope(|ui| {
                 ui.visuals_mut().widgets.inactive.weak_bg_fill =
@@ -756,24 +926,56 @@ fn bone_mask_editor(
                 if ui
                     .add(chip)
                     .on_hover_text(if exists {
-                        "click to remove"
+                        "exact bone — click to remove"
                     } else {
                         "not present in this VRM — click to remove"
                     })
                     .clicked()
                 {
-                    to_remove = Some(i);
+                    flat_remove = Some(i);
                 }
             });
         }
-        if let Some(i) = to_remove {
+        if let Some(i) = flat_remove {
             selection.remove(i);
         }
 
-        // Add-combo: only offers bones not already selected.
+        let mut subtree_remove: Option<usize> = None;
+        for (i, bone) in subtrees.iter().enumerate() {
+            ui.scope(|ui| {
+                ui.visuals_mut().widgets.inactive.weak_bg_fill =
+                    egui::Color32::from_rgb(50, 80, 70);
+                let desc = hierarchy
+                    .map(|h| h.descendants(bone).len())
+                    .unwrap_or(1);
+                let chip = egui::Button::new(
+                    egui::RichText::new(format!("{bone} ↓  ×"))
+                        .small()
+                        .color(egui::Color32::from_rgb(180, 230, 200)),
+                );
+                if ui
+                    .add(chip)
+                    .on_hover_text(format!(
+                        "subtree root — {desc} indexed bones — click to remove"
+                    ))
+                    .clicked()
+                {
+                    subtree_remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = subtree_remove {
+            subtrees.remove(i);
+        }
+
+        let blocked: std::collections::HashSet<String> = selection
+            .iter()
+            .chain(subtrees.iter())
+            .cloned()
+            .collect();
         let remaining: Vec<&String> = all_bones
             .iter()
-            .filter(|b| !selection.contains(*b))
+            .filter(|b| !blocked.contains(*b))
             .collect();
         egui::ComboBox::from_id_salt(id.with("add_combo"))
             .selected_text("+ bone…")
@@ -784,10 +986,17 @@ fn bone_mask_editor(
                 }
                 for bone in remaining {
                     if ui.selectable_label(false, bone).clicked() {
-                        selection.push(bone.clone());
+                        if subtree_mode {
+                            subtrees.push(bone.clone());
+                        } else {
+                            selection.push(bone.clone());
+                        }
                     }
                 }
             });
+
+        ui.checkbox(&mut subtree_mode, "↓ subtree")
+            .on_hover_text("When checked, bones added via + bone… include that bone and all descendants");
 
         // Manual input for bones outside the humanoid set. We stash the
         // scratch buffer in `egui::Memory` keyed by `id` so it survives
@@ -803,7 +1012,11 @@ fn bone_mask_editor(
         );
         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             for name in split_csv(&scratch) {
-                if !selection.contains(&name) {
+                if subtree_mode {
+                    if !subtrees.contains(&name) {
+                        subtrees.push(name);
+                    }
+                } else if !selection.contains(&name) {
                     selection.push(name);
                 }
             }
@@ -811,6 +1024,7 @@ fn bone_mask_editor(
         }
         ui.ctx().data_mut(|d| d.insert_temp(scratch_id, scratch));
     });
+    ui.ctx().data_mut(|d| d.insert_temp(subtree_id, subtree_mode));
 }
 
 fn split_csv(s: &str) -> Vec<String> {
@@ -843,10 +1057,13 @@ fn add_layer_bar(
     ui_state: &mut AnimLayersUiState,
     stack: &mut LayerStack,
     library: Option<&PoseLibraryAssets>,
+    expression_presets: &[String],
 ) {
     ui.horizontal(|ui| {
+        ui.set_height(ADD_BAR_HEIGHT - 6.0);
         egui::ComboBox::from_id_salt("anim_layer_add_kind")
             .selected_text(ui_state.add_kind.label())
+            .width(160.0)
             .show_ui(ui, |ui| {
                 for choice in ALL_CHOICES {
                     ui.selectable_value(&mut ui_state.add_kind, *choice, choice.label());
@@ -861,6 +1078,7 @@ fn add_layer_bar(
                     } else {
                         ui_state.picked_clip.as_str()
                     })
+                    .width(180.0)
                     .show_ui(ui, |ui| {
                         for meta in library.animations() {
                             ui.selectable_value(
@@ -881,6 +1099,7 @@ fn add_layer_bar(
                     } else {
                         ui_state.picked_pose.as_str()
                     })
+                    .width(180.0)
                     .show_ui(ui, |ui| {
                         for pose in library.poses() {
                             ui.selectable_value(
@@ -891,6 +1110,28 @@ fn add_layer_bar(
                         }
                     });
             }
+        }
+
+        if matches!(ui_state.add_kind, AddDriverChoice::ExpressionPreset) {
+            egui::ComboBox::from_id_salt("anim_layer_add_expression")
+                .selected_text(if ui_state.picked_expression.is_empty() {
+                    "(pick preset)"
+                } else {
+                    ui_state.picked_expression.as_str()
+                })
+                .width(180.0)
+                .show_ui(ui, |ui| {
+                    if expression_presets.is_empty() {
+                        ui.label("(load a VRM first)");
+                    }
+                    for preset in expression_presets {
+                        ui.selectable_value(
+                            &mut ui_state.picked_expression,
+                            preset.clone(),
+                            preset,
+                        );
+                    }
+                });
         }
 
         if ui.button("➕ Add").clicked() {
@@ -995,6 +1236,22 @@ fn try_build_layer(
             .blend(BlendMode::Override)
             .weight(1.0)
         }
+        AddDriverChoice::ExpressionPreset => {
+            if ui_state.picked_expression.is_empty() {
+                return Err("pick an expression preset first".into());
+            }
+            let preset = ui_state.picked_expression.clone();
+            let slug = format!("expr-{}", slugify(&preset));
+            let mut expressions = HashMap::new();
+            expressions.insert(preset.clone(), 1.0);
+            Layer::new(
+                slug,
+                preset.clone(),
+                DriverKind::ExpressionHold { expressions },
+            )
+            .blend(BlendMode::Override)
+            .weight(1.0)
+        }
     };
     // Mirror the per-kind blend default into a new struct with a fresh mask.
     Ok(Layer {
@@ -1011,6 +1268,7 @@ fn kind_color(kind: &str) -> egui::Color32 {
     match kind {
         "clip" => egui::Color32::from_rgb(120, 190, 255),
         "pose-hold" => egui::Color32::from_rgb(200, 160, 255),
+        "expression-hold" => egui::Color32::from_rgb(255, 180, 220),
         "breathing" => egui::Color32::from_rgb(160, 220, 160),
         "auto-blink" => egui::Color32::from_rgb(220, 200, 130),
         "weight-shift" => egui::Color32::from_rgb(210, 150, 220),

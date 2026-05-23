@@ -202,6 +202,8 @@ pub struct DebugUiState {
     pub network_trace_pick: Option<usize>,
     /// Avatar window: `assets/models` picker (filter, selection, last load/list error).
     pub avatar_vrm_picker: AvatarVrmPickerState,
+    /// Avatar defaults sidecar editor (expressions / layer set / rest pose).
+    pub avatar_defaults: AvatarDefaultsUiState,
 }
 
 /// Transient state for the Avatar window's runtime VRM list (not persisted to `user.toml`).
@@ -226,6 +228,13 @@ impl Default for AvatarVrmPickerState {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AvatarDefaultsUiState {
+    pub rest_pose: String,
+    pub layer_set: String,
+    pub message: Option<String>,
+}
+
 impl Default for DebugUiState {
     fn default() -> Self {
         Self {
@@ -243,6 +252,7 @@ impl Default for DebugUiState {
             network_trace_channel: TrafficChannel::ChannelHubWsInbound,
             network_trace_pick: None,
             avatar_vrm_picker: AvatarVrmPickerState::default(),
+            avatar_defaults: AvatarDefaultsUiState::default(),
         }
     }
 }
