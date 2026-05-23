@@ -235,6 +235,8 @@ pub struct LayerBlueprint {
     pub speed: f32,
     #[serde(default = "yes")]
     pub looping: bool,
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 fn one() -> f32 {
@@ -262,6 +264,7 @@ impl LayerBlueprint {
             mask_exclude_subtrees: layer.mask.exclude_subtrees.clone(),
             speed: layer.speed,
             looping: layer.looping,
+            reverse: layer.reverse,
         }
     }
 
@@ -291,6 +294,7 @@ impl LayerBlueprint {
             playing: self.enabled,
             duration,
             looping: self.looping,
+            reverse: self.reverse,
         })
     }
 }

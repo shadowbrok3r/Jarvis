@@ -221,6 +221,44 @@ impl LayerStack {
         self.layers.insert(to, layer);
     }
 
+    fn unique_slug(&self, base: &str) -> String {
+        if !self.layers.iter().any(|l| l.slug == base) {
+            return base.to_string();
+        }
+        for n in 2..10_000 {
+            let candidate = format!("{base}-{n}");
+            if !self.layers.iter().any(|l| l.slug == candidate) {
+                return candidate;
+            }
+        }
+        format!("{base}-{}", self.next_id)
+    }
+
+    /// Clone a layer and insert it directly below `id`. When `flip_reverse` is
+    /// true the copy plays in the opposite direction (for toe ripple chains).
+    pub fn duplicate_layer(&mut self, id: u64, flip_reverse: bool) -> Option<u64> {
+        let idx = self.layers.iter().position(|l| l.id == id)?;
+        let source = self.layers[idx].clone();
+        let source_slug = source.slug.clone();
+        let source_label = source.label.clone();
+        let source_reverse = source.reverse;
+        let mut copy = source;
+        copy.id = 0;
+        copy.time = 0.0;
+        copy.slug = self.unique_slug(&source_slug);
+        if flip_reverse {
+            copy.reverse = !source_reverse;
+            copy.label = format!("{source_label} ↺");
+        } else {
+            copy.label = format!("{source_label} ↳");
+        }
+        self.next_id = self.next_id.saturating_add(1);
+        copy.id = self.next_id;
+        let new_id = copy.id;
+        self.layers.insert(idx + 1, copy);
+        Some(new_id)
+    }
+
     pub fn find_mut(&mut self, id: u64) -> Option<&mut Layer> {
         self.layers.iter_mut().find(|l| l.id == id)
     }
@@ -317,6 +355,8 @@ pub struct Layer {
     pub duration: Option<f32>,
     /// Loop vs hold-last-frame. Procedural layers ignore this.
     pub looping: bool,
+    /// When true, sample the clip / envelope backwards 
+    pub reverse: bool,
 }
 
 impl Layer {
@@ -336,6 +376,7 @@ impl Layer {
             playing: true,
             duration,
             looping: true,
+            reverse: false,
         }
     }
 
@@ -349,17 +390,30 @@ impl Layer {
         self
     }
 
-    /// Returns `(time, duration)` for the timeline widget. Procedural
-    /// drivers without a duration report `(time mod 10.0, 10.0)` so the
-    /// playhead still sweeps visibly.
+    /// Returns `(time, duration)` for the timeline widget. Uses the effective
+    /// sample time (honours [`Self::reverse`]) so the playhead sweeps backwards.
     pub fn timeline_progress(&self) -> (f32, f32) {
-        let duration = self.duration.unwrap_or(10.0).max(0.01);
-        let t = if self.duration.is_some() {
-            self.time.rem_euclid(duration)
-        } else {
-            self.time.rem_euclid(duration)
-        };
-        (t, duration)
+        let duration = self
+            .duration
+            .or_else(|| self.driver.duration_hint())
+            .unwrap_or(10.0)
+            .max(0.01);
+        (layer_sample_time(self), duration)
+    }
+}
+
+/// Effective sample time for clip / envelope evaluation (forwards or reversed).
+pub fn layer_sample_time(layer: &Layer) -> f32 {
+    let duration = layer
+        .duration
+        .or_else(|| layer.driver.duration_hint())
+        .unwrap_or(10.0)
+        .max(0.01);
+    let phase = layer.time.rem_euclid(duration);
+    if layer.reverse {
+        (duration - phase).rem_euclid(duration)
+    } else {
+        phase
     }
 }
 
@@ -769,16 +823,19 @@ pub fn advance_layer_playheads(
         if !layer.playing {
             continue;
         }
-        let advance = dt * layer.speed;
-        layer.time += advance;
+        let dir = if layer.reverse { -1.0f32 } else { 1.0 };
+        layer.time += dt * layer.speed * dir;
         if let Some(duration) = layer.duration {
-            if layer.time >= duration {
-                if layer.looping {
-                    layer.time = layer.time.rem_euclid(duration);
-                } else {
-                    layer.time = duration;
+            if layer.looping {
+                layer.time = layer.time.rem_euclid(duration);
+            } else if layer.reverse {
+                if layer.time <= 0.0 {
+                    layer.time = 0.0;
                     layer.playing = false;
                 }
+            } else if layer.time >= duration {
+                layer.time = duration;
+                layer.playing = false;
             }
         }
     }
@@ -1204,9 +1261,10 @@ fn expression_hold_envelope(t: f32, duration: Option<f32>, looping: bool) -> f32
 }
 
 fn sample_layer(layer: &mut Layer, snap: &RestPoseSnapshot, dt: f32) -> DriverSample {
-    let mut sample = sample_driver(&mut layer.driver, layer.time, dt, snap);
+    let sample_t = layer_sample_time(layer);
+    let mut sample = sample_driver(&mut layer.driver, sample_t, dt, snap);
     if matches!(layer.driver, DriverKind::ExpressionHold { .. }) {
-        let env = expression_hold_envelope(layer.time, layer.duration, layer.looping);
+        let env = expression_hold_envelope(sample_t, layer.duration, layer.looping);
         for w in sample.expressions.values_mut() {
             *w *= env;
         }

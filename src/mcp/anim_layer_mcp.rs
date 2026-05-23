@@ -157,6 +157,8 @@ pub struct UpdateLayerArgs {
     #[serde(default)]
     pub looping: Option<bool>,
     #[serde(default)]
+    pub reverse: Option<bool>,
+    #[serde(default)]
     pub driver_params: Option<DriverParamsPatch>,
 }
 
@@ -539,6 +541,9 @@ pub fn apply_layer_row_patch(layer: &mut Layer, args: &UpdateLayerArgs) -> Resul
     if let Some(lp) = args.looping {
         layer.looping = lp;
     }
+    if let Some(rev) = args.reverse {
+        layer.reverse = rev;
+    }
     if let Some(ref dp) = args.driver_params {
         apply_driver_patch(&mut layer.driver, dp)?;
     }
@@ -628,6 +633,7 @@ pub fn stack_snapshot_json(stack: &LayerStack) -> Value {
                 "speed": l.speed,
                 "playing": l.playing,
                 "looping": l.looping,
+                "reverse": l.reverse,
                 "time": l.time,
                 "duration": l.duration,
             })

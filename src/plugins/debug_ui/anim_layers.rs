@@ -105,6 +105,8 @@ const ALL_CHOICES: &[AddDriverChoice] = &[
 const ADD_BAR_HEIGHT: f32 = 34.0;
 /// Layer name field — fixed so transport / reorder buttons stay on one row.
 const LAYER_LABEL_WIDTH: f32 = 120.0;
+/// Kind tag column — fits `[expression-hold]` so labels align across rows.
+const LAYER_KIND_TAG_WIDTH: f32 = 108.0;
 const LAYER_WEIGHT_SLIDER_WIDTH: f32 = 96.0;
 
 /// Layer-stack resources for the Animation Layers window.
@@ -806,6 +808,7 @@ fn layer_list(
 ) {
     let mut to_remove: Option<u64> = None;
     let mut to_move: Option<(usize, isize)> = None;
+    let mut to_duplicate: Option<(u64, bool)> = None;
 
     let filter = ui_state.layer_filter.clone();
     let hide_disabled = ui_state.hide_disabled_layers;
@@ -873,6 +876,9 @@ fn layer_list(
                                 Some(LayerAction::Delete) => to_remove = Some(layer.id),
                                 Some(LayerAction::MoveUp) => to_move = Some((idx, -1)),
                                 Some(LayerAction::MoveDown) => to_move = Some((idx, 1)),
+                                Some(LayerAction::Duplicate { id, flip_reverse }) => {
+                                    to_duplicate = Some((id, flip_reverse));
+                                }
                                 None => {}
                             }
                         }
@@ -894,12 +900,32 @@ fn layer_list(
             stack.move_layer(idx, target as usize);
         }
     }
+    if let Some((id, flip_reverse)) = to_duplicate {
+        if let Some(new_id) = stack.duplicate_layer(id, flip_reverse) {
+            ui_state.status = Some(if flip_reverse {
+                format!("duplicated layer {id} reversed → id {new_id}")
+            } else {
+                format!("duplicated layer {id} → id {new_id}")
+            });
+        }
+    }
 }
 
 enum LayerAction {
     Delete,
     MoveUp,
     MoveDown,
+    Duplicate {
+        id: u64,
+        flip_reverse: bool,
+    },
+}
+
+fn layer_supports_reverse(layer: &Layer) -> bool {
+    matches!(
+        layer.driver,
+        DriverKind::Clip { .. } | DriverKind::ExpressionHold { .. }
+    )
 }
 
 fn layer_row(
@@ -927,52 +953,100 @@ fn layer_row(
     egui::Frame::group(ui.style())
         .fill(frame_color)
         .show(ui, |ui| {
-            // Row 1: enable | kind | label | weight | transport | delete
+            // Row 1: fixed left (enable, kind, label) + right-aligned controls
             ui.horizontal(|ui| {
                 ui.checkbox(&mut layer.enabled, "");
-                ui.colored_label(header_color, format!("[{}]", layer.driver.kind_label()));
+                ui.allocate_ui_with_layout(
+                    egui::vec2(LAYER_KIND_TAG_WIDTH, ui.spacing().interact_size.y),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.colored_label(
+                            header_color,
+                            format!("[{}]", layer.driver.kind_label()),
+                        );
+                    },
+                );
                 ui.add(
                     egui::TextEdit::singleline(&mut layer.label)
                         .desired_width(LAYER_LABEL_WIDTH)
                         .min_size(egui::vec2(LAYER_LABEL_WIDTH, 0.0)),
                 );
-                ui.separator();
-                ui.label("wgt");
-                ui.add_sized(
-                    [LAYER_WEIGHT_SLIDER_WIDTH, ui.spacing().interact_size.y],
-                    egui::Slider::new(&mut layer.weight, 0.0..=1.0)
-                        .fixed_decimals(2)
-                        .show_value(true),
+
+                let right_w = ui.available_width().max(0.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_w, ui.spacing().interact_size.y),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        if ui.button("Del").on_hover_text("delete layer").clicked() {
+                            action = Some(LayerAction::Delete);
+                        }
+                        let expand_icon = if expanded { "-" } else { "+" };
+                        if ui
+                            .button(expand_icon)
+                            .on_hover_text("expand / collapse driver params")
+                            .clicked()
+                        {
+                            if expanded {
+                                ui_state.expanded.remove(&layer.id);
+                            } else {
+                                ui_state.expanded.insert(layer.id);
+                            }
+                        }
+                        if ui.button("v").on_hover_text("move down").clicked() {
+                            action = Some(LayerAction::MoveDown);
+                        }
+                        if ui.button("^").on_hover_text("move up").clicked() {
+                            action = Some(LayerAction::MoveUp);
+                        }
+                        if layer_supports_reverse(layer) {
+                            if ui
+                                .button("DRev")
+                                .on_hover_text(
+                                    "duplicate below with reversed playback (toe ripple chains)",
+                                )
+                                .clicked()
+                            {
+                                action = Some(LayerAction::Duplicate {
+                                    id: layer.id,
+                                    flip_reverse: true,
+                                });
+                            }
+                            if ui
+                                .button("Dup")
+                                .on_hover_text("duplicate layer directly below")
+                                .clicked()
+                            {
+                                action = Some(LayerAction::Duplicate {
+                                    id: layer.id,
+                                    flip_reverse: false,
+                                });
+                            }
+                            let rev_label = if layer.reverse { "Rev*" } else { "Rev" };
+                            if ui
+                                .selectable_label(layer.reverse, rev_label)
+                                .on_hover_text("play this clip backwards")
+                                .clicked()
+                            {
+                                layer.reverse = !layer.reverse;
+                            }
+                        }
+                        if ui.button("Rewind").on_hover_text("rewind").clicked() {
+                            layer.time = 0.0;
+                        }
+                        let icon = if layer.playing { "Pause" } else { "Play" };
+                        if ui.button(icon).on_hover_text("play / pause").clicked() {
+                            layer.playing = !layer.playing;
+                        }
+                        ui.separator();
+                        ui.add_sized(
+                            [LAYER_WEIGHT_SLIDER_WIDTH, ui.spacing().interact_size.y],
+                            egui::Slider::new(&mut layer.weight, 0.0..=1.0)
+                                .fixed_decimals(2)
+                                .show_value(true),
+                        );
+                        ui.label("wgt");
+                    },
                 );
-                ui.separator();
-                let icon = if layer.playing { "Pause" } else { "Play" };
-                if ui.button(icon).on_hover_text("play / pause").clicked() {
-                    layer.playing = !layer.playing;
-                }
-                if ui.button("Rewind").on_hover_text("rewind").clicked() {
-                    layer.time = 0.0;
-                }
-                if ui.button("^").on_hover_text("move up").clicked() {
-                    action = Some(LayerAction::MoveUp);
-                }
-                if ui.button("v").on_hover_text("move down").clicked() {
-                    action = Some(LayerAction::MoveDown);
-                }
-                let expand_icon = if expanded { "-" } else { "+" };
-                if ui
-                    .button(expand_icon)
-                    .on_hover_text("expand / collapse driver params")
-                    .clicked()
-                {
-                    if expanded {
-                        ui_state.expanded.remove(&layer.id);
-                    } else {
-                        ui_state.expanded.insert(layer.id);
-                    }
-                }
-                if ui.button("Del").on_hover_text("delete layer").clicked() {
-                    action = Some(LayerAction::Delete);
-                }
             });
 
             // Row 2: timeline
@@ -1021,7 +1095,8 @@ fn timeline(ui: &mut egui::Ui, layer: &Layer) {
     );
     // Time text.
     let label = if layer.duration.is_some() {
-        format!("{:0.2} / {:0.2}s", t, duration)
+        let rev = if layer.reverse { " ↺" } else { "" };
+        format!("{:0.2} / {:0.2}s{rev}", t, duration)
     } else {
         format!("∞  phase {:0.2}s", t)
     };
@@ -1047,7 +1122,19 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
                 ui.label("speed");
                 ui.add(egui::Slider::new(&mut layer.speed, 0.0..=2.5).fixed_decimals(2));
                 ui.checkbox(&mut layer.looping, "loop");
+                ui.checkbox(&mut layer.reverse, "reverse");
             });
+            if let Some(dur) = layer.duration {
+                ui.horizontal(|ui| {
+                    ui.label("phase (s)");
+                    ui.add(
+                        egui::Slider::new(&mut layer.time, 0.0..=dur)
+                            .fixed_decimals(2)
+                            .show_value(true),
+                    );
+                    ui.small("stagger duplicates for ripple waves");
+                });
+            }
         }
         DriverKind::PoseHold { pose } => {
             ui.label(egui::RichText::new(format!(
@@ -1088,6 +1175,7 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
                 ui.label("speed");
                 ui.add(egui::Slider::new(&mut layer.speed, 0.0..=2.5).fixed_decimals(2));
                 ui.checkbox(&mut layer.looping, "loop");
+                ui.checkbox(&mut layer.reverse, "reverse");
             });
             ui.small(
                 "Preset weight follows the layer timeline (ramp or triangle pulse when looping).",
