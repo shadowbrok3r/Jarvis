@@ -256,12 +256,39 @@ pub(crate) struct IosRestPoseSnapshot {
     pub rest: HashMap<String, Quat>,
     pub rest_world: HashMap<String, Quat>,
     pub captured: usize,
+    /// Bone-map generation we captured from. When the bone map is rebuilt
+    /// (e.g. VRM hot-swap, VRMA load adds named child entities, layer
+    /// clear forces a refresh), `captured_generation` is left behind and
+    /// the next `ios_refresh_rest_pose` re-captures cleanly.
+    pub captured_generation: u64,
 }
 
 #[derive(Resource, Default)]
 pub(crate) struct IosBoneNameMap {
     pub lower_to_entity: HashMap<String, Entity>,
     pub vrm_entity: Option<Entity>,
+    /// Monotonic counter bumped every time `lower_to_entity` is rebuilt.
+    /// Drives rest-snapshot invalidation — see [`IosRestPoseSnapshot`].
+    pub generation: u64,
+}
+
+impl IosBoneNameMap {
+    /// Reset to "unmapped" state. The next `ios_refresh_bone_map` tick will
+    /// rebuild from the current world.
+    pub fn invalidate(&mut self) {
+        self.lower_to_entity.clear();
+        self.vrm_entity = None;
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
+impl IosRestPoseSnapshot {
+    pub fn invalidate(&mut self) {
+        self.rest.clear();
+        self.rest_world.clear();
+        self.captured = 0;
+        self.captured_generation = 0;
+    }
 }
 
 fn ios_auto_install_default_layers(stack: Res<IosLayerStackHandle>) {
@@ -280,29 +307,44 @@ fn ios_refresh_bone_map(
     mut map: ResMut<IosBoneNameMap>,
     children: Query<&Children>,
     names: Query<&Name>,
+    rest_q: Query<&RestTransform>,
 ) {
     let Ok(vrm_e) = vrm_q.single() else { return };
     let Some(root) = avatar.0 else { return };
     if map.vrm_entity == Some(vrm_e) && !map.lower_to_entity.is_empty() {
         return;
     }
-    map.vrm_entity = Some(vrm_e);
     map.lower_to_entity.clear();
-    visit_named_bones(root, &children, &names, &mut map.lower_to_entity);
+    // CRITICAL: only collect entities that carry `RestTransform`. Those are
+    // the canonical VRM bind-pose bones tagged by `bevy_vrm1`. Without this
+    // filter, every named entity under the avatar root (including VRMA-clip
+    // imported entities, accessory meshes with name labels, etc.) ended up
+    // in the map. The layer system then tried to write rotations to those
+    // entities using a bogus rest_world frame, producing the upside-down
+    // flip + visible mis-rotations that the user reported.
+    visit_named_bones(root, &children, &names, &rest_q, &mut map.lower_to_entity);
+    map.vrm_entity = Some(vrm_e);
+    map.generation = map.generation.wrapping_add(1);
 }
 
 fn visit_named_bones(
     e: Entity,
     children: &Query<&Children>,
     names: &Query<&Name>,
+    rest_q: &Query<&RestTransform>,
     out: &mut HashMap<String, Entity>,
 ) {
+    // Two conditions to be a bind-pose bone: has a `Name` AND has the
+    // `RestTransform` component that `bevy_vrm1` stamps on every VRM bone
+    // (`SkinnedMesh::joints` ancestors).
     if let Ok(n) = names.get(e) {
-        out.insert(n.as_str().to_ascii_lowercase(), e);
+        if rest_q.get(e).is_ok() {
+            out.insert(n.as_str().to_ascii_lowercase(), e);
+        }
     }
     if let Ok(ch) = children.get(e) {
         for &child in ch {
-            visit_named_bones(child, children, names, out);
+            visit_named_bones(child, children, names, rest_q, out);
         }
     }
 }
@@ -316,7 +358,11 @@ fn ios_refresh_rest_pose(
     if map.lower_to_entity.is_empty() {
         return;
     }
-    if snap.captured == map.lower_to_entity.len() && !snap.rest.is_empty() {
+    // Skip when we already captured from the current map generation — the
+    // count comparison alone was unsafe because VRMA child entities can
+    // come and go at the same total count, silently switching the rest
+    // pose to a different bone set frame-to-frame.
+    if snap.captured_generation == map.generation && !snap.rest.is_empty() {
         return;
     }
     let mut rest = HashMap::with_capacity(map.lower_to_entity.len());
@@ -334,6 +380,7 @@ fn ios_refresh_rest_pose(
     snap.rest = rest;
     snap.rest_world = rest_world;
     snap.captured = map.lower_to_entity.len();
+    snap.captured_generation = map.generation;
 }
 
 struct IosDriverSample {

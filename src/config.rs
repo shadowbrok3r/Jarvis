@@ -26,6 +26,12 @@ pub const USER_CONFIG_STEM: &str = "config/user";
 pub struct Settings {
     pub ironclaw: IronclawSettings,
     pub gateway: GatewaySettings,
+    /// ZeroClaw gateway settings — alternate chat backend. Only one of
+    /// `[gateway]` (IronClaw) and `[zeroclaw]` drives the chat UI at a time;
+    /// the active one is chosen by `gateway.backend` (`"ironclaw"` (default)
+    /// or `"zeroclaw"`).
+    #[serde(default)]
+    pub zeroclaw: ZeroClawSettings,
     pub tts: TtsSettings,
     pub avatar: AvatarSettings,
     pub camera: CameraSettings,
@@ -488,6 +494,216 @@ pub struct GatewaySettings {
     /// Max history turns loaded when switching threads.
     #[serde(default = "default_history_limit")]
     pub history_limit: u32,
+    /// Which chat backend the chat UI talks to. `"ironclaw"` (default) keeps
+    /// the historical IronClaw gateway path. `"zeroclaw"` activates the
+    /// ZeroClaw plugins instead (see `[zeroclaw]`). Only one is active at a
+    /// time — changing this needs an app restart.
+    #[serde(default = "default_chat_backend")]
+    pub backend: String,
+}
+
+fn default_chat_backend() -> String {
+    "ironclaw".to_string()
+}
+
+/// Which chat backend [`Settings::gateway.backend`] selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatBackend {
+    Ironclaw,
+    Zeroclaw,
+}
+
+impl ChatBackend {
+    /// Case-insensitive parse with `Ironclaw` as the safe default for unknown
+    /// values.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "zeroclaw" | "zc" => ChatBackend::Zeroclaw,
+            _ => ChatBackend::Ironclaw,
+        }
+    }
+}
+
+/// ZeroClaw gateway — alternate chat backend speaking the ZeroClaw REST + WS
+/// surface (`/webhook`, `/ws/chat`, `/api/events`, `/api/memory`). Activated by
+/// `gateway.backend = "zeroclaw"`; otherwise these settings are read but no
+/// network traffic is initiated.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ZeroClawSettings {
+    /// e.g. `http://192.168.4.8:42617` or `https://claw.shadowbroker.app` —
+    /// no trailing slash.
+    #[serde(default = "default_zeroclaw_base_url")]
+    pub base_url: String,
+    /// Optional WS base override (e.g. `wss://claw.shadowbroker.app`). Empty
+    /// = derive from [`Self::base_url`] (`http` → `ws`, `https` → `wss`).
+    #[serde(default)]
+    pub ws_url: String,
+    /// Bearer token sent on every `/api/*` request and as the `?token=` query
+    /// param on `/ws/chat`. Populated from `JARVIS__ZEROCLAW__AUTH_TOKEN` or
+    /// `ZEROCLAW_GATEWAY_TOKEN` env at startup. Leave empty when the gateway
+    /// runs with `require_pairing = false`.
+    #[serde(default)]
+    pub auth_token: String,
+    /// Optional `X-Webhook-Secret` value, sent on `POST /webhook` calls so
+    /// ZeroClaw can attribute traffic to the avatar specifically.
+    #[serde(default)]
+    pub webhook_secret: String,
+    /// Identification string sent as `X-Client` header and as the
+    /// `User-Agent`. Default: `jarvis-avatar`.
+    #[serde(default = "default_zeroclaw_client_id")]
+    pub client_id: String,
+    /// ZeroClaw agent alias — must match a `[agents.<alias>]` block on the
+    /// gateway. **Required** for `/ws/chat` (the gateway returns 400 without
+    /// it); also passed to `/webhook` so we don't depend on its silent
+    /// "auto-pick the first enabled agent" behaviour. Default: `"default"`.
+    #[serde(default = "default_zeroclaw_agent_alias")]
+    pub agent_alias: String,
+    /// Per-request HTTP timeout (ms) for non-streaming calls.
+    #[serde(default = "default_gateway_timeout")]
+    pub request_timeout_ms: u64,
+    /// When true, prefer `/ws/chat` (streamed `done` + parallel `/api/events`
+    /// correlation) over `POST /webhook`. Both paths return the same content;
+    /// WS is friendlier when ZeroClaw later gains per-token streaming. When
+    /// false the plugin uses `/webhook` for every send.
+    #[serde(default = "default_true")]
+    pub prefer_streaming: bool,
+    /// Memory category used by the bidirectional context pusher and any
+    /// memory writes from the chat plugin. Show up under `GET /api/memory`
+    /// when filtered by this string.
+    #[serde(default = "default_zeroclaw_memory_category")]
+    pub memory_category: String,
+    /// Active ZeroClaw session id (`gw_<uuid>` on disk; `<uuid>` on the wire).
+    /// Persisted across runs so reopening the avatar resumes the same
+    /// conversation. Empty = mint a fresh uuid on next start and write it
+    /// back here via `Settings::save_user`.
+    #[serde(default)]
+    pub active_session_id: String,
+    /// Client-side rolling history window. ZeroClaw chat persists each
+    /// session in its sqlite store, so 0 is a sensible default here — the
+    /// agent already has the full transcript on the server side. Leave a
+    /// small positive value as a belt-and-braces hint in case the persisted
+    /// transcript was truncated.
+    #[serde(default = "default_zeroclaw_history_window")]
+    pub history_window: u32,
+    /// Maximum sessions surfaced in the chat sidebar (listed as "threads"
+    /// even though ZeroClaw calls them sessions internally).
+    #[serde(default = "default_zeroclaw_session_limit")]
+    pub session_list_limit: u32,
+    /// Enable the bidirectional context pusher (`zeroclaw_context` plugin).
+    /// Throttled writes to `POST /api/memory` describing avatar state
+    /// (pose, emotion, A2F status, look-at target, recent pose screenshot).
+    #[serde(default = "default_true")]
+    pub context_push_enabled: bool,
+    /// Minimum milliseconds between consecutive memory writes for the same
+    /// key, to coalesce noisy state changes.
+    #[serde(default = "default_zeroclaw_context_throttle_ms")]
+    pub context_throttle_ms: u64,
+    /// Embed image URLs in outbound chat text when attachments are present.
+    /// ZeroClaw's `/webhook` and `/ws/chat` have no binary payload field; the
+    /// `zeroclaw_attachments` plugin hosts a small HTTP server that ZeroClaw
+    /// fetches with its built-in HTTP tool.
+    #[serde(default = "default_true")]
+    pub attachments_enabled: bool,
+    /// Address the attachments HTTP server binds to. Must be reachable from
+    /// the ZeroClaw host (use `0.0.0.0:6124` over the LAN, or a tunnelled
+    /// address when ZeroClaw is remote).
+    #[serde(default = "default_zeroclaw_attachments_bind")]
+    pub attachments_bind: String,
+    /// Public base URL the attachments server is reachable at FROM the
+    /// ZeroClaw gateway's perspective. Empty = derive `http://<lan-ip>:<port>`
+    /// from [`Self::attachments_bind`].
+    #[serde(default)]
+    pub attachments_public_url: String,
+    /// Maximum number of recently-served attachments kept on disk. Older
+    /// files are deleted as new ones land.
+    #[serde(default = "default_zeroclaw_attachments_max")]
+    pub attachments_max: u32,
+}
+
+impl Default for ZeroClawSettings {
+    fn default() -> Self {
+        Self {
+            base_url: default_zeroclaw_base_url(),
+            ws_url: String::new(),
+            auth_token: String::new(),
+            webhook_secret: String::new(),
+            client_id: default_zeroclaw_client_id(),
+            agent_alias: default_zeroclaw_agent_alias(),
+            request_timeout_ms: default_gateway_timeout(),
+            prefer_streaming: true,
+            active_session_id: String::new(),
+            memory_category: default_zeroclaw_memory_category(),
+            history_window: default_zeroclaw_history_window(),
+            session_list_limit: default_zeroclaw_session_limit(),
+            context_push_enabled: true,
+            context_throttle_ms: default_zeroclaw_context_throttle_ms(),
+            attachments_enabled: true,
+            attachments_bind: default_zeroclaw_attachments_bind(),
+            attachments_public_url: String::new(),
+            attachments_max: default_zeroclaw_attachments_max(),
+        }
+    }
+}
+
+impl ZeroClawSettings {
+    /// Trimmed base URL with no trailing slash, suitable for `format!("{base}/path")`.
+    pub fn normalized_base_url(&self) -> String {
+        self.base_url.trim().trim_end_matches('/').to_string()
+    }
+
+    /// Resolve the WebSocket base. Honors [`Self::ws_url`] when set, otherwise
+    /// flips the scheme on [`Self::base_url`].
+    pub fn resolved_ws_url(&self) -> String {
+        let trimmed = self.ws_url.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_end_matches('/').to_string();
+        }
+        let base = self.normalized_base_url();
+        if let Some(rest) = base.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else if let Some(rest) = base.strip_prefix("http://") {
+            format!("ws://{rest}")
+        } else {
+            // Bare host:port — assume plain WS.
+            format!("ws://{base}")
+        }
+    }
+}
+
+fn default_zeroclaw_base_url() -> String {
+    "http://192.168.4.8:42617".to_string()
+}
+
+fn default_zeroclaw_client_id() -> String {
+    "jarvis-avatar".to_string()
+}
+
+fn default_zeroclaw_agent_alias() -> String {
+    "default".to_string()
+}
+
+fn default_zeroclaw_memory_category() -> String {
+    "jarvis-avatar".to_string()
+}
+
+fn default_zeroclaw_history_window() -> u32 {
+    6
+}
+
+fn default_zeroclaw_session_limit() -> u32 {
+    50
+}
+
+fn default_zeroclaw_context_throttle_ms() -> u64 {
+    1_000
+}
+
+fn default_zeroclaw_attachments_bind() -> String {
+    "0.0.0.0:6124".to_string()
+}
+
+fn default_zeroclaw_attachments_max() -> u32 {
+    64
 }
 
 fn default_gateway_timeout() -> u64 {

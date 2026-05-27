@@ -36,6 +36,8 @@ rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 reqwest-eventsource = "0.6"
 base64 = "0.22"
+urlencoding = "2"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
 # Decode assistant inline images in the gateway chat window (PNG/JPEG/WebP).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

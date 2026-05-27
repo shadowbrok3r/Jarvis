@@ -36,6 +36,12 @@ pub enum ServiceId {
     A2fGrpc,
     A2fHealth,
     Tts,
+    /// ZeroClaw gateway `/health` reachability. Probed alongside the
+    /// IronClaw gateway by [`run_http_probes`].
+    ZeroClawGateway,
+    /// ZeroClaw `/api/events` SSE stream as reported by the chat plugin.
+    /// `Online` once we've received an `Open`, `Offline` on auth rejection.
+    ZeroClawEvents,
 }
 
 impl ServiceId {
@@ -49,6 +55,8 @@ impl ServiceId {
         ServiceId::A2fGrpc,
         ServiceId::A2fHealth,
         ServiceId::Tts,
+        ServiceId::ZeroClawGateway,
+        ServiceId::ZeroClawEvents,
     ];
 
     pub fn label(self) -> &'static str {
@@ -62,6 +70,8 @@ impl ServiceId {
             ServiceId::A2fGrpc => "Audio2Face gRPC",
             ServiceId::A2fHealth => "Audio2Face HTTP /health",
             ServiceId::Tts => "TTS (Kokoro)",
+            ServiceId::ZeroClawGateway => "ZeroClaw Gateway (HTTP)",
+            ServiceId::ZeroClawEvents => "ZeroClaw Events (SSE /api/events)",
         }
     }
 }
@@ -172,6 +182,7 @@ struct ProbeBatch {
     tts: Option<ServiceUpdate>,
     mcp: Option<ServiceUpdate>,
     gateway: Option<ServiceUpdate>,
+    zeroclaw: Option<ServiceUpdate>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +307,41 @@ fn seed_initial_states(mut status: ResMut<ServiceStatus>, settings: Res<Settings
             "tts disabled in config",
         );
     }
+
+    // ZeroClaw status entries only matter when the operator has actually
+    // routed the chat backend there. Otherwise they sit Disabled and the
+    // panel keeps the row visible for discoverability without churning.
+    let zc_active = matches!(
+        jarvis_avatar::config::ChatBackend::parse(&s.gateway.backend),
+        jarvis_avatar::config::ChatBackend::Zeroclaw,
+    );
+    if zc_active {
+        status.set(
+            ServiceId::ZeroClawGateway,
+            ServiceState::Connecting,
+            s.zeroclaw.normalized_base_url(),
+            "probing /health",
+        );
+        status.set(
+            ServiceId::ZeroClawEvents,
+            ServiceState::Connecting,
+            format!("{}/api/events", s.zeroclaw.normalized_base_url()),
+            "waiting for first SSE event",
+        );
+    } else {
+        status.set(
+            ServiceId::ZeroClawGateway,
+            ServiceState::Disabled,
+            s.zeroclaw.normalized_base_url(),
+            "gateway.backend != \"zeroclaw\"",
+        );
+        status.set(
+            ServiceId::ZeroClawEvents,
+            ServiceState::Disabled,
+            format!("{}/api/events", s.zeroclaw.normalized_base_url()),
+            "gateway.backend != \"zeroclaw\"",
+        );
+    }
 }
 
 // ----- Hub-derived state -----------------------------------------------------
@@ -417,6 +463,34 @@ fn apply_gateway_state(
         (Some(s), _) => s.clone(),
         _ => String::new(),
     };
+    // When ZeroClaw is the active chat backend, every `ChatStatusMessage`
+    // describes ZeroClaw — not IronClaw. Re-target the gateway / events rows
+    // accordingly so users don't see "IronClaw Gateway: online" while their
+    // chat is actually going through ZeroClaw.
+    let zeroclaw_active = chat
+        .base_url
+        .contains(":42617")
+        || chat.base_url.contains("claw.shadowbroker")
+        || detail.starts_with("ws:")
+        || detail.starts_with("webhook:");
+    if zeroclaw_active {
+        let events_state = if detail.contains("sse: open") || detail.contains("connected") {
+            ServiceState::Online
+        } else if detail.starts_with("sse:") && chat.last_error.is_some() {
+            ServiceState::Offline
+        } else {
+            ServiceState::Connecting
+        };
+        status.set(
+            ServiceId::ZeroClawEvents,
+            events_state,
+            format!("{}/api/events", chat.base_url),
+            detail.clone(),
+        );
+        // Leave `IronclawGateway` to its HTTP probe in this case — flipping
+        // it Offline based on a ZeroClaw chat status would lie.
+        return;
+    }
     status.set(
         ServiceId::IronclawGateway,
         state,
@@ -466,6 +540,12 @@ fn run_http_probes(
     let gateway_url = settings.gateway.base_url.clone();
     let gateway_token = settings.gateway.auth_token.clone();
 
+    let zc_active = matches!(
+        jarvis_avatar::config::ChatBackend::parse(&settings.gateway.backend),
+        jarvis_avatar::config::ChatBackend::Zeroclaw,
+    );
+    let zc_url = settings.zeroclaw.normalized_base_url();
+
     let handle = tokio_rt.spawn(async move {
         let client = Client::builder()
             .timeout(Duration::from_secs(3))
@@ -494,12 +574,20 @@ fn run_http_probes(
         };
         let gateway = Some(probe_gateway(&client, &gateway_url, &gateway_token).await);
 
+        let zeroclaw = if zc_active {
+            let url = format!("{}/health", zc_url.trim_end_matches('/'));
+            Some(probe_http_get(&client, &url, None, "zeroclaw /health").await)
+        } else {
+            None
+        };
+
         let _ = tx.send(ProbeBatch {
             a2f_health,
             a2f_grpc,
             tts,
             mcp,
             gateway,
+            zeroclaw,
         });
     });
 
@@ -525,6 +613,9 @@ fn apply_probe_results(timers: Res<ProbeTimers>, mut status: ResMut<ServiceStatu
         }
         if let Some(u) = batch.gateway {
             status.set(ServiceId::IronclawGateway, u.state, u.endpoint, u.detail);
+        }
+        if let Some(u) = batch.zeroclaw {
+            status.set(ServiceId::ZeroClawGateway, u.state, u.endpoint, u.detail);
         }
     }
 }

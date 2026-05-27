@@ -101,7 +101,13 @@ pub fn draw_chat_window(
                         .default_width(210.0)
                         .min_width(44.0)
                         .show_inside(ui, |ui| {
-                            thread_sidebar(ui, &mut state, chat, gateway.as_deref())
+                            thread_sidebar_with_backend(
+                                ui,
+                                &mut state,
+                                chat,
+                                gateway.as_deref(),
+                                &mut settings,
+                            )
                         });
                 }
 
@@ -172,6 +178,20 @@ fn thread_sidebar(
     connection_indicator(ui, chat);
 }
 
+/// Wrapper so [`draw_chat_window`] can pass mutable settings down without
+/// reshaping the existing sidebar function signature.
+fn thread_sidebar_with_backend(
+    ui: &mut egui::Ui,
+    state: &mut DebugUiState,
+    chat: &ChatState,
+    gateway: Option<&GatewayClientHandle>,
+    settings: &mut Settings,
+) {
+    thread_sidebar(ui, state, chat, gateway);
+    ui.separator();
+    backend_chip(ui, settings);
+}
+
 fn render_thread_row(
     ui: &mut egui::Ui,
     _state: &mut DebugUiState,
@@ -195,6 +215,43 @@ fn render_thread_row(
             g.set_active_thread(thread.id.clone());
         }
     }
+}
+
+/// Small chip + dropdown letting the operator swap chat backends. Writes the
+/// change to `user.toml` and surfaces a "restart required" hint so they know
+/// the in-flight worker stays on the previous backend until next launch.
+fn backend_chip(ui: &mut egui::Ui, settings: &mut Settings) {
+    use jarvis_avatar::config::ChatBackend;
+    let current = ChatBackend::parse(&settings.gateway.backend);
+    let label = match current {
+        ChatBackend::Ironclaw => "Backend: IronClaw",
+        ChatBackend::Zeroclaw => "Backend: ZeroClaw",
+    };
+    ui.horizontal_wrapped(|ui| {
+        egui::ComboBox::from_label("")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(matches!(current, ChatBackend::Ironclaw), "IronClaw")
+                    .clicked()
+                    && !matches!(current, ChatBackend::Ironclaw)
+                {
+                    settings.gateway.backend = "ironclaw".into();
+                    let _ = settings.save_user();
+                }
+                if ui
+                    .selectable_label(matches!(current, ChatBackend::Zeroclaw), "ZeroClaw")
+                    .clicked()
+                    && !matches!(current, ChatBackend::Zeroclaw)
+                {
+                    settings.gateway.backend = "zeroclaw".into();
+                    let _ = settings.save_user();
+                }
+            });
+        ui.small("(restart required)").on_hover_text(
+            "The active backend is chosen at startup. Save settings and relaunch jarvis-avatar to switch.",
+        );
+    });
 }
 
 fn connection_indicator(ui: &mut egui::Ui, chat: &ChatState) {

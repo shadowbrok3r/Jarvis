@@ -17,6 +17,58 @@ auth_token = ""
 default_thread_id = ""
 request_timeout_ms = 15000
 history_limit = 50
+# Which chat backend drives the chat UI. "ironclaw" (default) keeps the rich
+# IronClaw gateway path. "zeroclaw" activates the ZeroClaw plugins (webhook +
+# /ws/chat + /api/events correlation, see [zeroclaw] below). Only one backend
+# is active at a time; changing this needs an app restart.
+backend = "ironclaw"
+
+[zeroclaw]
+# ZeroClaw gateway settings. Only consulted when `gateway.backend = "zeroclaw"`.
+# Defaults target a LAN-hosted ZeroClaw with require_pairing = false.
+base_url = "http://192.168.4.8:42617"
+# Empty ws_url → derived from base_url (http→ws, https→wss). Override for split
+# deployments where WS goes through a different host.
+ws_url = ""
+# Populated from JARVIS__ZEROCLAW__AUTH_TOKEN or ZEROCLAW_GATEWAY_TOKEN env at
+# startup. Leave empty when the gateway runs with require_pairing = false.
+auth_token = ""
+# Optional X-Webhook-Secret value, sent on POST /webhook so ZeroClaw can
+# attribute traffic specifically to the avatar.
+webhook_secret = ""
+# Identification string sent as X-Client header and User-Agent.
+client_id = "jarvis-avatar"
+# ZeroClaw agent alias — must match a `[agents.<alias>]` block on the gateway.
+# REQUIRED by `/ws/chat` (the gateway returns HTTP 400 without it). Also passed
+# to `/webhook` so we don't depend on its silent "auto-pick the first enabled
+# agent" behaviour.
+agent_alias = "default"
+request_timeout_ms = 15000
+# Prefer /ws/chat (with parallel /api/events correlation) over POST /webhook.
+prefer_streaming = true
+# Memory category for the context pusher and any memory writes from chat.
+memory_category = "jarvis-avatar"
+# Active ZeroClaw session id. Persisted across runs so the avatar resumes
+# the same conversation. Empty = create a fresh uuid on next launch and
+# write it back here.
+active_session_id = ""
+# Client-side rolling history fallback (ZeroClaw persists sessions
+# server-side; this is mostly belt-and-braces).
+history_window = 6
+# Max sessions shown in the chat sidebar (listed as "threads" in the UI
+# even though ZeroClaw calls them sessions internally).
+session_list_limit = 50
+# Throttled writes to POST /api/memory describing avatar state.
+context_push_enabled = true
+context_throttle_ms = 1000
+# Attachment workaround: host a small HTTP server serving recent screenshots
+# and inline their URLs in outbound chat text so ZeroClaw's HTTP tool can fetch.
+attachments_enabled = true
+attachments_bind = "0.0.0.0:6124"
+# Empty = derive http://<lan-host>:<port> from `attachments_bind`. Override when
+# ZeroClaw sees us at a different address (NAT, tunnel, public hostname).
+attachments_public_url = ""
+attachments_max = 64
 
 [tts]
 kokoro_url = "http://192.168.4.9:8880"

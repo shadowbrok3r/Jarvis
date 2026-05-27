@@ -19,6 +19,12 @@ struct MainShellView: View {
     @State private var shellTab: ShellTab = .avatar
     @State private var bevySessionId = 0
     @State private var gatewayChatModel = GatewayChatViewModel()
+    @State private var zeroClawChatModel = ZeroClawChatViewModel()
+    /// Chat backend chosen by the user (mirrors desktop `gateway.backend`).
+    /// `.ironclaw` keeps the historical `GatewayChatView` path; `.zeroclaw`
+    /// activates the new `ZeroClawChatView`. Persisted in `UserDefaults`
+    /// under `jarvis.chat.backend`.
+    @AppStorage(ZeroClawSettings.userDefaultsBackendKey) private var chatBackendRaw: String = ChatBackend.ironclaw.rawValue
     @AppStorage("jarvis.avatarBottomPanel") private var showAvatarBottomPanel = false
     @AppStorage("jarvis.avatarBottomPanelHeight") private var avatarBottomPanelHeight: Double = 380
     @State private var liveBottomPanelHeight: CGFloat = 380
@@ -106,12 +112,24 @@ struct MainShellView: View {
                                 }
                             }
 
+                        // Chat tab: route to the active backend's view. Both
+                        // views are kept mounted (opacity-switched) so model
+                        // state survives a quick backend flip without a
+                        // remount-induced reset.
+                        let activeBackend = ChatBackend(rawValue: chatBackendRaw) ?? .ironclaw
                         GatewayChatView(model: gatewayChatModel)
                             .frame(width: w, height: h)
                             .background(Color(uiColor: .systemGroupedBackground))
-                            .opacity(shellTab == .chat ? 1 : 0)
-                            .allowsHitTesting(shellTab == .chat)
-                            .zIndex(shellTab == .chat ? 1 : 0)
+                            .opacity(shellTab == .chat && activeBackend == .ironclaw ? 1 : 0)
+                            .allowsHitTesting(shellTab == .chat && activeBackend == .ironclaw)
+                            .zIndex(shellTab == .chat && activeBackend == .ironclaw ? 1 : 0)
+
+                        ZeroClawChatView(model: zeroClawChatModel)
+                            .frame(width: w, height: h)
+                            .background(Color(uiColor: .systemGroupedBackground))
+                            .opacity(shellTab == .chat && activeBackend == .zeroclaw ? 1 : 0)
+                            .allowsHitTesting(shellTab == .chat && activeBackend == .zeroclaw)
+                            .zIndex(shellTab == .chat && activeBackend == .zeroclaw ? 1 : 0)
 
                         aboutStack
                             .frame(width: w, height: h)
@@ -201,6 +219,19 @@ struct MainShellView: View {
                         SavedAnimationsPlayView()
                     }
                 }
+                Section("Chat backend") {
+                    Picker("Active backend", selection: $chatBackendRaw) {
+                        ForEach(ChatBackend.allCases) { backend in
+                            Text(backend.displayLabel).tag(backend.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Text(
+                        "IronClaw uses the URLs below (HTTP + SSE). ZeroClaw uses the section further down. Switching takes effect immediately — the chat tab re-renders with the new backend."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
                 Section("IronClaw gateway (chat)") {
                     TextField("Gateway base URL (http://host:3000)", text: $gatewayBaseURL)
                         .textInputAutocapitalization(.never)
@@ -215,6 +246,48 @@ struct MainShellView: View {
                         .autocorrectionDisabled()
                     Text(
                         "Chat uses HTTP + SSE (tries primary URL, then fallback). The channel hub WebSocket uses the hub URLs and hub token below."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                Section("ZeroClaw gateway (chat)") {
+                    TextField(
+                        "ZeroClaw base URL (https://claw.example.com)",
+                        text: Binding(
+                            get: { ZeroClawSettings.baseURL },
+                            set: { ZeroClawSettings.baseURL = $0 }
+                        )
+                    )
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    SecureField(
+                        "Bearer token (from `POST /pair`)",
+                        text: Binding(
+                            get: { ZeroClawSettings.authToken },
+                            set: { ZeroClawSettings.authToken = $0 }
+                        )
+                    )
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    TextField(
+                        "Agent alias (matches `[agents.<alias>]` on the gateway)",
+                        text: Binding(
+                            get: { ZeroClawSettings.agentAlias },
+                            set: { ZeroClawSettings.agentAlias = $0 }
+                        )
+                    )
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    Toggle(
+                        "Prefer streaming (WS) over webhook",
+                        isOn: Binding(
+                            get: { ZeroClawSettings.preferStreaming },
+                            set: { ZeroClawSettings.preferStreaming = $0 }
+                        )
+                    )
+                    Text(
+                        "WS path: `/ws/chat?agent=<alias>&session_id=…&token=…`. ZeroClaw returns the whole reply in one `done` frame — there's no per-token streaming on the iOS chat surface today. Sessions persist across launches under `\(ZeroClawSettings.userDefaultsActiveSessionIdKey)`."
                     )
                     .font(.caption2)
                     .foregroundStyle(.secondary)

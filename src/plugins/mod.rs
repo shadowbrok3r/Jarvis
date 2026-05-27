@@ -42,3 +42,6 @@ pub mod traffic_log;
 pub mod tts;
 pub mod vrma_clip_import;
 pub mod undo_history;
+pub mod zeroclaw_attachments;
+pub mod zeroclaw_chat;
+pub mod zeroclaw_context;

@@ -171,6 +171,63 @@ Gateway endpoints the app calls:
 
 ---
 
+## 4b. ZeroClaw Gateway (alternate chat backend)
+
+**What it does:** A second chat backend you can flip to when `gateway.backend = "zeroclaw"`. Talks to a ZeroClaw daemon's HTTP + WS + SSE surface (`/webhook`, `/ws/chat`, `/api/events`, `/api/memory`, `/health`). When inactive, the entire ZeroClaw subsystem (chat plugin, attachments server, context pusher) early-returns at startup and does no network traffic.
+
+**Files:**
+- `src/zeroclaw/{client,types,events}.rs` — async HTTP/WS/SSE client + DTOs + normalized `AppEvent` enum.
+- `src/plugins/zeroclaw_chat.rs` — Bevy plugin mirroring `ironclaw_chat`. Synthesizes one logical thread, drives `/ws/chat` (or `/webhook` when `prefer_streaming = false`), keeps a long-lived `/api/events` SSE subscription.
+- `src/plugins/zeroclaw_attachments.rs` — tiny axum server (`0.0.0.0:6124` by default) that serves recent images at `/attachments/<uuid>.<ext>`. The chat plugin appends URLs to outbound messages so ZeroClaw's HTTP-fetch tool can pull bytes.
+- `src/plugins/zeroclaw_context.rs` — throttled `POST /api/memory` writer. Mirrors avatar state (emotion, look-at, A2F status, periodic pose screenshot) into ZeroClaw memory under category `"jarvis-avatar"`.
+- Config: `[gateway].backend` + `[zeroclaw]` in `config/default.toml`.
+
+**How the app knows it's "set up":**
+- `gateway.backend = "zeroclaw"` (default is `"ironclaw"` — backwards compatible).
+- `zeroclaw.base_url = "http://192.168.4.8:42617"` or `"https://claw.shadowbroker.app"` — no trailing slash.
+- `zeroclaw.ws_url` empty → derived from `base_url` (`http` → `ws`, `https` → `wss`).
+- `zeroclaw.auth_token` populated from `ZEROCLAW_GATEWAY_TOKEN` env var at startup. Leave empty when the gateway runs with `require_pairing = false`.
+
+The chat panel's side panel shows a **Backend** dropdown that writes the change to `user.toml`; relaunch the app to apply.
+
+**Start-to-finish:**
+1. Stand up a ZeroClaw daemon reachable at the configured URL. If pairing is on, mint a token via `POST /admin/paircode/new` on the daemon host and `export ZEROCLAW_GATEWAY_TOKEN=<token>` before launching jarvis-avatar.
+2. Edit `config/user.toml` (or use the backend chip in the chat panel) to set `[gateway].backend = "zeroclaw"`.
+3. Optionally set `[zeroclaw].webhook_secret` to lock down the `/webhook` route.
+4. Launch jarvis-avatar. The chat window should show "online" at the bottom of the thread sidebar; **Services** panel will have new rows `ZeroClaw Gateway (HTTP)` and `ZeroClaw Events (SSE /api/events)`.
+5. Send a message. The reply renders in the chat bubble; tool calls and `agent_start` / `agent_end` activity from `/api/events` show up inline as tool events.
+
+**What the chat plugin actually emits to ZeroClaw:**
+- `POST /webhook` body: `{"message": "<text>"}`. When `[zeroclaw].history_window > 0` (default 6), the most recent N turns get prepended inside a `[Conversation so far: …]` block — ZeroClaw chat is stateless on the wire, so this gives the agent context without requiring server-side changes.
+- `/ws/chat` frame: `{"type":"message","content":"<text>"}` (same content composition as `/webhook`).
+- Optional headers: `User-Agent: jarvis-avatar/0.1`, `X-Client: jarvis-avatar`, `X-Webhook-Secret: <secret>` when configured.
+- Image attachments (if `[zeroclaw].attachments_enabled = true`, default): bytes are saved under a temp dir, served by the attachments mini-server, and the URLs are inlined inside the outbound message as `[Attached images (HTTP fetchable): - <url>]`.
+
+**Bidirectional context push (memories):**
+Throttled per-key writes to `POST /api/memory` under `category = "jarvis-avatar"`:
+
+| key | what it carries |
+|---|---|
+| `jarvis.session_started` | One-shot boot marker (`unix_secs=...`, client id, backend). |
+| `jarvis.emotion` | Latest emotion parsed from ACT tokens in `ChatCompleteMessage`. |
+| `jarvis.looking_at` | Latest `LookAtRequestMessage` target. |
+| `jarvis.a2f_status` | A2F health row from `ServiceStatus`. |
+| `jarvis.tts_status` | Kokoro row from `ServiceStatus`. |
+| `jarvis.last_pose_view_url` | URL of the latest periodic pose screenshot. |
+| `jarvis.ironclaw_gateway_state` | Only set when the (other) gateway is Offline. |
+
+Throttle floor is `[zeroclaw].context_throttle_ms` (default 1000); identical-value writes are skipped.
+
+**Known limitations vs IronClaw:**
+- ZeroClaw 0.8 returns the whole assistant reply in one `done` frame. **There is no per-token streaming** — the chat UI shows the bubble all-at-once instead of typing live. Future ZeroClaw versions can emit `delta` frames and the existing chat plugin will route them straight into the streaming buffer.
+- ZeroClaw chat has no `thread_id` concept; the avatar synthesizes one default thread. `+ New Chat` clears the local rolling-history buffer.
+- `/webhook` and `/ws/chat` have no binary attachment field. Images are routed through the local attachments mini-server; the agent must fetch them with its built-in HTTP tool.
+- `/api/events` is gateway-wide (not per-conversation). For a single-user avatar this serializes naturally; if you ever run two simultaneous chats against the same ZeroClaw, tool events may attribute to the wrong turn.
+
+**Fallback:** `gateway.backend = "ironclaw"` restores the original behavior with zero overhead from the ZeroClaw plugins (they all early-return at startup).
+
+---
+
 ## 5. IronClaw Channel Hub (hosted by this app)
 
 **What it does:** The message bus between every peer — server.mjs, ironclaw-proxy, Kimodo, anything else you plug in.

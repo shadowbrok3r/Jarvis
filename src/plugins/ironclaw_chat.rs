@@ -338,6 +338,15 @@ pub struct GatewayClientHandle {
 }
 
 impl GatewayClientHandle {
+    /// Backend-agnostic constructor used by sibling chat plugins
+    /// (`zeroclaw_chat`) that want to register themselves under the same
+    /// resource type so the chat UI keeps working with no changes. Underscore
+    /// prefix marks this as an integration seam — direct callers should use
+    /// the higher-level helpers below.
+    pub fn __new_for_backend(tx: Sender<ChatCommand>) -> Self {
+        Self { tx }
+    }
+
     pub fn send_text(&self, text: impl Into<String>, thread_id: Option<String>) {
         let _ = self.tx.send(ChatCommand::Send {
             text: text.into(),
@@ -412,6 +421,19 @@ fn spawn_gateway_thread(
     hub: Res<HubBroadcast>,
     traffic: Option<Res<TrafficLogSink>>,
 ) {
+    // Skip when the operator has flipped the chat backend over to ZeroClaw.
+    // The `ChatState` / `GatewayClientHandle` resources will then be inserted
+    // by `zeroclaw_chat` instead, and the chat UI keeps working unchanged.
+    if !matches!(
+        jarvis_avatar::config::ChatBackend::parse(&settings.gateway.backend),
+        jarvis_avatar::config::ChatBackend::Ironclaw,
+    ) {
+        info!(
+            "ironclaw_chat: gateway.backend = {:?}; not starting IronClaw gateway thread",
+            settings.gateway.backend
+        );
+        return;
+    }
     let cfg = settings.gateway.clone();
     let module_name = settings.ironclaw.module_name.clone();
     let hub_tx = hub.clone();

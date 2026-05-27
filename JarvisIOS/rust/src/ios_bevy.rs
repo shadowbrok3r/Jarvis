@@ -710,6 +710,12 @@ pub(crate) fn ios_apply_json_anim_request(world: &mut World, path: String, loop_
         .replace_with_clip(clip);
 }
 
+/// Marker for VRMA child entities the user explicitly played (via FFI
+/// `queue_vrma`). Lets us despawn just user clips when a new one is
+/// requested without touching the idle-loop VRMA child.
+#[derive(Component)]
+struct IosUserPlayedVrma;
+
 /// Apply a batch of VRMA play requests. Mirrors `IosEmbeddedRenderer::flush_queued_vrma_requests`
 /// but as a free function so egui can submit clips without bouncing through the FFI mutex.
 pub(crate) fn ios_apply_vrma_requests(world: &mut World, requests: Vec<(String, bool)>) {
@@ -717,6 +723,25 @@ pub(crate) fn ios_apply_vrma_requests(world: &mut World, requests: Vec<(String, 
         crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: no avatar root (reload profile first)");
         return;
     };
+    // Despawn any prior user-played VRMA children before queueing the new
+    // batch — without this, two animations get spawned as siblings under
+    // the avatar root, both run their PlayVrma observers, and bevy_vrm1's
+    // animation player blends both (or rather, fights over the same bone
+    // tracks). That was the "they fight each other, glitches out really
+    // bad" symptom. The idle VRMA child (spawned in `setup_ios_avatar`
+    // without this marker) is intentionally untouched.
+    let stale: Vec<Entity> = world
+        .query_filtered::<Entity, With<IosUserPlayedVrma>>()
+        .iter(world)
+        .collect();
+    if !stale.is_empty() {
+        for e in &stale {
+            world.commands().entity(*e).despawn();
+        }
+        world.flush();
+        crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: despawned {} prior user clip(s)", stale.len());
+    }
+
     let asset_server = world.resource::<AssetServer>().clone();
     for (path, loop_forever) in requests {
         if !is_safe_asset_rel(&path) {
@@ -726,19 +751,29 @@ pub(crate) fn ios_apply_vrma_requests(world: &mut World, requests: Vec<(String, 
         if loop_forever {
             world.commands().entity(root).with_children(|parent| {
                 parent
-                    .spawn(VrmaHandle(asset_server.load(path.clone())))
+                    .spawn((VrmaHandle(asset_server.load(path.clone())), IosUserPlayedVrma))
                     .observe(observe_vrma_play_forever);
             });
         } else {
             world.commands().entity(root).with_children(|parent| {
                 parent
-                    .spawn(VrmaHandle(asset_server.load(path.clone())))
+                    .spawn((VrmaHandle(asset_server.load(path.clone())), IosUserPlayedVrma))
                     .observe(observe_vrma_play_once);
             });
         }
         crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: spawned {path} loop={loop_forever}");
     }
     world.flush();
+    // Adding/removing VRMA children grows the entity hierarchy under the
+    // avatar root — invalidate the bone map so the next refresh re-counts
+    // (the filter to `RestTransform`-bearing entities should keep it
+    // stable, but this is cheap insurance).
+    world
+        .resource_mut::<crate::ios_anim_layers::IosBoneNameMap>()
+        .invalidate();
+    world
+        .resource_mut::<crate::ios_anim_layers::IosRestPoseSnapshot>()
+        .invalidate();
 }
 
 /// Drain `IosEguiAnimRequests` once per frame and forward to the same code path Swift uses.
@@ -1504,7 +1539,16 @@ impl IosEmbeddedRenderer {
 
     pub fn layers_set_master(&mut self, enabled: bool) {
         let handle = self.app.world().resource::<crate::ios_anim_layers::IosLayerStackHandle>().clone();
+        let was = handle.with_read(|s| s.master_enabled);
         handle.with_write(|s| s.master_enabled = enabled);
+        // When master flips off, spring physics still carries residual
+        // energy from the last few frames of layer-driven bone writes
+        // (especially `weight_shift` which oscillates the hips/spine).
+        // Without an explicit reset the hair can keep swinging long after
+        // every layer is disabled — that was the user-visible symptom.
+        if was && !enabled {
+            crate::ios_device_motion::ios_reset_springs_after_device_motion_off(self.app.world_mut());
+        }
     }
 
     pub fn layers_install_default(&mut self) {
@@ -1513,6 +1557,10 @@ impl IosEmbeddedRenderer {
             s.reset_and_install_default();
             s.master_enabled = true;
         });
+        // Invalidate the bone-map snapshot so the next refresh re-captures
+        // from the current bone set. The map may have grown/shrunk between
+        // the previous install and now (VRMA loads, hot-swap, etc.).
+        self.invalidate_layer_pose_snapshot();
     }
 
     pub fn layers_set_enabled(&mut self, id: u64, enabled: bool) {
@@ -1535,7 +1583,36 @@ impl IosEmbeddedRenderer {
 
     pub fn layers_clear(&mut self) {
         let handle = self.app.world().resource::<crate::ios_anim_layers::IosLayerStackHandle>().clone();
-        handle.with_write(|s| s.layers.clear());
+        handle.with_write(|s| {
+            s.layers.clear();
+            // Reset the id counter too — Swift may have cached layer ids
+            // from before this clear; the next `install_default` re-mints
+            // 1..=N so the stale ids will silently match the wrong slots
+            // without this. Defensive.
+            // (the `next_id` field is private to `IosLayerStack` and
+            // already reset by `reset_and_install_default`; we just clear
+            // here to leave the stack in a known-empty state.)
+        });
+        // Bone-map + rest-pose snapshot will be re-captured on the next
+        // `ios_refresh_bone_map` tick; force the invalidation now so any
+        // entity refs the snapshot held are dropped immediately. Also
+        // reset spring velocities so the hair doesn't keep oscillating
+        // from energy injected by the (now-cleared) procedural layers.
+        self.invalidate_layer_pose_snapshot();
+        crate::ios_device_motion::ios_reset_springs_after_device_motion_off(self.app.world_mut());
+    }
+
+    /// Drop the bone-map + rest-pose snapshot so the next
+    /// `ios_refresh_bone_map` / `ios_refresh_rest_pose` runs cleanly. Cheap
+    /// to call — the next render frame will rebuild from the live world.
+    fn invalidate_layer_pose_snapshot(&mut self) {
+        let world = self.app.world_mut();
+        world
+            .resource_mut::<crate::ios_anim_layers::IosBoneNameMap>()
+            .invalidate();
+        world
+            .resource_mut::<crate::ios_anim_layers::IosRestPoseSnapshot>()
+            .invalidate();
     }
 
     fn flush_queued_json_anim_requests(&mut self) {

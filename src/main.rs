@@ -21,6 +21,20 @@ fn main() {
         )
         .init();
 
+    // Install a process-wide rustls CryptoProvider before any TLS happens.
+    //
+    // rustls 0.23 refuses to auto-detect when both `aws-lc-rs` and `ring`
+    // are linked (which is our case — `reqwest` pulls aws-lc-rs, transitive
+    // deps pull ring), and panics the first thread that touches TLS. We hit
+    // it as soon as the ZeroClaw chat worker opens `wss://`. Installing
+    // here, before `App::new()`, guarantees every later TLS consumer
+    // (reqwest, tokio-tungstenite, reqwest-eventsource) uses the same
+    // backend. `aws-lc-rs` matches what reqwest already chose.
+    //
+    // `install_default` returns `Err` only when a provider was already
+    // installed; we ignore that so re-entrant tests (if any) don't panic.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     dotenvy::dotenv().ok();
 
     let mut settings = Settings::load().expect("load config/default.toml (cwd = crate root)");
@@ -33,6 +47,19 @@ fn main() {
     if let Ok(t) = std::env::var("IRONCLAW_GATEWAY_TOKEN") {
         if !t.is_empty() {
             settings.gateway.auth_token = t;
+        }
+    }
+    // ZeroClaw bearer + webhook secret env overrides. `JARVIS__*` is also
+    // honored by the layered config loader, but reading them here means an
+    // operator can rotate the secret without touching user.toml.
+    if let Ok(t) = std::env::var("ZEROCLAW_GATEWAY_TOKEN") {
+        if !t.is_empty() {
+            settings.zeroclaw.auth_token = t;
+        }
+    }
+    if let Ok(t) = std::env::var("ZEROCLAW_WEBHOOK_SECRET") {
+        if !t.is_empty() {
+            settings.zeroclaw.webhook_secret = t;
         }
     }
 
@@ -101,6 +128,15 @@ fn main() {
             plugins::emotion_map::EmotionMapPlugin,
             plugins::service_status::ServiceStatusPlugin,
             plugins::undo_history::UndoHistoryPlugin,
+        ))
+        // ZeroClaw chat backend (alternate to IronClaw gateway). All three
+        // plugins early-return when `gateway.backend != "zeroclaw"` so they
+        // are safe to register unconditionally. Kept in their own tuple
+        // because Bevy's `add_plugins` trait impls cap at ~16 entries.
+        .add_plugins((
+            plugins::zeroclaw_chat::ZeroClawChatPlugin,
+            plugins::zeroclaw_attachments::ZeroClawAttachmentsPlugin,
+            plugins::zeroclaw_context::ZeroClawContextPlugin,
         ))
         .add_plugins(InjectKimodoClientPlugin)
         .add_systems(Startup, configure_primary_window)
