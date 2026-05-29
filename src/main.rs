@@ -12,15 +12,6 @@ use jarvis_avatar::config::Settings;
 use jarvis_avatar::config::parse_present_mode;
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("info,rmcp=warn,naga=warn")
-                }),
-        )
-        .init();
-
     // Install a process-wide rustls CryptoProvider before any TLS happens.
     //
     // rustls 0.23 refuses to auto-detect when both `aws-lc-rs` and `ring`
@@ -61,6 +52,22 @@ fn main() {
         if !t.is_empty() {
             settings.zeroclaw.webhook_secret = t;
         }
+    }
+
+    // Initialize tracing. When the MCP stdio transport is active the JSON-RPC
+    // stream owns stdout, so logs must go to stderr or they corrupt the
+    // protocol. Settings are loaded first (above) precisely so we can make
+    // this choice before emitting any log line.
+    let log_to_stderr = settings.mcp.enabled && settings.mcp.transport.uses_stdio();
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,rmcp=warn,naga=warn"));
+    if log_to_stderr {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
     let asset_path = resolve_asset_path();

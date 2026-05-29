@@ -53,6 +53,7 @@ rmcp = { version = "1", features = [
     "macros",
     "schemars",
     "transport-streamable-http-server",
+    "transport-io",
     "reqwest",
 ] }
 schemars = "1.2.1"

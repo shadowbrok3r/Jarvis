@@ -25,11 +25,31 @@ JSON **`driver`** is a **tagged union** (`kind` + fields):
 | `pose_hold` | `pose_ref` | Pose slug file or display name (see **`list_poses`**). |
 | `breathing` | optional `rate_hz`, `pitch_deg`, `roll_deg` | Defaults match built-in preset if omitted. Use **`additive`** blend. |
 | `blink` | optional `mean_interval`, `double_blink_chance` | Expression-only; default **`override`**. |
-| `weight_shift` | optional `rate_hz`, `hip_roll_deg`, `spine_counter_deg` | Additive. |
-| `finger_fidget` | optional `amplitude_deg`, `frequency_hz`, `seed` | Additive; random **`seed`** if omitted. |
-| `toe_fidget` | optional `amplitude_deg`, `frequency_hz`, `seed` | Additive. |
+| `weight_shift` | optional `rate_hz`, `hip_roll_deg`, `spine_counter_deg` | Additive. Wanders (two incommensurate sines) + slight hip yaw + chest counter so it never paces metronomically. |
+| `finger_fidget` | optional `amplitude_deg`, `frequency_hz`, `seed`, `curl_bias_deg` | Additive; random **`seed`** if omitted. Drives **all** finger joints (proximal→distal cascade). `curl_bias_deg` (~9° default) is the resting inward curl so hands read relaxed; **negative** value if the rig hyperextends. |
+| `toe_fidget` | optional `amplitude_deg`, `frequency_hz`, `seed`, `curl_bias_deg` | Additive. `curl_bias_deg` ~4° default. |
+| `look_around` | optional `mean_interval` (~3.5 s), `yaw_deg` (~12°), `pitch_deg` (~6°) | Additive. Ambient head glances on **neck + head only** — never the eyes. Auto-damps toward forward while a face is being tracked (Home Assistant gaze), so the head holds still and the eyes do the tracking; releases smoothly when tracking stops. |
+| `sway` | optional `rate_hz` (~0.05), `amount_deg` (~1.2°) | Additive. Slow whole-body balance lean on the **spine chain** (hips→spine→chest). Adds the forward/back pitch dimension `weight_shift` lacks; composes with it. |
+| `arm_sway` | optional `rate_hz` (~0.08), `amount_deg` (~1.5°) | Additive. Relaxed pendular drift on upper/lower arms, with the two arms slightly out of phase. Omit (or low-weight) when a clip/pose pins the arms (e.g. arms-crossed). |
+
+`breathing` now adds an asymmetric inhale/exhale curve + second harmonic + a touch of neck float (no new params).
+
+`look_around` deliberately drives no eye bones: the gaze system's `bevy_vrm1` look-at runs **after** the layer stack and owns `leftEye` / `rightEye`, so any eye writes here would be clobbered anyway. Keep this layer at `additive` blend and full weight; it composes under clips/gestures without fighting them.
 
 Changing **clip** vs **pose_hold** on an existing layer is **not** supported — **`remove_layer`** then **`add_layer`**.
+
+## Smooth loops & transitions (per-layer)
+
+These layer fields (on `add_layer` / `set_layer_stack` entries, tunable live via `update_layer`) kill the hard "twitch" when a clip loop restarts and let presets swap without popping:
+
+| Field | Default | Effect |
+|-------|---------|--------|
+| `loop_fade` | `0.25` | Seconds of crossfade across the clip loop seam. The last `loop_fade` s of a looping clip blend toward its **first frame**, so end→start is continuous even when the author's last frame ≠ first frame. `0` = hard cut (old behaviour). Forward looping clips only. |
+| `ping_pong` | `false` | Bounce at the clip ends instead of wrapping (`0→end→0`). Position stays continuous at both turnarounds — seamless back-and-forth. Ignores `reverse`. Good for sways/look-arounds where you don't want a wrap seam at all. |
+
+Enable/disable is also smoothed automatically: every layer has a hidden weight envelope (`WEIGHT_FADE_SECS = 0.3s`) that ramps when you toggle `enabled` or swap presets, so **`load_layer_set`** and `update_layer { enabled }` fade in/out instead of snapping. No field to set — it's automatic. (This is why a just-disabled layer keeps composing briefly until it has faded out.)
+
+**Recipe — seamless recorded idle:** record your full-body idle clip, then `add_layer { kind: clip, looping: true, loop_fade: 0.3 }`. The twitch on restart is gone without re-recording to close the loop by hand.
 
 ## Bone masks (`mask_include` / `mask_exclude`)
 

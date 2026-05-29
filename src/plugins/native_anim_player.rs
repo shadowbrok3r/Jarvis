@@ -11,6 +11,7 @@
 //! Bevy's clock) or by forwarding `kimodo:play-animation` to the Python
 //! peer.
 
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -19,7 +20,13 @@ use parking_lot::RwLock;
 
 use jarvis_avatar::pose_library::{AnimationFile, AnimationFrame};
 
+use crate::plugins::anim_layers::smoothstep;
 use crate::plugins::pose_driver::{PoseCommand, PoseCommandSender};
+
+/// Seconds of crossfade across a looping clip's end → start seam. The last
+/// `LOOP_FADE_SECS` of the loop are blended toward frame 0 so the wrap is
+/// continuous instead of hard-snapping (the "glitch reset" on loop restart).
+const LOOP_FADE_SECS: f32 = 0.35;
 
 pub struct NativeAnimPlayerPlugin;
 
@@ -140,29 +147,25 @@ fn tick_active_animation(
 
     clip.elapsed += time.delta_secs();
     let total_frames = clip.animation.frames.len();
-    let frame_idx_raw = (clip.elapsed / clip.frame_duration_secs) as i64;
+    let fps = 1.0 / clip.frame_duration_secs;
+    // Loop period: frame i sits at t = i / fps, so the wrap back to frame 0
+    // happens one frame-duration after the last frame.
+    let loop_period = total_frames as f32 * clip.frame_duration_secs;
 
-    let (frame_idx, finished) = if frame_idx_raw < total_frames as i64 {
-        (frame_idx_raw as usize, false)
-    } else if clip.looping {
-        (
-            (frame_idx_raw.rem_euclid(total_frames as i64)) as usize,
-            false,
-        )
+    // Continuous playhead time + which frame index we're nearest (for UI).
+    let (t, finished) = if clip.looping {
+        (clip.elapsed.rem_euclid(loop_period), false)
     } else {
-        (total_frames - 1, true)
+        let last_t = (total_frames.saturating_sub(1)) as f32 * clip.frame_duration_secs;
+        (clip.elapsed.min(last_t), clip.elapsed >= last_t)
     };
 
-    if Some(frame_idx) != active.last_applied_frame {
-        if let Some(frame) = active
-            .inner
-            .as_ref()
-            .and_then(|c| c.animation.frames.get(frame_idx))
-        {
-            push_frame(sender.as_ref(), frame);
-        }
-        active.last_applied_frame = Some(frame_idx);
-    }
+    let loop_fade = if clip.looping { LOOP_FADE_SECS } else { 0.0 };
+    let (bones, expressions) = sampled_clip_pose(&clip.animation, t, fps, loop_period, loop_fade);
+    push_pose(sender.as_ref(), bones, expressions);
+
+    let nearest = ((t * fps).round() as usize).min(total_frames - 1);
+    active.last_applied_frame = Some(nearest);
 
     if finished {
         let clip = active.inner.as_mut().unwrap();
@@ -170,6 +173,115 @@ fn tick_active_animation(
         if clip.holding_elapsed >= clip.hold_duration_secs {
             active.stop();
         }
+    }
+}
+
+/// Interpolated clip pose (bones + expressions) at continuous time `t`
+/// (seconds). When `loop_fade > 0`, the last `loop_fade` seconds are blended
+/// toward the clip's first frame so a looping clip's end → start wrap is
+/// seamless even when the author's last frame ≠ first frame.
+fn sampled_clip_pose(
+    animation: &AnimationFile,
+    t: f32,
+    fps: f32,
+    loop_period: f32,
+    loop_fade: f32,
+) -> (HashMap<String, [f32; 4]>, HashMap<String, f32>) {
+    let total = animation.frames.len();
+    let frame_f = (t * fps).clamp(0.0, (total.saturating_sub(1)) as f32);
+    let (mut bones, mut expr) = lerp_frames(animation, frame_f);
+
+    if loop_fade > 1e-4 && loop_period > loop_fade {
+        let fade_start = loop_period - loop_fade;
+        if t >= fade_start {
+            let w = smoothstep(((t - fade_start) / loop_fade).clamp(0.0, 1.0));
+            let (start_bones, start_expr) = lerp_frames(animation, 0.0);
+            for (name, target) in start_bones {
+                let blended = bones
+                    .get(&name)
+                    .map(|cur| cur.slerp(target, w))
+                    .unwrap_or(target);
+                bones.insert(name, blended);
+            }
+            for (name, target) in start_expr {
+                let cur = expr.get(&name).copied().unwrap_or(0.0);
+                expr.insert(name, cur + (target - cur) * w);
+            }
+        }
+    }
+
+    let bones_out = bones
+        .into_iter()
+        .map(|(name, q)| (name, [q.x, q.y, q.z, q.w]))
+        .collect();
+    (bones_out, expr)
+}
+
+/// Linearly (slerp for bones) interpolate between the two frames bracketing a
+/// fractional frame index. Index is clamped — wrap blending is the caller's job
+/// (via the loop crossfade).
+fn lerp_frames(
+    animation: &AnimationFile,
+    frame_f: f32,
+) -> (HashMap<String, Quat>, HashMap<String, f32>) {
+    let total = animation.frames.len();
+    let frame_f = frame_f.clamp(0.0, (total - 1) as f32);
+    let idx0 = frame_f.floor() as usize;
+    let idx1 = (idx0 + 1).min(total - 1);
+    let frac = frame_f.fract();
+    let a = &animation.frames[idx0];
+    let b = &animation.frames[idx1];
+
+    let mut names: std::collections::BTreeSet<&String> = a.bones.keys().collect();
+    names.extend(b.bones.keys());
+    let mut bones = HashMap::with_capacity(names.len());
+    for name in names {
+        let qa = a
+            .bones
+            .get(name)
+            .map(|r| Quat::from_xyzw(r.rotation[0], r.rotation[1], r.rotation[2], r.rotation[3]));
+        let qb = b
+            .bones
+            .get(name)
+            .map(|r| Quat::from_xyzw(r.rotation[0], r.rotation[1], r.rotation[2], r.rotation[3]));
+        let q = match (qa, qb) {
+            (Some(qa), Some(qb)) if frac > 0.0 => qa.slerp(qb, frac),
+            (Some(qa), _) => qa,
+            (None, Some(qb)) => qb,
+            (None, None) => continue,
+        };
+        bones.insert(name.clone(), q);
+    }
+
+    let mut expr_names: std::collections::BTreeSet<&String> = a.expressions.keys().collect();
+    expr_names.extend(b.expressions.keys());
+    let mut expressions = HashMap::with_capacity(expr_names.len());
+    for name in expr_names {
+        let wa = a.expressions.get(name).copied().unwrap_or(0.0);
+        let wb = b.expressions.get(name).copied().unwrap_or(wa);
+        expressions.insert(name.clone(), wa + (wb - wa) * frac);
+    }
+    (bones, expressions)
+}
+
+fn push_pose(
+    sender: &PoseCommandSender,
+    bones: HashMap<String, [f32; 4]>,
+    expressions: HashMap<String, f32>,
+) {
+    if !bones.is_empty() {
+        sender.send(PoseCommand::ApplyBones {
+            bones,
+            preserve_omitted_bones: true,
+            blend_weight: None,
+            transition_seconds: Some(0.0),
+        });
+    }
+    if !expressions.is_empty() {
+        sender.send(PoseCommand::ApplyExpression {
+            weights: expressions,
+            cancel_expression_animation: false,
+        });
     }
 }
 

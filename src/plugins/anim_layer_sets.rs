@@ -124,6 +124,18 @@ impl LayerSetsStore {
         }
     }
 
+    /// Seed the in-memory map with the built-in combo presets, but only for
+    /// names the user hasn't already saved. We do **not** persist here — the
+    /// built-ins are regenerated deterministically every startup, so a user who
+    /// deletes one just gets it back next run, while a user who *edits* a
+    /// same-named set wins (their file copy loaded first by [`Self::reload`]).
+    pub fn install_builtin_presets(&self) {
+        let mut g = self.inner.write();
+        for set in builtin_presets() {
+            g.sets.entry(set.name.clone()).or_insert(set);
+        }
+    }
+
     pub fn reload(&self) {
         let path: PathBuf = (*self.path).clone();
         match fs::read_to_string(&path) {
@@ -237,6 +249,10 @@ pub struct LayerBlueprint {
     pub looping: bool,
     #[serde(default)]
     pub reverse: bool,
+    #[serde(default = "default_loop_fade")]
+    pub loop_fade: f32,
+    #[serde(default)]
+    pub ping_pong: bool,
 }
 
 fn one() -> f32 {
@@ -244,6 +260,15 @@ fn one() -> f32 {
 }
 fn yes() -> bool {
     true
+}
+fn default_loop_fade() -> f32 {
+    0.25
+}
+fn default_thumb_bias() -> f32 {
+    8.0
+}
+fn default_leg_shift_seed() -> u64 {
+    0xD1B5_4A32_D192_ED03
 }
 
 impl LayerBlueprint {
@@ -265,6 +290,8 @@ impl LayerBlueprint {
             speed: layer.speed,
             looping: layer.looping,
             reverse: layer.reverse,
+            loop_fade: layer.loop_fade,
+            ping_pong: layer.ping_pong,
         }
     }
 
@@ -295,6 +322,9 @@ impl LayerBlueprint {
             duration,
             looping: self.looping,
             reverse: self.reverse,
+            loop_fade: self.loop_fade,
+            ping_pong: self.ping_pong,
+            gain: if self.enabled { 1.0 } else { 0.0 },
         })
     }
 }
@@ -336,14 +366,42 @@ pub enum DriverBlueprint {
         amplitude_deg: f32,
         frequency_hz: f32,
         seed: u64,
+        #[serde(default)]
+        curl_bias_deg: f32,
+        #[serde(default = "default_thumb_bias")]
+        curl_bias_thumb_deg: f32,
     },
     ToeFidget {
         amplitude_deg: f32,
         frequency_hz: f32,
         seed: u64,
+        #[serde(default)]
+        curl_bias_deg: f32,
     },
     ExpressionHold {
         expressions: HashMap<String, f32>,
+    },
+    LookAround {
+        mean_interval: f32,
+        yaw_deg: f32,
+        pitch_deg: f32,
+    },
+    Sway {
+        rate_hz: f32,
+        amount_deg: f32,
+    },
+    ArmSway {
+        rate_hz: f32,
+        amount_deg: f32,
+    },
+    LegShift {
+        rate_hz: f32,
+        shift_deg: f32,
+        knee_bend_deg: f32,
+        hip_sway_deg: f32,
+        ankle_deg: f32,
+        #[serde(default = "default_leg_shift_seed")]
+        seed: u64,
     },
 }
 
@@ -392,18 +450,63 @@ impl DriverBlueprint {
                 amplitude_deg,
                 frequency_hz,
                 seed,
+                curl_bias_deg,
+                curl_bias_thumb_deg,
             } => Self::FingerFidget {
                 amplitude_deg: *amplitude_deg,
                 frequency_hz: *frequency_hz,
                 seed: *seed,
+                curl_bias_deg: *curl_bias_deg,
+                curl_bias_thumb_deg: *curl_bias_thumb_deg,
             },
             DriverKind::ToeFidget {
                 amplitude_deg,
                 frequency_hz,
                 seed,
+                curl_bias_deg,
             } => Self::ToeFidget {
                 amplitude_deg: *amplitude_deg,
                 frequency_hz: *frequency_hz,
+                seed: *seed,
+                curl_bias_deg: *curl_bias_deg,
+            },
+            DriverKind::LookAround {
+                mean_interval,
+                yaw_deg,
+                pitch_deg,
+                ..
+            } => Self::LookAround {
+                mean_interval: *mean_interval,
+                yaw_deg: *yaw_deg,
+                pitch_deg: *pitch_deg,
+            },
+            DriverKind::Sway {
+                rate_hz,
+                amount_deg,
+            } => Self::Sway {
+                rate_hz: *rate_hz,
+                amount_deg: *amount_deg,
+            },
+            DriverKind::ArmSway {
+                rate_hz,
+                amount_deg,
+            } => Self::ArmSway {
+                rate_hz: *rate_hz,
+                amount_deg: *amount_deg,
+            },
+            DriverKind::LegShift {
+                rate_hz,
+                shift_deg,
+                knee_bend_deg,
+                hip_sway_deg,
+                ankle_deg,
+                seed,
+            } => Self::LegShift {
+                rate_hz: *rate_hz,
+                shift_deg: *shift_deg,
+                knee_bend_deg: *knee_bend_deg,
+                hip_sway_deg: *hip_sway_deg,
+                ankle_deg: *ankle_deg,
                 seed: *seed,
             },
         }
@@ -477,18 +580,82 @@ impl DriverBlueprint {
                 amplitude_deg,
                 frequency_hz,
                 seed,
+                curl_bias_deg,
+                curl_bias_thumb_deg,
             } => DriverKind::FingerFidget {
                 amplitude_deg: *amplitude_deg,
                 frequency_hz: *frequency_hz,
                 seed: *seed,
+                curl_bias_deg: *curl_bias_deg,
+                curl_bias_thumb_deg: *curl_bias_thumb_deg,
             },
             Self::ToeFidget {
                 amplitude_deg,
                 frequency_hz,
                 seed,
+                curl_bias_deg,
             } => DriverKind::ToeFidget {
                 amplitude_deg: *amplitude_deg,
                 frequency_hz: *frequency_hz,
+                seed: *seed,
+                curl_bias_deg: *curl_bias_deg,
+            },
+            Self::LookAround {
+                mean_interval,
+                yaw_deg,
+                pitch_deg,
+            } => {
+                let DriverKind::LookAround {
+                    next_in,
+                    cur_yaw,
+                    cur_pitch,
+                    target_yaw,
+                    target_pitch,
+                    damp,
+                    ..
+                } = DriverKind::look_around_default()
+                else {
+                    unreachable!()
+                };
+                DriverKind::LookAround {
+                    mean_interval: *mean_interval,
+                    yaw_deg: *yaw_deg,
+                    pitch_deg: *pitch_deg,
+                    next_in,
+                    cur_yaw,
+                    cur_pitch,
+                    target_yaw,
+                    target_pitch,
+                    damp,
+                }
+            }
+            Self::Sway {
+                rate_hz,
+                amount_deg,
+            } => DriverKind::Sway {
+                rate_hz: *rate_hz,
+                amount_deg: *amount_deg,
+            },
+            Self::ArmSway {
+                rate_hz,
+                amount_deg,
+            } => DriverKind::ArmSway {
+                rate_hz: *rate_hz,
+                amount_deg: *amount_deg,
+            },
+            Self::LegShift {
+                rate_hz,
+                shift_deg,
+                knee_bend_deg,
+                hip_sway_deg,
+                ankle_deg,
+                seed,
+            } => DriverKind::LegShift {
+                rate_hz: *rate_hz,
+                shift_deg: *shift_deg,
+                knee_bend_deg: *knee_bend_deg,
+                hip_sway_deg: *hip_sway_deg,
+                ankle_deg: *ankle_deg,
                 seed: *seed,
             },
         })
@@ -508,6 +675,204 @@ fn find_animation_by_name(
 }
 
 // ---------------------------------------------------------------------------
+// Built-in combo presets
+// ---------------------------------------------------------------------------
+
+/// A layer blueprint with sensible defaults filled in — keeps the preset
+/// definitions below readable.
+fn bp(
+    slug: &str,
+    label: &str,
+    driver: DriverBlueprint,
+    weight: f32,
+    blend: BlendModeBp,
+) -> LayerBlueprint {
+    LayerBlueprint {
+        slug: slug.to_string(),
+        label: label.to_string(),
+        driver,
+        weight,
+        enabled: true,
+        blend_mode: blend,
+        mask_include: Vec::new(),
+        mask_exclude: Vec::new(),
+        mask_include_subtrees: Vec::new(),
+        mask_exclude_subtrees: Vec::new(),
+        speed: 1.0,
+        looping: true,
+        reverse: false,
+        loop_fade: 0.25,
+        ping_pong: false,
+    }
+}
+
+fn clip_layer(filename: &str, label: &str) -> LayerBlueprint {
+    bp(
+        filename,
+        label,
+        DriverBlueprint::Clip {
+            filename: filename.to_string(),
+        },
+        1.0,
+        BlendModeBp::Override,
+    )
+}
+
+// Procedural-driver blueprint constructors — values mirror the `*_default()`
+// fns in `anim_layers.rs` so a loaded preset matches the live defaults.
+fn breathing_bp() -> DriverBlueprint {
+    DriverBlueprint::Breathing {
+        rate_hz: 0.25,
+        pitch_deg: 0.6,
+        roll_deg: 0.3,
+    }
+}
+fn blink_bp() -> DriverBlueprint {
+    DriverBlueprint::Blink {
+        mean_interval: 4.0,
+        double_blink_chance: 0.18,
+    }
+}
+fn weight_shift_bp() -> DriverBlueprint {
+    DriverBlueprint::WeightShift {
+        rate_hz: 0.07,
+        hip_roll_deg: 1.5,
+        spine_counter_deg: 0.8,
+    }
+}
+fn finger_fidget_bp() -> DriverBlueprint {
+    DriverBlueprint::FingerFidget {
+        amplitude_deg: 1.5,
+        frequency_hz: 0.35,
+        seed: 0x9E37_79B9_7F4A_7C15,
+        curl_bias_deg: 9.0,
+        curl_bias_thumb_deg: 8.0,
+    }
+}
+fn toe_fidget_bp() -> DriverBlueprint {
+    DriverBlueprint::ToeFidget {
+        amplitude_deg: 1.2,
+        frequency_hz: 0.25,
+        seed: 0xBF58_476D_1CE4_E5B9,
+        curl_bias_deg: 4.0,
+    }
+}
+fn look_around_bp() -> DriverBlueprint {
+    DriverBlueprint::LookAround {
+        mean_interval: 3.5,
+        yaw_deg: 12.0,
+        pitch_deg: 6.0,
+    }
+}
+fn sway_bp(amount_deg: f32) -> DriverBlueprint {
+    DriverBlueprint::Sway {
+        rate_hz: 0.05,
+        amount_deg,
+    }
+}
+fn arm_sway_bp(amount_deg: f32) -> DriverBlueprint {
+    DriverBlueprint::ArmSway {
+        rate_hz: 0.08,
+        amount_deg,
+    }
+}
+fn leg_shift_bp() -> DriverBlueprint {
+    DriverBlueprint::LegShift {
+        rate_hz: 0.05,
+        shift_deg: 3.5,
+        knee_bend_deg: 8.0,
+        hip_sway_deg: 2.5,
+        ankle_deg: 1.8,
+        seed: default_leg_shift_seed(),
+    }
+}
+
+/// The full ambient "alive" procedural stack, reused as the base of several
+/// presets. `arm_sway` is split out so presets that lock the arms (e.g.
+/// arms-crossed) can omit it.
+fn alive_stack(arm_sway: bool) -> Vec<LayerBlueprint> {
+    let a = BlendModeBp::Additive;
+    let mut v = vec![
+        bp("breathing", "Breathing", breathing_bp(), 1.0, a),
+        bp("auto-blink", "Auto-Blink", blink_bp(), 1.0, BlendModeBp::Override),
+        bp("leg-shift", "Leg Shift", leg_shift_bp(), 0.85, a),
+        bp("look-around", "Look Around", look_around_bp(), 1.0, a),
+        bp("finger-fidget", "Finger Fidget", finger_fidget_bp(), 0.9, a),
+        bp("toe-fidget", "Toe Fidget", toe_fidget_bp(), 0.7, a),
+    ];
+    if arm_sway {
+        v.push(bp("arm-sway", "Arm Sway", arm_sway_bp(1.5), 0.6, a));
+    }
+    v
+}
+
+/// Named combo presets shipped with the app. Each stacks a base clip (or none)
+/// under the ambient procedural drivers so the avatar reads as alive instead of
+/// looping a single canned clip.
+fn builtin_presets() -> Vec<LayerSet> {
+    let a = BlendModeBp::Additive;
+    vec![
+        // Pure ambient standing idle — no base clip, just the living stack.
+        LayerSet {
+            name: "Alive — Standing".to_string(),
+            master_enabled: true,
+            layers: alive_stack(true),
+        },
+        // Arms crossed: clip pins the arms (Override), so we skip arm-sway and
+        // fingers and keep the torso/head alive underneath.
+        LayerSet {
+            name: "Alive — Arms Crossed".to_string(),
+            master_enabled: true,
+            layers: {
+                let mut l = vec![clip_layer("idle_arms_crossed.json", "Arms Crossed")];
+                l.extend([
+                    bp("breathing", "Breathing", breathing_bp(), 1.0, a),
+                    bp("auto-blink", "Auto-Blink", blink_bp(), 1.0, BlendModeBp::Override),
+                    bp("weight-shift", "Weight Shift", weight_shift_bp(), 0.6, a),
+                    bp("sway", "Body Sway", sway_bp(0.9), 0.7, a),
+                    bp("look-around", "Look Around", look_around_bp(), 1.0, a),
+                ]);
+                l
+            },
+        },
+        // Hands clasped in front — arms are positioned but can still drift a
+        // little, so keep a gentle arm-sway at low weight.
+        LayerSet {
+            name: "Alive — Hands Clasped".to_string(),
+            master_enabled: true,
+            layers: {
+                let mut l = vec![clip_layer("idle_hands_clasp_front.json", "Hands Clasped")];
+                l.extend([
+                    bp("breathing", "Breathing", breathing_bp(), 1.0, a),
+                    bp("auto-blink", "Auto-Blink", blink_bp(), 1.0, BlendModeBp::Override),
+                    bp("weight-shift", "Weight Shift", weight_shift_bp(), 0.7, a),
+                    bp("sway", "Body Sway", sway_bp(1.0), 0.8, a),
+                    bp("arm-sway", "Arm Sway", arm_sway_bp(0.8), 0.4, a),
+                    bp("look-around", "Look Around", look_around_bp(), 1.0, a),
+                ]);
+                l
+            },
+        },
+        // Restless: no base clip, heavier sway + fidget weights for a more
+        // fidgety, energetic idle.
+        LayerSet {
+            name: "Restless".to_string(),
+            master_enabled: true,
+            layers: vec![
+                bp("breathing", "Breathing", breathing_bp(), 1.0, a),
+                bp("auto-blink", "Auto-Blink", blink_bp(), 1.0, BlendModeBp::Override),
+                bp("weight-shift", "Weight Shift", weight_shift_bp(), 1.0, a),
+                bp("sway", "Body Sway", sway_bp(1.8), 1.0, a),
+                bp("arm-sway", "Arm Sway", arm_sway_bp(2.4), 0.9, a),
+                bp("look-around", "Look Around", look_around_bp(), 1.0, a),
+                bp("finger-fidget", "Finger Fidget", finger_fidget_bp(), 1.0, a),
+                bp("toe-fidget", "Toe Fidget", toe_fidget_bp(), 0.9, a),
+            ],
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // Startup: build store + eager load
 // ---------------------------------------------------------------------------
 
@@ -518,6 +883,7 @@ fn load_layer_sets(mut commands: Commands, settings: Res<Settings>) {
         path: Arc::new(path),
     };
     store.reload();
+    store.install_builtin_presets();
     commands.insert_resource(store);
 }
 

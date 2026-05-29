@@ -64,8 +64,13 @@ pub struct MToonOverridesPlugin;
 
 impl Plugin for MToonOverridesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_overrides)
-            .add_systems(Update, apply_overrides_on_material_change);
+        app.add_systems(Startup, load_overrides).add_systems(
+            Update,
+            (
+                reload_overrides_on_model_change,
+                apply_overrides_on_material_change,
+            ),
+        );
     }
 }
 
@@ -186,7 +191,9 @@ fn load_mtoon_overrides_file(path: &PathBuf) -> MToonOverridesFile {
     }
 }
 
-fn load_overrides(mut commands: Commands, settings: Res<Settings>) {
+/// Resolve the per-VRM override file for the active model (falling back to the
+/// global sidecar). Returns the per-VRM path (always the save target) + parsed file.
+fn resolve_overrides_for_model(settings: &Settings) -> (PathBuf, MToonOverridesFile) {
     let per_vrm_path = vrm_model_mtoon_override_path(&settings.avatar.model_path);
     // Load from per-VRM file if it exists, else from the global sidecar.
     // Saves always target the per-VRM file so the first "Save to overrides" creates it.
@@ -205,7 +212,39 @@ fn load_overrides(mut commands: Commands, settings: Res<Settings>) {
         }
         file
     };
+    (per_vrm_path, file)
+}
+
+fn load_overrides(mut commands: Commands, settings: Res<Settings>) {
+    let (per_vrm_path, file) = resolve_overrides_for_model(&settings);
     // Store always points to the per-VRM path so "Save to overrides" writes there.
+    commands.insert_resource(MToonOverridesStore::new(per_vrm_path, file));
+}
+
+/// Rebuild the override store when the active model changes (MCP `load_vrm` /
+/// debug-UI hot-swap). `Startup` only loads the initial model, so without this a
+/// runtime swap keeps the previous model's overrides.
+fn reload_overrides_on_model_change(
+    mut commands: Commands,
+    settings: Res<Settings>,
+    store: Option<Res<MToonOverridesStore>>,
+    mut last: Local<Option<String>>,
+) {
+    let current = settings.avatar.model_path.clone();
+    if last.as_deref() == Some(current.as_str()) {
+        return;
+    }
+    let was_first = last.is_none();
+    *last = Some(current.clone());
+    if was_first {
+        if let Some(store) = store {
+            if store.path == vrm_model_mtoon_override_path(&current) {
+                return;
+            }
+        }
+    }
+    let (per_vrm_path, file) = resolve_overrides_for_model(&settings);
+    info!("mtoon overrides: reloaded for model {current} ({per_vrm_path:?})");
     commands.insert_resource(MToonOverridesStore::new(per_vrm_path, file));
 }
 
@@ -225,7 +264,7 @@ pub fn mtoon_mesh_override_key(
     format!("MaterialAsset_{:?}", material_handle.id())
 }
 
-/// Last store revision + MToon mesh count applied to `Assets<MToonMaterial>`.
+/// Last store revision + MToon mesh count painted into `Assets<MToonMaterial>`.
 #[derive(Default)]
 struct MToonApplyCursor {
     rev: u64,
@@ -240,28 +279,47 @@ fn apply_overrides_on_material_change(
         Option<&GltfMaterialName>,
         &MeshMaterial3d<MToonMaterial>,
     )>,
+    mut asset_events: MessageReader<AssetEvent<MToonMaterial>>,
     mut applied: Local<MToonApplyCursor>,
 ) {
+    // New MToon assets (model load / hot-swap) are the reliable re-paint signal.
+    // Ignore `Modified`: our own `get_mut` below marks materials modified, so
+    // reacting to it would re-apply every frame forever.
+    let mut assets_ready = false;
+    for ev in asset_events.read() {
+        if matches!(
+            ev,
+            AssetEvent::Added { .. } | AssetEvent::LoadedWithDependencies { .. }
+        ) {
+            assets_ready = true;
+        }
+    }
+
     let Some(store) = store else {
         return;
     };
+    // `is_changed()` fires the frame after the store resource is swapped (hot-swap
+    // reload), even when rev/mesh_count happen to match the previous model.
+    let store_changed = store.is_changed();
     let mesh_count = meshes_q.iter().count();
     let current_rev = store.revision();
-    let file = store.snapshot();
 
-    if file.entries.is_empty() {
-        if current_rev != applied.rev || mesh_count != applied.mtoon_mesh_count {
-            applied.rev = current_rev;
-            applied.mtoon_mesh_count = mesh_count;
-        }
-        return;
-    }
-
-    if current_rev == applied.rev && mesh_count == applied.mtoon_mesh_count {
+    // Mesh-count alone is unreliable across hot-swaps between same-primitive-count
+    // models (e.g. variants of one character); asset events cover that case.
+    let trigger = assets_ready
+        || store_changed
+        || current_rev != applied.rev
+        || mesh_count != applied.mtoon_mesh_count;
+    if !trigger {
         return;
     }
     applied.rev = current_rev;
     applied.mtoon_mesh_count = mesh_count;
+
+    let file = store.snapshot();
+    if file.entries.is_empty() {
+        return;
+    }
 
     let mut touched = 0usize;
     for (name, gltf_name, handle) in &meshes_q {

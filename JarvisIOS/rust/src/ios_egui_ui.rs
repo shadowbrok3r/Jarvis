@@ -141,7 +141,7 @@ pub fn jarvis_ios_egui_windows(
                     }
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .max_height(360.0)
+                        .max_height(600.0)
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             for key in &material_keys {

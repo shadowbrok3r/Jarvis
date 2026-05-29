@@ -397,6 +397,35 @@ pub struct McpSettings {
     /// 86400 (24 hours).
     #[serde(default = "default_mcp_session_keep_alive_sec")]
     pub session_keep_alive_sec: u64,
+    /// Which transport(s) to expose the MCP tools over. `http` (default) keeps
+    /// the existing streamable-HTTP server; `stdio` serves over the process'
+    /// stdin/stdout for clients that spawn the binary as a subprocess; `both`
+    /// runs them simultaneously. When stdio is active, logs are redirected to
+    /// stderr so the JSON-RPC stream on stdout stays clean.
+    #[serde(default)]
+    pub transport: McpTransport,
+}
+
+/// Selects how the MCP server is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    /// Streamable-HTTP only (existing behavior).
+    #[default]
+    Http,
+    /// stdin/stdout JSON-RPC only.
+    Stdio,
+    /// Both HTTP and stdio at once.
+    Both,
+}
+
+impl McpTransport {
+    pub fn uses_http(self) -> bool {
+        matches!(self, Self::Http | Self::Both)
+    }
+    pub fn uses_stdio(self) -> bool {
+        matches!(self, Self::Stdio | Self::Both)
+    }
 }
 
 fn default_mcp_path() -> String {

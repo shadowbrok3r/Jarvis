@@ -302,23 +302,29 @@ impl LayerStack {
             Layer::new("auto-blink", "Auto-Blink", DriverKind::blink_default())
                 .blend(BlendMode::Override)
                 .weight(1.0),
-            Layer::new(
-                "weight-shift",
-                "Weight Shift",
-                DriverKind::weight_shift_default(),
-            )
-            .blend(BlendMode::RestRelative)
-            .weight(0.8),
+            // Coordinated lower body — supersedes the old roll-only weight-shift
+            // + standalone sway (those variants still exist for saved sets and
+            // manual use; leg-shift just covers the same ground more fully:
+            // lateral lean, forward/back sway, knees and ankles).
+            Layer::new("leg-shift", "Leg Shift", DriverKind::leg_shift_default())
+                .blend(BlendMode::RestRelative)
+                .weight(0.85),
             Layer::new(
                 "finger-fidget",
                 "Finger Fidget",
                 DriverKind::finger_fidget_default(),
             )
             .blend(BlendMode::RestRelative)
-            .weight(0.6),
+            .weight(0.9),
             Layer::new("toe-fidget", "Toe Fidget", DriverKind::toe_fidget_default())
                 .blend(BlendMode::RestRelative)
-                .weight(0.4),
+                .weight(0.7),
+            Layer::new("look-around", "Look Around", DriverKind::look_around_default())
+                .blend(BlendMode::RestRelative)
+                .weight(1.0),
+            Layer::new("arm-sway", "Arm Sway", DriverKind::arm_sway_default())
+                .blend(BlendMode::RestRelative)
+                .weight(0.6),
         ];
         for layer in presets {
             self.add_layer(layer);
@@ -355,8 +361,34 @@ pub struct Layer {
     pub duration: Option<f32>,
     /// Loop vs hold-last-frame. Procedural layers ignore this.
     pub looping: bool,
-    /// When true, sample the clip / envelope backwards 
+    /// When true, sample the clip / envelope backwards
     pub reverse: bool,
+    /// Seconds of crossfade across the clip loop seam. The last `loop_fade`
+    /// seconds of a looping clip are blended toward its first frame so the
+    /// wrap from end → start is continuous (kills the "twitch" on restart).
+    /// `0` = hard cut (old behaviour). Ignored by procedural drivers.
+    pub loop_fade: f32,
+    /// Bounce at the clip ends instead of wrapping. Position stays continuous
+    /// across the turnaround (no seam), unlike `looping` + `reverse` which
+    /// hard-flips. When set, `reverse` is ignored.
+    pub ping_pong: bool,
+    /// Runtime-only smoothed enable/disable envelope in `[0, 1]`. Ramps toward
+    /// `enabled ? 1 : 0` over [`WEIGHT_FADE_SECS`] so toggling a layer (or
+    /// swapping presets) fades instead of popping. Not serialized.
+    pub gain: f32,
+}
+
+/// Seconds for a layer's enable/disable weight envelope ([`Layer::gain`]) to
+/// ramp between 0 and 1. Short enough to feel responsive, long enough to hide
+/// the pop when a layer turns on/off or a preset is swapped.
+pub const WEIGHT_FADE_SECS: f32 = 0.3;
+
+/// Hermite smoothstep on `[0, 1]` — eases the ends of a ramp so fades/blends
+/// start and stop gently instead of linearly.
+#[inline]
+pub fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 impl Layer {
@@ -377,6 +409,9 @@ impl Layer {
             duration,
             looping: true,
             reverse: false,
+            loop_fade: 0.25,
+            ping_pong: false,
+            gain: 1.0,
         }
     }
 
@@ -393,22 +428,42 @@ impl Layer {
     /// Returns `(time, duration)` for the timeline widget. Uses the effective
     /// sample time (honours [`Self::reverse`]) so the playhead sweeps backwards.
     pub fn timeline_progress(&self) -> (f32, f32) {
-        let duration = self
-            .duration
-            .or_else(|| self.driver.duration_hint())
-            .unwrap_or(10.0)
-            .max(0.01);
-        (layer_sample_time(self), duration)
+        match self.duration.or_else(|| self.driver.duration_hint()) {
+            // Clip-style layer with a real length: show the true playhead.
+            Some(d) => (layer_sample_time(self), d.max(0.01)),
+            // Endless procedural driver: `layer_sample_time` now returns an
+            // unbounded clock, which would pin the bar at 100%. Show a cosmetic
+            // sweep over a fixed window so the marker keeps moving.
+            None => {
+                let window = 10.0;
+                (self.time.rem_euclid(window), window)
+            }
+        }
     }
 }
 
 /// Effective sample time for clip / envelope evaluation (forwards or reversed).
 pub fn layer_sample_time(layer: &Layer) -> f32 {
-    let duration = layer
-        .duration
-        .or_else(|| layer.driver.duration_hint())
-        .unwrap_or(10.0)
-        .max(0.01);
+    // Endless procedural drivers (breathing, weight-shift, fidgets, look-around)
+    // have no finite duration. They must NOT wrap: the old `unwrap_or(10.0)`
+    // fallback chopped `layer.time` at 10 s via `rem_euclid`, and since 10 s is
+    // not a whole number of sine cycles the phase jumped mid-cycle on every wrap
+    // — that was the breathing / weight-shift "twitch". These drivers are
+    // internally periodic, so a freely accumulating time is exactly right.
+    let Some(duration) = layer.duration.or_else(|| layer.driver.duration_hint()) else {
+        return layer.time;
+    };
+    let duration = duration.max(0.01);
+    if layer.ping_pong {
+        // Triangle fold over a 2·duration period: 0→dur→0. Position is
+        // continuous at both turnarounds, so the bounce never seams.
+        let cycle = layer.time.rem_euclid(2.0 * duration);
+        return if cycle <= duration {
+            cycle
+        } else {
+            2.0 * duration - cycle
+        };
+    }
     let phase = layer.time.rem_euclid(duration);
     if layer.reverse {
         (duration - phase).rem_euclid(duration)
@@ -537,11 +592,88 @@ pub enum DriverKind {
         amplitude_deg: f32,
         frequency_hz: f32,
         seed: u64,
+        /// Static inward curl (degrees) the fingers oscillate *around*, so the
+        /// resting hand reads relaxed instead of flat/stiff. `0` = straight.
+        curl_bias_deg: f32,
+        /// Static thumb *opposition* (degrees) — how far the thumb tucks toward
+        /// the palm at rest. Drives the thumb on its own yaw axis (not the
+        /// finger curl axis) so it reads relaxed instead of sticking up like a
+        /// thumbs-up. `0` = thumb in line with the hand.
+        curl_bias_thumb_deg: f32,
     },
     /// Same, for toes. Split so users can disable one without the other.
     ToeFidget {
         amplitude_deg: f32,
         frequency_hz: f32,
+        seed: u64,
+        /// Static curl the fidget oscillates around (see [`Self::FingerFidget`]).
+        curl_bias_deg: f32,
+    },
+    /// Ambient head/neck "look around" — slow random glances so the avatar
+    /// reads as awake and present while idle. Emits rest-relative deltas on the
+    /// **neck + head only** (never the eyes — `look_at.rs` owns those, and its
+    /// `bevy_vrm1` driver runs after the layer stack so any eye writes here are
+    /// clobbered anyway). When the avatar is actively tracking a face (Home
+    /// Assistant gaze), the motion collapses toward forward so the head stays
+    /// oriented at the user while the eyes do the tracking. Use
+    /// [`BlendMode::RestRelative`].
+    LookAround {
+        /// Mean seconds between picking a new glance target.
+        mean_interval: f32,
+        /// Max horizontal glance (left/right), degrees.
+        yaw_deg: f32,
+        /// Max vertical glance (up/down), degrees.
+        pitch_deg: f32,
+        // --- transient state (not authored; runtime only) ---
+        next_in: f32,
+        cur_yaw: f32,
+        cur_pitch: f32,
+        target_yaw: f32,
+        target_pitch: f32,
+        /// Smoothed gaze-damping gain (1 = free wander, →0 = locked forward).
+        damp: f32,
+    },
+    /// Slow whole-body balance sway — the perpetual forward/back + circular
+    /// micro-lean a standing person makes to stay balanced. Drives the spine
+    /// chain only (hips/spine/chest), so it composes additively with
+    /// [`Self::WeightShift`] (which is roll/yaw only) and adds the missing
+    /// forward/back pitch dimension. Emits rest-relative deltas — use
+    /// [`BlendMode::RestRelative`].
+    Sway {
+        rate_hz: f32,
+        amount_deg: f32,
+    },
+    /// Relaxed pendular arm sway — arms are never perfectly still, they drift
+    /// with the body's weight shifts. Drives upper/lower arms with a slight
+    /// per-side phase offset so the two arms don't swing in lockstep. Emits
+    /// rest-relative deltas — use [`BlendMode::RestRelative`].
+    ArmSway {
+        rate_hz: f32,
+        amount_deg: f32,
+    },
+    /// Coordinated lower-body weight transfer — a *contrapposto* standing idle.
+    /// One slow wandering "weight" signal drives the whole lower body coherently:
+    /// the hips lean toward the loaded leg (pelvic obliquity), the pelvis rotates
+    /// slightly into the stance, the free-side **knee softens and bends**, the
+    /// thighs rotate into/out of the stance, and a faster **ankle postural
+    /// micro-sway** rides on both feet (the constant balance correction a real
+    /// person makes). Self-contained for the lower body: drives hips/spine/chest
+    /// + both `UpperLeg`/`LowerLeg`/`Foot`. Leg bones are authored in normalized
+    /// humanoid space and converted through the rest snapshot (so knee = +pitch
+    /// etc. hold regardless of bind orientation), like the finger fidget. Emits
+    /// rest-relative deltas — use [`BlendMode::RestRelative`]. Supersedes the
+    /// roll-only [`Self::WeightShift`]; don't stack both on the hips at once.
+    LegShift {
+        rate_hz: f32,
+        /// Lateral hip lean toward the weighted leg (degrees).
+        shift_deg: f32,
+        /// Knee flexion on the unweighted (free) leg (degrees).
+        knee_bend_deg: f32,
+        /// Thigh rotation / abduction into the stance (degrees).
+        hip_sway_deg: f32,
+        /// Ankle postural micro-sway amplitude (degrees).
+        ankle_deg: f32,
+        /// Phase seed so multiple instances / restarts differ.
         seed: u64,
     },
 }
@@ -575,6 +707,8 @@ impl DriverKind {
             amplitude_deg: 1.5,
             frequency_hz: 0.35,
             seed: 0x9E37_79B9_7F4A_7C15,
+            curl_bias_deg: 9.0,
+            curl_bias_thumb_deg: 8.0,
         }
     }
     pub fn toe_fidget_default() -> Self {
@@ -582,6 +716,42 @@ impl DriverKind {
             amplitude_deg: 1.2,
             frequency_hz: 0.25,
             seed: 0xBF58_476D_1CE4_E5B9,
+            curl_bias_deg: 4.0,
+        }
+    }
+    pub fn look_around_default() -> Self {
+        Self::LookAround {
+            mean_interval: 3.5,
+            yaw_deg: 12.0,
+            pitch_deg: 6.0,
+            next_in: 1.5,
+            cur_yaw: 0.0,
+            cur_pitch: 0.0,
+            target_yaw: 0.0,
+            target_pitch: 0.0,
+            damp: 1.0,
+        }
+    }
+    pub fn sway_default() -> Self {
+        Self::Sway {
+            rate_hz: 0.05,
+            amount_deg: 1.2,
+        }
+    }
+    pub fn arm_sway_default() -> Self {
+        Self::ArmSway {
+            rate_hz: 0.08,
+            amount_deg: 1.5,
+        }
+    }
+    pub fn leg_shift_default() -> Self {
+        Self::LegShift {
+            rate_hz: 0.05,
+            shift_deg: 3.5,
+            knee_bend_deg: 8.0,
+            hip_sway_deg: 2.5,
+            ankle_deg: 1.8,
+            seed: 0xD1B5_4A32_D192_ED03,
         }
     }
 
@@ -595,6 +765,10 @@ impl DriverKind {
             Self::WeightShift { .. } => "weight-shift",
             Self::FingerFidget { .. } => "finger-fidget",
             Self::ToeFidget { .. } => "toe-fidget",
+            Self::LookAround { .. } => "look-around",
+            Self::Sway { .. } => "sway",
+            Self::ArmSway { .. } => "arm-sway",
+            Self::LegShift { .. } => "leg-shift",
         }
     }
 
@@ -740,6 +914,7 @@ fn advance_and_apply_layers(
     snap: Res<RestPoseSnapshot>,
     indexed: Option<Res<IndexedBones>>,
     hierarchy: Option<Res<BoneHierarchy>>,
+    look_at: Option<Res<crate::plugins::look_at::LookAtRuntime>>,
 ) {
     let Some(sender) = sender else { return };
     let Some(indexed) = indexed else { return };
@@ -748,6 +923,9 @@ fn advance_and_apply_layers(
     }
     let dt = time.delta_secs().min(0.05);
     let hierarchy = hierarchy.as_deref();
+    // Drives the `LookAround` driver's damping: when a face is being tracked,
+    // the ambient head wander collapses so the eyes can do the tracking.
+    let gaze_active = look_at.as_deref().is_some_and(|r| r.gaze_active());
 
     let mut bones_out: HashMap<String, [f32; 4]> = HashMap::new();
     let mut expressions_out: HashMap<String, f32> = HashMap::new();
@@ -760,7 +938,7 @@ fn advance_and_apply_layers(
 
         let solo = stack.solo_mode.then_some(stack.solo_only_ids.clone());
         let (accumulator, expressions) =
-            compose_layers(&mut stack.layers, &snap, hierarchy, dt, solo.as_ref());
+            compose_layers(&mut stack.layers, &snap, hierarchy, dt, solo.as_ref(), gaze_active);
         expressions_out = expressions;
 
         // Only emit bones whose composed rotation differs meaningfully
@@ -820,13 +998,35 @@ pub fn advance_layer_playheads(
                 continue;
             }
         }
+        // Weight envelope ramps every tick — independent of `playing` — so a
+        // just-disabled layer keeps composing until it has fully faded out.
+        let target = if layer.enabled { 1.0 } else { 0.0 };
+        let step = if WEIGHT_FADE_SECS > 0.0 {
+            dt / WEIGHT_FADE_SECS
+        } else {
+            1.0
+        };
+        if layer.gain < target {
+            layer.gain = (layer.gain + step).min(target);
+        } else if layer.gain > target {
+            layer.gain = (layer.gain - step).max(target);
+        }
+
         if !layer.playing {
             continue;
         }
-        let dir = if layer.reverse { -1.0f32 } else { 1.0 };
+        // Ping-pong always advances forward; the triangle fold in
+        // `layer_sample_time` handles the bounce.
+        let dir = if layer.reverse && !layer.ping_pong {
+            -1.0f32
+        } else {
+            1.0
+        };
         layer.time += dt * layer.speed * dir;
         if let Some(duration) = layer.duration {
-            if layer.looping {
+            if layer.ping_pong {
+                layer.time = layer.time.rem_euclid(2.0 * duration);
+            } else if layer.looping {
                 layer.time = layer.time.rem_euclid(duration);
             } else if layer.reverse {
                 if layer.time <= 0.0 {
@@ -849,6 +1049,7 @@ pub fn compose_layers(
     hierarchy: Option<&BoneHierarchy>,
     dt: f32,
     solo_only_ids: Option<&HashSet<u64>>,
+    gaze_active: bool,
 ) -> (HashMap<String, Quat>, HashMap<String, f32>) {
     let mut accumulator: HashMap<String, Quat> = snap.rest.clone();
     let mut expressions_out: HashMap<String, f32> = HashMap::new();
@@ -859,12 +1060,15 @@ pub fn compose_layers(
                 continue;
             }
         }
-        if !layer.enabled || layer.weight <= 0.0 {
+        // Effective weight folds in the smoothed enable/disable envelope so a
+        // toggled or preset-swapped layer fades instead of popping. A disabled
+        // layer keeps composing until `gain` finishes ramping to 0.
+        let weight = layer.weight.clamp(0.0, 1.0) * smoothstep(layer.gain);
+        if weight <= 0.0 {
             continue;
         }
 
-        let sample = sample_layer(layer, snap, dt);
-        let weight = layer.weight.clamp(0.0, 1.0);
+        let sample = sample_layer(layer, snap, dt, gaze_active);
 
         for (bone, quat) in sample.bones {
             if !layer.mask.allows(&bone, hierarchy) {
@@ -900,17 +1104,35 @@ pub fn compose_layers(
 }
 
 fn reset_driver_transient_state(driver: &mut DriverKind) {
-    if let DriverKind::Blink {
-        next_in,
-        phase,
-        phase_t,
-        mean_interval,
-        ..
-    } = driver
-    {
-        *next_in = *mean_interval;
-        *phase = BlinkPhase::Idle;
-        *phase_t = 0.0;
+    match driver {
+        DriverKind::Blink {
+            next_in,
+            phase,
+            phase_t,
+            mean_interval,
+            ..
+        } => {
+            *next_in = *mean_interval;
+            *phase = BlinkPhase::Idle;
+            *phase_t = 0.0;
+        }
+        DriverKind::LookAround {
+            next_in,
+            cur_yaw,
+            cur_pitch,
+            target_yaw,
+            target_pitch,
+            damp,
+            ..
+        } => {
+            *next_in = 1.5;
+            *cur_yaw = 0.0;
+            *cur_pitch = 0.0;
+            *target_yaw = 0.0;
+            *target_pitch = 0.0;
+            *damp = 1.0;
+        }
+        _ => {}
     }
 }
 
@@ -1177,6 +1399,7 @@ pub fn bake_layer_stack_to_animation(
     for layer in &mut work.layers {
         layer.time = 0.0;
         layer.playing = true;
+        layer.gain = if layer.enabled { 1.0 } else { 0.0 };
         reset_driver_transient_state(&mut layer.driver);
     }
     work.clock = 0.0;
@@ -1189,7 +1412,7 @@ pub fn bake_layer_stack_to_animation(
 
     for _ in 0..frame_count {
         let (accumulator, expressions) =
-            compose_layers(&mut work.layers, snap, hierarchy, dt, None);
+            compose_layers(&mut work.layers, snap, hierarchy, dt, None, false);
 
         let mut bones = HashMap::with_capacity(accumulator.len());
         for (name, q_raw) in &accumulator {
@@ -1260,9 +1483,21 @@ fn expression_hold_envelope(t: f32, duration: Option<f32>, looping: bool) -> f32
     }
 }
 
-fn sample_layer(layer: &mut Layer, snap: &RestPoseSnapshot, dt: f32) -> DriverSample {
+fn sample_layer(layer: &mut Layer, snap: &RestPoseSnapshot, dt: f32, gaze_active: bool) -> DriverSample {
     let sample_t = layer_sample_time(layer);
-    let mut sample = sample_driver(&mut layer.driver, sample_t, dt, snap);
+    let dur = layer
+        .duration
+        .or_else(|| layer.driver.duration_hint())
+        .unwrap_or(10.0)
+        .max(0.01);
+    // Loop crossfade only applies to forward, wrapping clips — ping-pong and
+    // reverse don't have an end→start seam to hide.
+    let loop_fade = if layer.looping && !layer.ping_pong && !layer.reverse {
+        layer.loop_fade.max(0.0)
+    } else {
+        0.0
+    };
+    let mut sample = sample_driver(&mut layer.driver, sample_t, dt, snap, dur, loop_fade, gaze_active);
     if matches!(layer.driver, DriverKind::ExpressionHold { .. }) {
         let env = expression_hold_envelope(sample_t, layer.duration, layer.looping);
         for w in sample.expressions.values_mut() {
@@ -1277,10 +1512,12 @@ fn sample_driver(
     t: f32,
     dt: f32,
     snap: &RestPoseSnapshot,
+    loop_dur: f32,
+    loop_fade: f32,
+    gaze_active: bool,
 ) -> DriverSample {
-    let rest = &snap.rest;
     match driver {
-        DriverKind::Clip { animation } => sample_clip(animation, t, snap),
+        DriverKind::Clip { animation } => sample_clip(animation, t, loop_dur, loop_fade, snap),
         DriverKind::PoseHold { pose } => sample_pose_hold(pose, snap),
         DriverKind::ExpressionHold { expressions } => DriverSample {
             bones: HashMap::new(),
@@ -1314,12 +1551,71 @@ fn sample_driver(
             amplitude_deg,
             frequency_hz,
             seed,
-        } => sample_finger_fidget(t, *amplitude_deg, *frequency_hz, *seed, rest),
+            curl_bias_deg,
+            curl_bias_thumb_deg,
+        } => sample_finger_fidget(
+            t,
+            *amplitude_deg,
+            *frequency_hz,
+            *seed,
+            *curl_bias_deg,
+            *curl_bias_thumb_deg,
+            snap,
+        ),
         DriverKind::ToeFidget {
             amplitude_deg,
             frequency_hz,
             seed,
-        } => sample_toe_fidget(t, *amplitude_deg, *frequency_hz, *seed),
+            curl_bias_deg,
+        } => sample_toe_fidget(t, *amplitude_deg, *frequency_hz, *seed, *curl_bias_deg),
+        DriverKind::LookAround {
+            mean_interval,
+            yaw_deg,
+            pitch_deg,
+            next_in,
+            cur_yaw,
+            cur_pitch,
+            target_yaw,
+            target_pitch,
+            damp,
+        } => sample_look_around(
+            dt,
+            next_in,
+            cur_yaw,
+            cur_pitch,
+            target_yaw,
+            target_pitch,
+            damp,
+            *mean_interval,
+            *yaw_deg,
+            *pitch_deg,
+            gaze_active,
+        ),
+        DriverKind::Sway {
+            rate_hz,
+            amount_deg,
+        } => sample_sway(t, *rate_hz, *amount_deg),
+        DriverKind::ArmSway {
+            rate_hz,
+            amount_deg,
+        } => sample_arm_sway(t, *rate_hz, *amount_deg),
+        DriverKind::LegShift {
+            rate_hz,
+            shift_deg,
+            knee_bend_deg,
+            hip_sway_deg,
+            ankle_deg,
+            seed,
+        } => sample_leg_shift(
+            t,
+            *rate_hz,
+            *shift_deg,
+            *knee_bend_deg,
+            *hip_sway_deg,
+            *ankle_deg,
+            *seed,
+            snap,
+        ),
     }
 }
 
@@ -1352,7 +1648,60 @@ fn sample_pose_hold(pose: &PoseFile, snap: &RestPoseSnapshot) -> DriverSample {
     DriverSample { bones, expressions }
 }
 
-fn sample_clip(animation: &AnimationFile, t: f32, snap: &RestPoseSnapshot) -> DriverSample {
+/// Interpolated **normalized** pose (bones + expressions) at a fractional
+/// frame index. Bones are still in three-vrm normalized humanoid space — the
+/// caller converts to raw-local after any crossfade blending.
+fn clip_pose_normalized(
+    animation: &AnimationFile,
+    frame_f: f32,
+) -> (HashMap<String, Quat>, HashMap<String, f32>) {
+    let total = animation.frames.len();
+    let frame_f = frame_f.clamp(0.0, (total - 1) as f32);
+    let idx0 = frame_f.floor() as usize;
+    let idx1 = (idx0 + 1).min(total - 1);
+    let frac = frame_f.fract();
+    let a = &animation.frames[idx0];
+    let b = &animation.frames[idx1];
+
+    let mut names: std::collections::BTreeSet<&String> = a.bones.keys().collect();
+    names.extend(b.bones.keys());
+    let mut bones = HashMap::with_capacity(names.len());
+    for name in names {
+        let qa = a
+            .bones
+            .get(name)
+            .map(|r| Quat::from_xyzw(r.rotation[0], r.rotation[1], r.rotation[2], r.rotation[3]));
+        let qb = b
+            .bones
+            .get(name)
+            .map(|r| Quat::from_xyzw(r.rotation[0], r.rotation[1], r.rotation[2], r.rotation[3]));
+        let q = match (qa, qb) {
+            (Some(qa), Some(qb)) if frac > 0.0 => qa.slerp(qb, frac),
+            (Some(qa), _) => qa,
+            (None, Some(qb)) => qb,
+            (None, None) => continue,
+        };
+        bones.insert(name.clone(), q);
+    }
+
+    let mut expr_names: std::collections::BTreeSet<&String> = a.expressions.keys().collect();
+    expr_names.extend(b.expressions.keys());
+    let mut expressions = HashMap::with_capacity(expr_names.len());
+    for name in expr_names {
+        let wa = a.expressions.get(name).copied().unwrap_or(0.0);
+        let wb = b.expressions.get(name).copied().unwrap_or(wa);
+        expressions.insert(name.clone(), wa + (wb - wa) * frac);
+    }
+    (bones, expressions)
+}
+
+fn sample_clip(
+    animation: &AnimationFile,
+    t: f32,
+    loop_dur: f32,
+    loop_fade: f32,
+    snap: &RestPoseSnapshot,
+) -> DriverSample {
     if animation.frames.is_empty() {
         return DriverSample::default();
     }
@@ -1371,67 +1720,67 @@ fn sample_clip(animation: &AnimationFile, t: f32, snap: &RestPoseSnapshot) -> Dr
             expressions: frame.expressions.clone(),
         };
     }
-    let frame_f = (t * fps).clamp(0.0, (total - 1) as f32);
-    let idx0 = frame_f.floor() as usize;
-    let idx1 = (idx0 + 1).min(total - 1);
-    let frac = frame_f.fract();
-    let a = &animation.frames[idx0];
-    let b = &animation.frames[idx1];
 
-    let mut bone_names: std::collections::BTreeSet<&String> = a.bones.keys().collect();
-    bone_names.extend(b.bones.keys());
-    let mut bones = HashMap::with_capacity(bone_names.len());
-    for name in bone_names {
-        let qa = a.bones.get(name).map(|r| {
-            Quat::from_xyzw(r.rotation[0], r.rotation[1], r.rotation[2], r.rotation[3])
-        });
-        let qb = b.bones.get(name).map(|r| {
-            Quat::from_xyzw(r.rotation[0], r.rotation[1], r.rotation[2], r.rotation[3])
-        });
-        let normalized = match (qa, qb) {
-            (Some(qa), Some(qb)) => {
-                if frac > 0.0 {
-                    qa.slerp(qb, frac)
-                } else {
-                    qa
-                }
+    let (mut bones_n, mut expr) = clip_pose_normalized(animation, t * fps);
+
+    // Loop crossfade: over the last `loop_fade` seconds, blend the tail toward
+    // the clip's first frame so that the pose at the wrap point (t → loop_dur)
+    // equals the pose at t = 0. Eliminates the hard "twitch" on loop restart
+    // even when the author's last frame ≠ first frame.
+    if loop_fade > 1e-4 && loop_dur > loop_fade {
+        let fade_start = loop_dur - loop_fade;
+        if t >= fade_start {
+            let w = smoothstep(((t - fade_start) / loop_fade).clamp(0.0, 1.0));
+            let (start_bones, start_expr) = clip_pose_normalized(animation, 0.0);
+            for (name, target) in start_bones {
+                let blended = bones_n
+                    .get(&name)
+                    .map(|cur| cur.slerp(target, w))
+                    .unwrap_or(target);
+                bones_n.insert(name, blended);
             }
-            (Some(qa), None) => qa,
-            (None, Some(qb)) => qb,
-            (None, None) => continue,
-        };
-        bones.insert(
-            name.clone(),
-            convert_normalized_to_local(name, normalized, snap),
-        );
+            for (name, target) in start_expr {
+                let cur = expr.get(&name).copied().unwrap_or(0.0);
+                expr.insert(name, cur + (target - cur) * w);
+            }
+        }
     }
 
-    let mut expr_names: std::collections::BTreeSet<&String> = a.expressions.keys().collect();
-    expr_names.extend(b.expressions.keys());
-    let mut expressions = HashMap::with_capacity(expr_names.len());
-    for name in expr_names {
-        let wa = a.expressions.get(name).copied().unwrap_or(0.0);
-        let wb = b.expressions.get(name).copied().unwrap_or(wa);
-        expressions.insert(name.clone(), wa + (wb - wa) * frac);
+    let mut bones = HashMap::with_capacity(bones_n.len());
+    for (name, q) in bones_n {
+        let local = convert_normalized_to_local(&name, q, snap);
+        bones.insert(name, local);
     }
-
-    DriverSample { bones, expressions }
+    DriverSample {
+        bones,
+        expressions: expr,
+    }
 }
 
 fn sample_breathing(t: f32, rate_hz: f32, pitch_deg: f32, roll_deg: f32) -> DriverSample {
     let omega = std::f32::consts::TAU * rate_hz;
-    let pitch = (omega * t).sin() * pitch_deg.to_radians();
+    // Real breath isn't a symmetric sine: the inhale is quicker than the long
+    // exhale. Warp the phase (still periodic + continuous at the wrap) to skew
+    // the curve, then add a small second harmonic for chest "shape" so it
+    // doesn't read as a single mechanical oscillation.
+    let phase = (omega * t).rem_euclid(std::f32::consts::TAU);
+    let warped = phase - 0.35 * phase.sin();
+    let env = warped.sin() + 0.18 * (2.0 * warped).sin();
+    let pitch = env * pitch_deg.to_radians();
     // Phase-shift roll by ~90° so the chest rocks in a figure-eight rather
     // than a straight line (AIRI plan §3 "Procedural idle layering").
-    let roll = (omega * t + std::f32::consts::FRAC_PI_2).sin() * roll_deg.to_radians();
+    let roll = (warped + std::f32::consts::FRAC_PI_2).sin() * roll_deg.to_radians();
 
     let chest = Quat::from_euler(EulerRot::XYZ, pitch, 0.0, roll);
-    // Tiny counter-roll on the upper chest for shape.
+    // Tiny counter-roll on the upper chest for shape, plus a touch of breath on
+    // the neck so the head floats rather than sitting rigid on the torso.
     let upper_chest = Quat::from_euler(EulerRot::XYZ, pitch * 0.4, 0.0, -roll * 0.3);
+    let neck = Quat::from_euler(EulerRot::XYZ, pitch * -0.25, 0.0, roll * 0.15);
 
     let mut bones = HashMap::new();
     bones.insert("chest".into(), chest);
     bones.insert("upperChest".into(), upper_chest);
+    bones.insert("neck".into(), neck);
     DriverSample {
         bones,
         expressions: HashMap::new(),
@@ -1504,6 +1853,66 @@ fn sample_blink(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn sample_look_around(
+    dt: f32,
+    next_in: &mut f32,
+    cur_yaw: &mut f32,
+    cur_pitch: &mut f32,
+    target_yaw: &mut f32,
+    target_pitch: &mut f32,
+    damp: &mut f32,
+    mean_interval: f32,
+    yaw_deg: f32,
+    pitch_deg: f32,
+    gaze_active: bool,
+) -> DriverSample {
+    // Pick a new glance target when the dwell timer expires. ~35% of glances
+    // return to center so the head doesn't drift permanently off-axis.
+    *next_in -= dt;
+    if *next_in <= 0.0 {
+        let mut rng = rand::rng();
+        if rng.random_bool(0.35) {
+            *target_yaw = 0.0;
+            *target_pitch = 0.0;
+        } else {
+            *target_yaw = rng.random_range(-1.0_f32..1.0) * yaw_deg.to_radians();
+            *target_pitch = rng.random_range(-1.0_f32..1.0) * pitch_deg.to_radians();
+        }
+        let base = mean_interval.max(0.5);
+        *next_in = base * rng.random_range(0.6_f32..1.6);
+    }
+
+    // Exponential ease toward the active target — fast enough to feel like a
+    // deliberate glance, slow enough to avoid snapping.
+    let follow = (dt * 2.5).clamp(0.0, 1.0);
+    *cur_yaw += (*target_yaw - *cur_yaw) * follow;
+    *cur_pitch += (*target_pitch - *cur_pitch) * follow;
+
+    // While a face is being tracked, collapse the wander toward forward so the
+    // head holds its orientation and the eyes do the tracking. Ramp the gain
+    // smoothly (~0.5 s) so engaging / releasing gaze never pops the head.
+    let damp_target = if gaze_active { 0.12 } else { 1.0 };
+    let damp_step = (dt / 0.5).clamp(0.0, 1.0);
+    *damp += (damp_target - *damp) * damp_step;
+
+    let yaw = *cur_yaw * *damp;
+    let pitch = *cur_pitch * *damp;
+
+    // Split the look across neck + head so it reads as a natural head turn,
+    // not a stiff pivot at one joint. Yaw = local Y, pitch = local X.
+    let neck = Quat::from_euler(EulerRot::XYZ, pitch * 0.4, yaw * 0.4, 0.0);
+    let head = Quat::from_euler(EulerRot::XYZ, pitch * 0.6, yaw * 0.6, 0.0);
+
+    let mut bones = HashMap::new();
+    bones.insert("neck".into(), neck);
+    bones.insert("head".into(), head);
+    DriverSample {
+        bones,
+        expressions: HashMap::new(),
+    }
+}
+
 fn sample_weight_shift(
     t: f32,
     rate_hz: f32,
@@ -1511,52 +1920,346 @@ fn sample_weight_shift(
     spine_counter_deg: f32,
 ) -> DriverSample {
     let omega = std::f32::consts::TAU * rate_hz;
-    let phase = (omega * t).sin();
-    let hip = Quat::from_euler(EulerRot::XYZ, 0.0, 0.0, phase * hip_roll_deg.to_radians());
+    // Two incommensurate sines so the sway wanders and never repeats exactly,
+    // instead of pacing back and forth on a fixed metronome.
+    let primary = (omega * t).sin();
+    let drift = 0.35 * (omega * 0.37 * t + 1.3).sin();
+    let phase = (primary + drift).clamp(-1.3, 1.3);
+    // Slow yaw lets the hips rotate slightly into the shifted side for weight.
+    let yaw = 0.4 * (omega * 0.53 * t + 0.7).sin();
+
+    let hip = Quat::from_euler(
+        EulerRot::XYZ,
+        0.0,
+        yaw * hip_roll_deg.to_radians() * 0.5,
+        phase * hip_roll_deg.to_radians(),
+    );
     let spine = Quat::from_euler(
         EulerRot::XYZ,
         0.0,
         0.0,
         -phase * spine_counter_deg.to_radians(),
     );
+    // Carry a little of the counter-rotation up the chain so the upper body
+    // stays vertical as the hips shift (real standing-idle weight transfer).
+    let chest = Quat::from_euler(
+        EulerRot::XYZ,
+        0.0,
+        0.0,
+        phase * spine_counter_deg.to_radians() * 0.4,
+    );
+
     let mut bones = HashMap::new();
     bones.insert("hips".into(), hip);
     bones.insert("spine".into(), spine);
+    bones.insert("chest".into(), chest);
     DriverSample {
         bones,
         expressions: HashMap::new(),
     }
 }
 
-const FINGER_BONES: &[&str] = &[
-    "leftThumbProximal",
-    "leftIndexIntermediate",
-    "leftMiddleIntermediate",
-    "leftRingIntermediate",
-    "leftLittleIntermediate",
-    "rightThumbProximal",
-    "rightIndexIntermediate",
-    "rightMiddleIntermediate",
-    "rightRingIntermediate",
-    "rightLittleIntermediate",
+/// Slow whole-body balance sway. Forward/back lean (local X) on the hips with
+/// an incommensurate side-to-side drift (local Z), then counter-rotations up
+/// the spine so the head stays roughly over the feet — the silhouette leans
+/// and recovers the way a real person standing still constantly does.
+fn sample_sway(t: f32, rate_hz: f32, amount_deg: f32) -> DriverSample {
+    let omega = std::f32::consts::TAU * rate_hz;
+    let fwd = (omega * t).sin();
+    // 0.63× + phase offset → never repeats exactly with the fwd term.
+    let lat = (omega * 0.63 * t + 0.9).sin();
+    let amt = amount_deg.to_radians();
+
+    let hips = Quat::from_euler(EulerRot::XYZ, fwd * amt, 0.0, lat * amt * 0.6);
+    let spine = Quat::from_euler(EulerRot::XYZ, -fwd * amt * 0.5, 0.0, -lat * amt * 0.3);
+    let chest = Quat::from_euler(EulerRot::XYZ, -fwd * amt * 0.25, 0.0, 0.0);
+
+    let mut bones = HashMap::new();
+    bones.insert("hips".into(), hips);
+    bones.insert("spine".into(), spine);
+    bones.insert("chest".into(), chest);
+    DriverSample {
+        bones,
+        expressions: HashMap::new(),
+    }
+}
+
+/// Relaxed pendular arm sway. The two arms swing on the same slow clock but a
+/// little out of phase (0.6 rad) so they don't move in lockstep. Forward swing
+/// (local X) shares a sign across sides (X isn't mirrored); the in/out
+/// abduction (local Z) is negated on the right to mirror the rig.
+fn sample_arm_sway(t: f32, rate_hz: f32, amount_deg: f32) -> DriverSample {
+    let omega = std::f32::consts::TAU * rate_hz;
+    let lphase = (omega * t).sin();
+    let rphase = (omega * t + 0.6).sin();
+    let amt = amount_deg.to_radians();
+
+    let mut bones = HashMap::new();
+    bones.insert(
+        "leftUpperArm".into(),
+        Quat::from_euler(EulerRot::XYZ, lphase * amt * 0.5, 0.0, lphase * amt),
+    );
+    bones.insert(
+        "rightUpperArm".into(),
+        Quat::from_euler(EulerRot::XYZ, rphase * amt * 0.5, 0.0, -rphase * amt),
+    );
+    bones.insert(
+        "leftLowerArm".into(),
+        Quat::from_euler(EulerRot::XYZ, lphase * amt * 0.3, 0.0, 0.0),
+    );
+    bones.insert(
+        "rightLowerArm".into(),
+        Quat::from_euler(EulerRot::XYZ, rphase * amt * 0.3, 0.0, 0.0),
+    );
+    DriverSample {
+        bones,
+        expressions: HashMap::new(),
+    }
+}
+
+/// Coordinated lower-body weight transfer (contrapposto standing idle).
+///
+/// A single slow wandering signal `w ∈ [-1, 1]` (`+1` = fully weighted on the
+/// **right** leg) drives everything so the lower body reads as one coherent
+/// motion instead of a pile of independent jitters:
+/// * **hips** lean toward the loaded leg (`shift_deg`, local Z) + rotate a touch
+///   into the stance (Y) + a hair of forward/back from the postural sway.
+/// * **spine / chest** counter-rotate so the torso stays roughly vertical (the
+///   classic S-curve of weight-on-one-leg).
+/// * each **thigh** (`UpperLeg`) flexes slightly forward when free and adducts
+///   under the COM when loaded.
+/// * each **knee** (`LowerLeg`) keeps a soft baseline bend, with most of the
+///   `knee_bend_deg` flex landing on the **free** leg (`+pitch`, the rig's
+///   natural knee-flex axis).
+/// * each **ankle** (`Foot`) carries a faster, smaller postural micro-sway —
+///   the constant balance correction — with the free foot freer than the
+///   planted one.
+///
+/// Leg bones are authored in normalized humanoid space and converted to
+/// raw-local rest-relative deltas via [`rest_relative_delta`], so the axis
+/// meanings (knee = +pitch, abduction = signed roll) hold regardless of how the
+/// leg bones are bound.
+#[allow(clippy::too_many_arguments)]
+fn sample_leg_shift(
+    t: f32,
+    rate_hz: f32,
+    shift_deg: f32,
+    knee_bend_deg: f32,
+    hip_sway_deg: f32,
+    ankle_deg: f32,
+    seed: u64,
+    snap: &RestPoseSnapshot,
+) -> DriverSample {
+    let omega = std::f32::consts::TAU * rate_hz;
+    let p1 = hash_phase(seed, 0x11);
+    let p2 = hash_phase(seed, 0x22);
+    let p3 = hash_phase(seed, 0x33);
+
+    // Wandering weight signal in [-1, 1]; +1 = fully on the RIGHT leg. Two
+    // incommensurate sines mean it lingers on a leg, drifts through center, and
+    // occasionally settles harder to one side instead of pacing metronomically.
+    let s = 0.74 * (omega * t).sin() + 0.34 * (omega * 0.41 * t + p1).sin();
+    let w = s.clamp(-1.0, 1.0);
+
+    // Faster, smaller postural sway (the perpetual ankle balance correction).
+    let sway_ml = (omega * 2.3 * t + p2).sin(); // medial-lateral
+    let sway_ap = (omega * 1.7 * t + p3).sin(); // anterior-posterior
+
+    let shift = shift_deg.to_radians();
+    let knee = knee_bend_deg.to_radians();
+    let hsway = hip_sway_deg.to_radians();
+    let ank = ankle_deg.to_radians();
+
+    let mut bones: HashMap<String, Quat> = HashMap::with_capacity(11);
+    let put = |bones: &mut HashMap<String, Quat>, name: &str, q: Quat| {
+        bones.insert(name.to_string(), rest_relative_delta(name, q, snap));
+    };
+
+    // --- pelvis + spine: lean toward the weighted leg, counter up the chain ---
+    let hips_q = Quat::from_euler(
+        EulerRot::XYZ,
+        sway_ap * ank * 0.3, // tiny forward/back at the pelvis
+        w * hsway * 0.5,     // rotate pelvis slightly toward stance
+        w * shift,           // lateral lean / pelvic obliquity
+    );
+    let spine_q = Quat::from_euler(EulerRot::XYZ, 0.0, 0.0, -w * shift * 0.5);
+    let chest_q = Quat::from_euler(EulerRot::XYZ, 0.0, 0.0, -w * shift * 0.2);
+    put(&mut bones, "hips", hips_q);
+    put(&mut bones, "spine", spine_q);
+    put(&mut bones, "chest", chest_q);
+
+    // --- per-leg: weighted leg straightens / adducts, free leg softens / abducts ---
+    for side in ["left", "right"] {
+        let right = side == "right";
+        // Weight on THIS leg: 1 when fully loaded, 0 when free.
+        let weight = (if right { 0.5 + 0.5 * w } else { 0.5 - 0.5 * w }).clamp(0.0, 1.0);
+        let free = 1.0 - weight;
+        // Abduction roll is mirrored: outward is +Z on the right, -Z on the left.
+        let z_sign = if right { 1.0 } else { -1.0 };
+
+        // Thigh: free leg flexes a touch forward and rotates outward; weighted
+        // leg adducts slightly under the centre of mass.
+        let thigh_pitch = free * knee * 0.22;
+        let thigh_roll = (free * 0.6 - 0.2) * hsway * z_sign;
+        put(
+            &mut bones,
+            &format!("{side}UpperLeg"),
+            Quat::from_euler(EulerRot::XYZ, thigh_pitch, 0.0, thigh_roll),
+        );
+
+        // Knee: soft baseline on both, most of the bend on the free leg
+        // (+pitch is the rig's natural knee-flex axis — see compile_bend_knee).
+        let knee_amt = (0.12 + 0.88 * free) * knee;
+        put(
+            &mut bones,
+            &format!("{side}LowerLeg"),
+            Quat::from_euler(EulerRot::XYZ, knee_amt, 0.0, 0.0),
+        );
+
+        // Ankle: postural micro-sway, the free foot freer than the planted one.
+        let foot_gain = 0.45 + 0.55 * free;
+        put(
+            &mut bones,
+            &format!("{side}Foot"),
+            Quat::from_euler(
+                EulerRot::XYZ,
+                sway_ap * ank * foot_gain,
+                0.0,
+                sway_ml * ank * foot_gain * z_sign,
+            ),
+        );
+    }
+
+    DriverSample {
+        bones,
+        expressions: HashMap::new(),
+    }
+}
+
+/// The four non-thumb fingers, index→little, with a per-finger curl multiplier.
+/// A relaxed hand curls progressively more toward the little finger (a gentle
+/// arc), so the multiplier grows down the row.
+const FINGERS: &[(&str, f32)] = &[
+    ("Index", 0.75),
+    ("Middle", 0.92),
+    ("Ring", 1.0),
+    ("Little", 1.05),
 ];
 
+/// Per-joint curl scale along a finger (proximal → intermediate → distal). The
+/// middle joint flexes most in a relaxed curl; the tip trails.
+const FINGER_JOINTS3: &[(&str, f32)] = &[
+    ("Proximal", 0.9),
+    ("Intermediate", 1.0),
+    ("Distal", 0.6),
+];
+
+/// VRM thumb chain — **Metacarpal / Proximal / Distal** (there is no
+/// `ThumbIntermediate` in the VRM humanoid spec). Per-joint opposition scale.
+const THUMB_JOINTS: &[(&str, f32)] = &[
+    ("Metacarpal", 0.7),
+    ("Proximal", 1.0),
+    ("Distal", 0.45),
+];
+
+/// Convert a desired **normalized-humanoid-space** rotation `pose_q` (relative
+/// to the bone's rest) into the raw-local **post-multiply delta** the
+/// `RestRelative` accumulator expects. From `raw_local = rest_local ·
+/// rest_world⁻¹ · pose_q · rest_world` and the accumulator's `current * delta`
+/// with `current = rest_local`, the delta is `rest_world⁻¹ · pose_q ·
+/// rest_world` (`rest_local` cancels). Conjugating by `rest_world` is what
+/// lets us specify curl in the same clean axes the fist/relaxed pose templates
+/// use, regardless of how the finger bones are bound.
+fn rest_relative_delta(name: &str, pose_q: Quat, snap: &RestPoseSnapshot) -> Quat {
+    let rw = snap.rest_world.get(name).copied().unwrap_or(Quat::IDENTITY);
+    rw.inverse() * pose_q * rw
+}
+
+/// Natural relaxed-hand fidget.
+///
+/// Curl is authored in **normalized humanoid space** (the same space the
+/// `make_fist` / relaxed-hand templates use) and converted per-bone to a
+/// raw-local delta. That gives the correct axes for free:
+/// * **Fingers** curl on normalized **+Z (roll)** — right hand `+Z`, left hand
+///   `−Z` (the relaxed/fist templates mirror by negating x & z).
+/// * **The thumb** opposes on normalized **−Y (yaw)** on *both* hands (the
+///   mirror leaves y alone), with smaller per-side flex (X) and roll (Z). This
+///   tucks the thumb toward the palm instead of pitching it up into a
+///   "thumbs-up".
+///
+/// On top of the resting bias, each digit gets its own phase, a slightly
+/// detuned rate, a fast micro-tremor + slow wander (two incommensurate sines),
+/// and a very slow swell envelope, so the fingers never move in lockstep and
+/// the hand reads alive rather than mechanical.
+#[allow(clippy::too_many_arguments)]
 fn sample_finger_fidget(
     t: f32,
     amplitude_deg: f32,
     frequency_hz: f32,
     seed: u64,
-    _rest: &HashMap<String, Quat>,
+    curl_bias_deg: f32,
+    curl_bias_thumb_deg: f32,
+    snap: &RestPoseSnapshot,
 ) -> DriverSample {
-    let mut bones = HashMap::new();
+    let mut bones = HashMap::with_capacity(28);
     let amp = amplitude_deg.to_radians();
-    for (i, name) in FINGER_BONES.iter().enumerate() {
-        let phase_offset = hash_phase(seed, i as u64);
-        let omega = std::f32::consts::TAU * (frequency_hz * (0.8 + (i as f32 * 0.07) % 0.5));
-        let curl = (omega * t + phase_offset).sin() * amp;
-        // Finger curl is mostly around local X axis (humanoid convention).
-        bones.insert((*name).into(), Quat::from_rotation_x(curl));
+    let bias = curl_bias_deg.to_radians();
+    let thumb_bias = curl_bias_thumb_deg.to_radians();
+    let tau = std::f32::consts::TAU;
+
+    let mut digit = 0u64;
+    for side in ["left", "right"] {
+        // Finger curl sign in normalized space: right hand +Z, left hand −Z.
+        let z_sign = if side == "right" { 1.0 } else { -1.0 };
+
+        for (finger, fmul) in FINGERS {
+            let ph = hash_phase(seed, digit.wrapping_mul(2654435761));
+            let rate = frequency_hz * (0.75 + (digit as f32 * 0.11) % 0.6);
+            let omega = tau * rate;
+            // micro-tremor + slow wander + a very slow swell so the finger's
+            // activity rises and falls instead of buzzing at a fixed amplitude.
+            let micro = (omega * t + ph).sin();
+            let wander = 0.5 * (omega * 0.41 * t + ph * 1.7).sin();
+            let swell = 0.6 + 0.4 * (omega * 0.13 * t + ph).sin();
+            let osc = (micro + wander) * amp * swell;
+            digit += 1;
+
+            for (ji, (joint, jmul)) in FINGER_JOINTS3.iter().enumerate() {
+                let name = format!("{side}{finger}{joint}");
+                let joint_bias = bias * fmul * jmul;
+                let curl = (joint_bias + osc * jmul) * z_sign;
+                // A whisper of knuckle splay (normalized Y) on the proximal
+                // joint only, so the fingers fan a hair instead of staying
+                // glued parallel. Kept tiny — relaxed hands barely splay.
+                let splay = if ji == 0 {
+                    0.12 * amp * (omega * 0.23 * t + ph).sin() * z_sign
+                } else {
+                    0.0
+                };
+                let pose_q = Quat::from_euler(EulerRot::XYZ, 0.0, splay, curl);
+                bones.insert(name.clone(), rest_relative_delta(&name, pose_q, snap));
+            }
+        }
+
+        // Thumb: opposition (−Y) dominant on both hands; flex (X) and roll (Z)
+        // flip per side to mirror the rig (fist template signs).
+        let x_sign = if side == "right" { -1.0 } else { 1.0 };
+        let tz_sign = if side == "right" { 1.0 } else { -1.0 };
+        let tph = hash_phase(seed, 0x7000 + if side == "right" { 1 } else { 0 });
+        let tomega = tau * frequency_hz * 0.6;
+        let tosc = (tomega * t + tph).sin() * amp * 0.6;
+
+        for (joint, jmul) in THUMB_JOINTS {
+            let name = format!("{side}Thumb{joint}");
+            let opp = (thumb_bias + tosc) * jmul;
+            let pitch = x_sign * opp * 0.4;
+            let yaw = -opp; // opposition: tuck toward palm
+            let roll = tz_sign * opp * 0.5;
+            let pose_q = Quat::from_euler(EulerRot::XYZ, pitch, yaw, roll);
+            bones.insert(name.clone(), rest_relative_delta(&name, pose_q, snap));
+        }
     }
+
     DriverSample {
         bones,
         expressions: HashMap::new(),
@@ -1565,14 +2268,23 @@ fn sample_finger_fidget(
 
 const TOE_BONES: &[&str] = &["leftToes", "rightToes"];
 
-fn sample_toe_fidget(t: f32, amplitude_deg: f32, frequency_hz: f32, seed: u64) -> DriverSample {
+fn sample_toe_fidget(
+    t: f32,
+    amplitude_deg: f32,
+    frequency_hz: f32,
+    seed: u64,
+    curl_bias_deg: f32,
+) -> DriverSample {
     let mut bones = HashMap::new();
     let amp = amplitude_deg.to_radians();
+    let bias = curl_bias_deg.to_radians();
     for (i, name) in TOE_BONES.iter().enumerate() {
         let phase_offset = hash_phase(seed, (i as u64) ^ 0xA5);
         let omega = std::f32::consts::TAU * frequency_hz;
-        let curl = (omega * t + phase_offset).sin() * amp;
-        bones.insert((*name).into(), Quat::from_rotation_x(curl));
+        let curl = bias + (omega * t + phase_offset).sin() * amp;
+        // Mirror the right side (see `sample_finger_fidget`).
+        let dir = if name.starts_with("right") { -1.0 } else { 1.0 };
+        bones.insert((*name).into(), Quat::from_rotation_x(curl * dir));
     }
     DriverSample {
         bones,

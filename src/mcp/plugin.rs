@@ -105,6 +105,7 @@ fn start_mcp_server(
     let path = settings.mcp.path.clone();
     let auth_token = settings.mcp.auth_token.clone();
     let session_keep_alive_sec = settings.mcp.session_keep_alive_sec;
+    let transport = settings.mcp.transport;
 
     let poses_dir = expand_home(&settings.pose_library.poses_dir);
     let animations_dir = expand_home(&settings.pose_library.animations_dir);
@@ -162,30 +163,45 @@ fn start_mcp_server(
                     return;
                 }
             };
-            rt.block_on(run_mcp_server(
-                bind,
-                path,
-                auth_token,
-                session_keep_alive_sec,
-                JarvisMcpServer::new(
-                    pose_tx_val,
-                    capture_tx_val,
-                    snapshot_val,
-                    hub_val,
-                    a2f,
-                    pose_guide_path,
-                    layer_guide_path,
-                    library,
-                    kimodo_defaults,
-                    traffic.clone(),
-                    layer_stack_val,
-                    layer_sets_val,
-                    semantic_model_path,
-                    semantic_calibration,
-                    intent_calibration_wizard,
-                ),
-                traffic,
-            ));
+            let server = JarvisMcpServer::new(
+                pose_tx_val,
+                capture_tx_val,
+                snapshot_val,
+                hub_val,
+                a2f,
+                pose_guide_path,
+                layer_guide_path,
+                library,
+                kimodo_defaults,
+                traffic.clone(),
+                layer_stack_val,
+                layer_sets_val,
+                semantic_model_path,
+                semantic_calibration,
+                intent_calibration_wizard,
+            );
+            rt.block_on(async move {
+                let mut tasks = Vec::new();
+                if transport.uses_http() {
+                    tasks.push(tokio::spawn(run_http_server(
+                        bind,
+                        path,
+                        auth_token,
+                        session_keep_alive_sec,
+                        server.clone(),
+                        traffic.clone(),
+                    )));
+                }
+                if transport.uses_stdio() {
+                    tasks.push(tokio::spawn(run_stdio_server(server.clone())));
+                }
+                if tasks.is_empty() {
+                    warn!("mcp: no transport selected (settings.mcp.transport) — nothing to serve");
+                }
+                for t in tasks {
+                    let _ = t.await;
+                }
+            });
         })
         .expect("failed to spawn jarvis-mcp thread");
 }
@@ -209,7 +225,25 @@ async fn mcp_http_trace(
     resp
 }
 
-async fn run_mcp_server(
+/// Serve the MCP tools over stdin/stdout JSON-RPC. Used when the binary is
+/// launched as a subprocess by an MCP client. The caller must ensure logs go
+/// to stderr (see `main`), otherwise tracing output corrupts the stdout stream.
+async fn run_stdio_server(server: JarvisMcpServer) {
+    use rmcp::transport::io::stdio;
+    use rmcp::ServiceExt;
+
+    info!("mcp: stdio transport starting (JSON-RPC on stdin/stdout)");
+    match server.serve(stdio()).await {
+        Ok(running) => {
+            if let Err(e) = running.waiting().await {
+                error!("mcp: stdio service exited: {e}");
+            }
+        }
+        Err(e) => error!("mcp: stdio serve init failed: {e}"),
+    }
+}
+
+async fn run_http_server(
     bind: String,
     path: String,
     auth_token: String,

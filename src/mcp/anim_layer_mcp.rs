@@ -53,6 +53,15 @@ pub enum LayerDriverSpec {
         frequency_hz: Option<f32>,
         #[serde(default)]
         seed: Option<u64>,
+        /// Resting inward curl (deg) the fingers oscillate around. Use a
+        /// negative value if the rig hyperextends. Default ~9°.
+        #[serde(default)]
+        curl_bias_deg: Option<f32>,
+        /// Resting thumb opposition (deg) — how far the thumb tucks toward the
+        /// palm. Drives the thumb's own yaw axis so it reads relaxed instead of
+        /// a thumbs-up. Default ~8°.
+        #[serde(default)]
+        curl_bias_thumb_deg: Option<f32>,
     },
     ToeFidget {
         #[serde(default)]
@@ -61,6 +70,62 @@ pub enum LayerDriverSpec {
         frequency_hz: Option<f32>,
         #[serde(default)]
         seed: Option<u64>,
+        #[serde(default)]
+        curl_bias_deg: Option<f32>,
+    },
+    /// Ambient head/neck glances (neck + head only — never the eyes, which the
+    /// gaze system owns). Damps automatically while a face is being tracked.
+    LookAround {
+        /// Mean seconds between glance targets. Default ~3.5.
+        #[serde(default)]
+        mean_interval: Option<f32>,
+        /// Max horizontal glance (deg). Default ~12.
+        #[serde(default)]
+        yaw_deg: Option<f32>,
+        /// Max vertical glance (deg). Default ~6.
+        #[serde(default)]
+        pitch_deg: Option<f32>,
+    },
+    /// Slow whole-body balance sway (spine chain only). Adds the forward/back
+    /// lean dimension that weight_shift lacks. Use `additive` blend.
+    Sway {
+        /// Sway cycle rate (Hz). Default ~0.05 (very slow).
+        #[serde(default)]
+        rate_hz: Option<f32>,
+        /// Peak lean amount (deg). Default ~1.2.
+        #[serde(default)]
+        amount_deg: Option<f32>,
+    },
+    /// Relaxed pendular arm sway (upper/lower arms). Use `additive` blend.
+    ArmSway {
+        /// Swing rate (Hz). Default ~0.08.
+        #[serde(default)]
+        rate_hz: Option<f32>,
+        /// Peak swing amount (deg). Default ~1.5.
+        #[serde(default)]
+        amount_deg: Option<f32>,
+    },
+    /// Coordinated lower-body contrapposto: a single slow wandering weight
+    /// signal drives hips/spine/chest lean plus both legs (free-leg knee bend,
+    /// thigh ab/adduction) and ankle postural micro-sway, phase-locked into one
+    /// organic weight-transfer cycle. Self-contained — drives the whole lower
+    /// body, so don't stack `weight_shift`/`sway` under it. Use `additive` blend.
+    LegShift {
+        /// Weight-transfer cycle rate (Hz). Default ~0.05 (very slow).
+        #[serde(default)]
+        rate_hz: Option<f32>,
+        /// Hip lateral shift amount (deg). Default ~3.5.
+        #[serde(default)]
+        shift_deg: Option<f32>,
+        /// Free-leg knee bend depth (deg). Default ~8.0.
+        #[serde(default)]
+        knee_bend_deg: Option<f32>,
+        /// Hip yaw/roll sway amount (deg). Default ~2.5.
+        #[serde(default)]
+        hip_sway_deg: Option<f32>,
+        /// Ankle postural micro-sway amount (deg). Default ~1.8.
+        #[serde(default)]
+        ankle_deg: Option<f32>,
     },
 }
 
@@ -89,6 +154,12 @@ pub struct AddLayerArgs {
     pub speed: Option<f32>,
     #[serde(default)]
     pub looping: Option<bool>,
+    /// Seconds of crossfade across the clip loop seam (kills the loop "twitch").
+    #[serde(default)]
+    pub loop_fade: Option<f32>,
+    /// Bounce at the clip ends instead of wrapping (seamless back-and-forth).
+    #[serde(default)]
+    pub ping_pong: Option<bool>,
 }
 
 /// Batch payload for [`set_layer_stack`]: clears the stack and re-adds every
@@ -130,6 +201,22 @@ pub struct DriverParamsPatch {
     pub frequency_hz: Option<f32>,
     #[serde(default)]
     pub seed: Option<u64>,
+    #[serde(default)]
+    pub curl_bias_deg: Option<f32>,
+    #[serde(default)]
+    pub curl_bias_thumb_deg: Option<f32>,
+    #[serde(default)]
+    pub yaw_deg: Option<f32>,
+    #[serde(default)]
+    pub amount_deg: Option<f32>,
+    #[serde(default)]
+    pub shift_deg: Option<f32>,
+    #[serde(default)]
+    pub knee_bend_deg: Option<f32>,
+    #[serde(default)]
+    pub hip_sway_deg: Option<f32>,
+    #[serde(default)]
+    pub ankle_deg: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -158,6 +245,10 @@ pub struct UpdateLayerArgs {
     pub looping: Option<bool>,
     #[serde(default)]
     pub reverse: Option<bool>,
+    #[serde(default)]
+    pub loop_fade: Option<f32>,
+    #[serde(default)]
+    pub ping_pong: Option<bool>,
     #[serde(default)]
     pub driver_params: Option<DriverParamsPatch>,
 }
@@ -312,19 +403,78 @@ fn driver_from_spec(library: &PoseLibrary, spec: &LayerDriverSpec) -> Result<Dri
             amplitude_deg,
             frequency_hz,
             seed,
+            curl_bias_deg,
+            curl_bias_thumb_deg,
         } => DriverKind::FingerFidget {
-            amplitude_deg: amplitude_deg.unwrap_or(1.2),
-            frequency_hz: frequency_hz.unwrap_or(0.15),
+            amplitude_deg: amplitude_deg.unwrap_or(1.5),
+            frequency_hz: frequency_hz.unwrap_or(0.35),
             seed: seed.unwrap_or_else(rand::random),
+            curl_bias_deg: curl_bias_deg.unwrap_or(9.0),
+            curl_bias_thumb_deg: curl_bias_thumb_deg.unwrap_or(8.0),
         },
         LayerDriverSpec::ToeFidget {
             amplitude_deg,
             frequency_hz,
             seed,
+            curl_bias_deg,
         } => DriverKind::ToeFidget {
-            amplitude_deg: amplitude_deg.unwrap_or(0.8),
-            frequency_hz: frequency_hz.unwrap_or(0.12),
+            amplitude_deg: amplitude_deg.unwrap_or(1.2),
+            frequency_hz: frequency_hz.unwrap_or(0.25),
             seed: seed.unwrap_or_else(rand::random),
+            curl_bias_deg: curl_bias_deg.unwrap_or(4.0),
+        },
+        LayerDriverSpec::LookAround {
+            mean_interval,
+            yaw_deg,
+            pitch_deg,
+        } => {
+            let mut d = DriverKind::look_around_default();
+            if let DriverKind::LookAround {
+                mean_interval: mi,
+                yaw_deg: y,
+                pitch_deg: p,
+                ..
+            } = &mut d
+            {
+                if let Some(x) = mean_interval {
+                    *mi = *x;
+                }
+                if let Some(x) = yaw_deg {
+                    *y = *x;
+                }
+                if let Some(x) = pitch_deg {
+                    *p = *x;
+                }
+            }
+            d
+        }
+        LayerDriverSpec::Sway {
+            rate_hz,
+            amount_deg,
+        } => DriverKind::Sway {
+            rate_hz: rate_hz.unwrap_or(0.05),
+            amount_deg: amount_deg.unwrap_or(1.2),
+        },
+        LayerDriverSpec::ArmSway {
+            rate_hz,
+            amount_deg,
+        } => DriverKind::ArmSway {
+            rate_hz: rate_hz.unwrap_or(0.08),
+            amount_deg: amount_deg.unwrap_or(1.5),
+        },
+        LayerDriverSpec::LegShift {
+            rate_hz,
+            shift_deg,
+            knee_bend_deg,
+            hip_sway_deg,
+            ankle_deg,
+        } => DriverKind::LegShift {
+            rate_hz: rate_hz.unwrap_or(0.05),
+            shift_deg: shift_deg.unwrap_or(3.5),
+            knee_bend_deg: knee_bend_deg.unwrap_or(8.0),
+            hip_sway_deg: hip_sway_deg.unwrap_or(2.5),
+            ankle_deg: ankle_deg.unwrap_or(1.8),
+            seed: 0xD1B5_4A32_D192_ED03,
         },
     })
 }
@@ -356,6 +506,9 @@ pub fn build_layer(library: &PoseLibrary, args: &AddLayerArgs) -> Result<Layer, 
     if let Some(e) = args.enabled {
         layer.enabled = e;
         layer.playing = e;
+        // Start the weight envelope matching the requested state so a layer
+        // added disabled (promotion pattern) doesn't flash before fading out.
+        layer.gain = if e { 1.0 } else { 0.0 };
     }
     if let Some(inc) = &args.mask_include {
         layer.mask.include = inc.clone();
@@ -374,6 +527,12 @@ pub fn build_layer(library: &PoseLibrary, args: &AddLayerArgs) -> Result<Layer, 
     }
     if let Some(lp) = args.looping {
         layer.looping = lp;
+    }
+    if let Some(lf) = args.loop_fade {
+        layer.loop_fade = lf.max(0.0);
+    }
+    if let Some(pp) = args.ping_pong {
+        layer.ping_pong = pp;
     }
     Ok(layer)
 }
@@ -419,7 +578,16 @@ pub fn apply_driver_patch(d: &mut DriverKind, p: &DriverParamsPatch) -> Result<(
         || p.spine_counter_deg.is_some()
         || p.amplitude_deg.is_some()
         || p.frequency_hz.is_some()
-        || p.seed.is_some();
+        || p.seed.is_some()
+        || p.curl_bias_deg.is_some()
+        || p.curl_bias_thumb_deg.is_some()
+        || p.yaw_deg.is_some()
+        || p.pitch_deg.is_some()
+        || p.amount_deg.is_some()
+        || p.shift_deg.is_some()
+        || p.knee_bend_deg.is_some()
+        || p.hip_sway_deg.is_some()
+        || p.ankle_deg.is_some();
     if !any {
         return Ok(());
     }
@@ -479,6 +647,8 @@ pub fn apply_driver_patch(d: &mut DriverKind, p: &DriverParamsPatch) -> Result<(
             amplitude_deg,
             frequency_hz,
             seed,
+            curl_bias_deg,
+            curl_bias_thumb_deg,
         } => {
             if let Some(x) = p.amplitude_deg {
                 *amplitude_deg = x;
@@ -489,18 +659,89 @@ pub fn apply_driver_patch(d: &mut DriverKind, p: &DriverParamsPatch) -> Result<(
             if let Some(x) = p.seed {
                 *seed = x;
             }
+            if let Some(x) = p.curl_bias_deg {
+                *curl_bias_deg = x;
+            }
+            if let Some(x) = p.curl_bias_thumb_deg {
+                *curl_bias_thumb_deg = x;
+            }
             Ok(())
         }
         DriverKind::ToeFidget {
             amplitude_deg,
             frequency_hz,
             seed,
+            curl_bias_deg,
         } => {
             if let Some(x) = p.amplitude_deg {
                 *amplitude_deg = x;
             }
             if let Some(x) = p.frequency_hz {
                 *frequency_hz = x.max(0.001);
+            }
+            if let Some(x) = p.seed {
+                *seed = x;
+            }
+            if let Some(x) = p.curl_bias_deg {
+                *curl_bias_deg = x;
+            }
+            Ok(())
+        }
+        DriverKind::LookAround {
+            mean_interval,
+            yaw_deg,
+            pitch_deg,
+            ..
+        } => {
+            if let Some(x) = p.mean_interval {
+                *mean_interval = x.max(0.1);
+            }
+            if let Some(x) = p.yaw_deg {
+                *yaw_deg = x;
+            }
+            if let Some(x) = p.pitch_deg {
+                *pitch_deg = x;
+            }
+            Ok(())
+        }
+        DriverKind::Sway {
+            rate_hz,
+            amount_deg,
+        }
+        | DriverKind::ArmSway {
+            rate_hz,
+            amount_deg,
+        } => {
+            if let Some(x) = p.rate_hz {
+                *rate_hz = x;
+            }
+            if let Some(x) = p.amount_deg {
+                *amount_deg = x;
+            }
+            Ok(())
+        }
+        DriverKind::LegShift {
+            rate_hz,
+            shift_deg,
+            knee_bend_deg,
+            hip_sway_deg,
+            ankle_deg,
+            seed,
+        } => {
+            if let Some(x) = p.rate_hz {
+                *rate_hz = x;
+            }
+            if let Some(x) = p.shift_deg {
+                *shift_deg = x;
+            }
+            if let Some(x) = p.knee_bend_deg {
+                *knee_bend_deg = x;
+            }
+            if let Some(x) = p.hip_sway_deg {
+                *hip_sway_deg = x;
+            }
+            if let Some(x) = p.ankle_deg {
+                *ankle_deg = x;
             }
             if let Some(x) = p.seed {
                 *seed = x;
@@ -543,6 +784,12 @@ pub fn apply_layer_row_patch(layer: &mut Layer, args: &UpdateLayerArgs) -> Resul
     }
     if let Some(rev) = args.reverse {
         layer.reverse = rev;
+    }
+    if let Some(lf) = args.loop_fade {
+        layer.loop_fade = lf.max(0.0);
+    }
+    if let Some(pp) = args.ping_pong {
+        layer.ping_pong = pp;
     }
     if let Some(ref dp) = args.driver_params {
         apply_driver_patch(&mut layer.driver, dp)?;
@@ -594,20 +841,69 @@ fn driver_to_json(d: &DriverKind) -> Value {
             amplitude_deg,
             frequency_hz,
             seed,
+            curl_bias_deg,
+            curl_bias_thumb_deg,
         } => json!({
             "kind": "finger_fidget",
             "amplitudeDeg": amplitude_deg,
             "frequencyHz": frequency_hz,
             "seed": seed,
+            "curlBiasDeg": curl_bias_deg,
+            "curlBiasThumbDeg": curl_bias_thumb_deg,
         }),
         DriverKind::ToeFidget {
             amplitude_deg,
             frequency_hz,
             seed,
+            curl_bias_deg,
         } => json!({
             "kind": "toe_fidget",
             "amplitudeDeg": amplitude_deg,
             "frequencyHz": frequency_hz,
+            "seed": seed,
+            "curlBiasDeg": curl_bias_deg,
+        }),
+        DriverKind::LookAround {
+            mean_interval,
+            yaw_deg,
+            pitch_deg,
+            ..
+        } => json!({
+            "kind": "look_around",
+            "meanInterval": mean_interval,
+            "yawDeg": yaw_deg,
+            "pitchDeg": pitch_deg,
+        }),
+        DriverKind::Sway {
+            rate_hz,
+            amount_deg,
+        } => json!({
+            "kind": "sway",
+            "rateHz": rate_hz,
+            "amountDeg": amount_deg,
+        }),
+        DriverKind::ArmSway {
+            rate_hz,
+            amount_deg,
+        } => json!({
+            "kind": "arm_sway",
+            "rateHz": rate_hz,
+            "amountDeg": amount_deg,
+        }),
+        DriverKind::LegShift {
+            rate_hz,
+            shift_deg,
+            knee_bend_deg,
+            hip_sway_deg,
+            ankle_deg,
+            seed,
+        } => json!({
+            "kind": "leg_shift",
+            "rateHz": rate_hz,
+            "shiftDeg": shift_deg,
+            "kneeBendDeg": knee_bend_deg,
+            "hipSwayDeg": hip_sway_deg,
+            "ankleDeg": ankle_deg,
             "seed": seed,
         }),
     }
@@ -634,6 +930,8 @@ pub fn stack_snapshot_json(stack: &LayerStack) -> Value {
                 "playing": l.playing,
                 "looping": l.looping,
                 "reverse": l.reverse,
+                "loopFade": l.loop_fade,
+                "pingPong": l.ping_pong,
                 "time": l.time,
                 "duration": l.duration,
             })

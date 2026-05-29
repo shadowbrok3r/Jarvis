@@ -70,6 +70,10 @@ pub enum AddDriverChoice {
     WeightShift,
     FingerFidget,
     ToeFidget,
+    LookAround,
+    Sway,
+    ArmSway,
+    LegShift,
     ClipFromLibrary,
     PoseFromLibrary,
     ExpressionPreset,
@@ -83,6 +87,10 @@ impl AddDriverChoice {
             Self::WeightShift => "Weight Shift",
             Self::FingerFidget => "Finger Fidget",
             Self::ToeFidget => "Toe Fidget",
+            Self::LookAround => "Look Around",
+            Self::Sway => "Body Sway",
+            Self::ArmSway => "Arm Sway",
+            Self::LegShift => "Leg Shift",
             Self::ClipFromLibrary => "Clip from Library…",
             Self::PoseFromLibrary => "Pose from Library…",
             Self::ExpressionPreset => "Expression preset…",
@@ -96,6 +104,10 @@ const ALL_CHOICES: &[AddDriverChoice] = &[
     AddDriverChoice::WeightShift,
     AddDriverChoice::FingerFidget,
     AddDriverChoice::ToeFidget,
+    AddDriverChoice::LookAround,
+    AddDriverChoice::Sway,
+    AddDriverChoice::ArmSway,
+    AddDriverChoice::LegShift,
     AddDriverChoice::ClipFromLibrary,
     AddDriverChoice::PoseFromLibrary,
     AddDriverChoice::ExpressionPreset,
@@ -760,9 +772,8 @@ fn group_sort_key(group: &str) -> (u8, String) {
 
 fn layer_list_group_key(layer: &Layer) -> String {
     match layer.driver.kind_label() {
-        "breathing" | "auto-blink" | "weight-shift" | "finger-fidget" | "toe-fidget" => {
-            "Procedural".to_string()
-        }
+        "breathing" | "auto-blink" | "weight-shift" | "finger-fidget" | "toe-fidget"
+        | "look-around" | "sway" | "arm-sway" | "leg-shift" => "Procedural".to_string(),
         "expression-hold" => "Expression presets".to_string(),
         "pose-hold" => "Pose holds".to_string(),
         "clip" if layer.slug.starts_with("bone-") => {
@@ -1123,6 +1134,13 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
                 ui.add(egui::Slider::new(&mut layer.speed, 0.0..=2.5).fixed_decimals(2));
                 ui.checkbox(&mut layer.looping, "loop");
                 ui.checkbox(&mut layer.reverse, "reverse");
+                ui.checkbox(&mut layer.ping_pong, "ping-pong")
+                    .on_hover_text("bounce at the ends instead of wrapping (seamless, ignores reverse)");
+            });
+            ui.horizontal(|ui| {
+                ui.label("loop crossfade (s)")
+                    .on_hover_text("blend the loop's tail into its first frame to kill the restart twitch (0 = hard cut)");
+                ui.add(egui::Slider::new(&mut layer.loop_fade, 0.0..=1.0).fixed_decimals(2));
             });
             if let Some(dur) = layer.duration {
                 ui.horizontal(|ui| {
@@ -1221,9 +1239,13 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             amplitude_deg,
             frequency_hz,
             seed,
+            curl_bias_deg,
+            curl_bias_thumb_deg,
         } => {
             slider(ui, "amplitude (°)", amplitude_deg, 0.0..=6.0);
             slider(ui, "frequency (Hz)", frequency_hz, 0.05..=1.5);
+            slider(ui, "curl bias (°)", curl_bias_deg, -20.0..=30.0);
+            slider(ui, "thumb opposition (°)", curl_bias_thumb_deg, -10.0..=30.0);
             ui.horizontal(|ui| {
                 ui.label("seed");
                 ui.monospace(format!("{:#x}", seed));
@@ -1236,9 +1258,65 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             amplitude_deg,
             frequency_hz,
             seed,
+            curl_bias_deg,
         } => {
             slider(ui, "amplitude (°)", amplitude_deg, 0.0..=6.0);
             slider(ui, "frequency (Hz)", frequency_hz, 0.05..=1.5);
+            slider(ui, "curl bias (°)", curl_bias_deg, -20.0..=30.0);
+            ui.horizontal(|ui| {
+                ui.label("seed");
+                ui.monospace(format!("{:#x}", seed));
+                if ui.button("reshuffle").clicked() {
+                    *seed = rand::random::<u64>();
+                }
+            });
+        }
+        DriverKind::LookAround {
+            mean_interval,
+            yaw_deg,
+            pitch_deg,
+            damp,
+            ..
+        } => {
+            slider(ui, "mean interval (s)", mean_interval, 0.5..=12.0);
+            slider(ui, "yaw (°)", yaw_deg, 0.0..=30.0);
+            slider(ui, "pitch (°)", pitch_deg, 0.0..=20.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "gaze damp: {:.2} (1 = free, →0 = locked forward while a face is tracked)",
+                    damp
+                ))
+                .small()
+                .color(egui::Color32::from_gray(170)),
+            );
+        }
+        DriverKind::Sway {
+            rate_hz,
+            amount_deg,
+        } => {
+            slider(ui, "rate (Hz)", rate_hz, 0.01..=0.3);
+            slider(ui, "amount (°)", amount_deg, 0.0..=5.0);
+        }
+        DriverKind::ArmSway {
+            rate_hz,
+            amount_deg,
+        } => {
+            slider(ui, "rate (Hz)", rate_hz, 0.01..=0.4);
+            slider(ui, "amount (°)", amount_deg, 0.0..=6.0);
+        }
+        DriverKind::LegShift {
+            rate_hz,
+            shift_deg,
+            knee_bend_deg,
+            hip_sway_deg,
+            ankle_deg,
+            seed,
+        } => {
+            slider(ui, "rate (Hz)", rate_hz, 0.01..=0.2);
+            slider(ui, "hip shift (°)", shift_deg, 0.0..=8.0);
+            slider(ui, "knee bend (°)", knee_bend_deg, 0.0..=20.0);
+            slider(ui, "hip sway (°)", hip_sway_deg, 0.0..=6.0);
+            slider(ui, "ankle sway (°)", ankle_deg, 0.0..=5.0);
             ui.horizontal(|ui| {
                 ui.label("seed");
                 ui.monospace(format!("{:#x}", seed));
@@ -1604,6 +1682,26 @@ fn try_build_layer(
                 .blend(BlendMode::RestRelative)
                 .weight(0.4)
         }
+        AddDriverChoice::LookAround => Layer::new(
+            "look-around",
+            "Look Around",
+            DriverKind::look_around_default(),
+        )
+        .blend(BlendMode::RestRelative)
+        .weight(1.0),
+        AddDriverChoice::Sway => Layer::new("sway", "Body Sway", DriverKind::sway_default())
+            .blend(BlendMode::RestRelative)
+            .weight(0.8),
+        AddDriverChoice::ArmSway => {
+            Layer::new("arm-sway", "Arm Sway", DriverKind::arm_sway_default())
+                .blend(BlendMode::RestRelative)
+                .weight(0.6)
+        }
+        AddDriverChoice::LegShift => {
+            Layer::new("leg-shift", "Leg Shift", DriverKind::leg_shift_default())
+                .blend(BlendMode::RestRelative)
+                .weight(0.85)
+        }
         AddDriverChoice::ClipFromLibrary => {
             let library = library.ok_or("pose library not ready")?;
             if ui_state.picked_clip.is_empty() {
@@ -1688,6 +1786,9 @@ fn kind_color(kind: &str) -> egui::Color32 {
         "weight-shift" => egui::Color32::from_rgb(210, 150, 220),
         "finger-fidget" => egui::Color32::from_rgb(220, 160, 140),
         "toe-fidget" => egui::Color32::from_rgb(140, 200, 220),
+        "look-around" => egui::Color32::from_rgb(170, 210, 150),
+        "sway" => egui::Color32::from_rgb(150, 190, 210),
+        "arm-sway" => egui::Color32::from_rgb(200, 180, 150),
         _ => egui::Color32::from_gray(200),
     }
 }

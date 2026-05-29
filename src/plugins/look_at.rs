@@ -46,12 +46,22 @@ impl Plugin for LookAtPlugin {
 pub struct LookAtTarget;
 
 #[derive(Resource)]
-struct LookAtRuntime {
+pub struct LookAtRuntime {
     target: Option<Entity>,
     /// After the VRM root exists: parent gaze target here; only `true` when bone look-at is safe.
     target_parented: bool,
     bevy_look_at_enabled: bool,
     active_until: Option<std::time::Instant>,
+}
+
+impl LookAtRuntime {
+    /// `true` while the avatar is actively tracking a gaze target (e.g. the user's face via the
+    /// Home Assistant vision pipeline). The ambient `LookAround` head driver reads this to damp its
+    /// motion so the head stays oriented toward the tracked face instead of wandering.
+    pub fn gaze_active(&self) -> bool {
+        self.active_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
 }
 
 impl Default for LookAtRuntime {
