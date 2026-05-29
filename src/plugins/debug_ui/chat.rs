@@ -16,6 +16,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use jarvis_avatar::act::strip_act_delay;
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::icons;
 use jarvis_avatar::ironclaw::client::GatewayClient;
 use jarvis_avatar::ironclaw::types::{ImageData, ThreadInfo};
 
@@ -579,7 +580,7 @@ fn compose_bar(
 
         ui.vertical(|ui| {
             if ui
-                .add_enabled(gateway.is_some(), egui::Button::new("📎 Attach"))
+                .add_enabled(gateway.is_some(), egui::Button::new(format!("{} Attach", icons::ATTACH)))
                 .on_disabled_hover_text("gateway unavailable")
                 .clicked()
             {
@@ -611,8 +612,8 @@ fn attachment_strip(ui: &mut egui::Ui, state: &mut DebugUiState) {
         for (idx, att) in state.chat.pending.iter().enumerate() {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(format!("🖼 {}", att.name));
-                    if ui.button("X").on_hover_text("remove").clicked() {
+                    ui.label(format!("{} {}", icons::IMAGE, att.name));
+                    if ui.button(icons::icon(icons::CLOSE)).on_hover_text("remove").clicked() {
                         remove = Some(idx);
                     }
                 });
@@ -757,7 +758,7 @@ fn draw_drop_overlay(ctx: &egui::Context) {
                 .fill(egui::Color32::from_rgba_unmultiplied(30, 30, 30, 220))
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new("⤓  Drop image to attach")
+                        egui::RichText::new(format!("{}  Drop image to attach", icons::DOWNLOAD))
                             .size(18.0)
                             .color(egui::Color32::WHITE),
                     );

@@ -21,6 +21,7 @@ egui_commonmark = { version = "0.22", default-features = false, features = ["pul
 # Matches bevy_egui 0.39 / egui 0.33 
 egui_json_tree = "0.14.2"
 rfd = "0.17.2"
+egui-phosphor = { version = "0.11.0", default-features = false, features = ["regular"] }
 
 # Channel-server hub (axum WS + HTTP) / async
 axum = { version = "0.8", features = ["ws"] }

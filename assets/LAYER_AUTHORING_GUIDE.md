@@ -31,6 +31,7 @@ JSON **`driver`** is a **tagged union** (`kind` + fields):
 | `look_around` | optional `mean_interval` (~3.5 s), `yaw_deg` (~12°), `pitch_deg` (~6°) | Additive. Ambient head glances on **neck + head only** — never the eyes. Auto-damps toward forward while a face is being tracked (Home Assistant gaze), so the head holds still and the eyes do the tracking; releases smoothly when tracking stops. |
 | `sway` | optional `rate_hz` (~0.05), `amount_deg` (~1.2°) | Additive. Slow whole-body balance lean on the **spine chain** (hips→spine→chest). Adds the forward/back pitch dimension `weight_shift` lacks; composes with it. |
 | `arm_sway` | optional `rate_hz` (~0.08), `amount_deg` (~1.5°) | Additive. Relaxed pendular drift on upper/lower arms, with the two arms slightly out of phase. Omit (or low-weight) when a clip/pose pins the arms (e.g. arms-crossed). |
+| `leg_shift` | optional `rate_hz` (~0.05), `shift_deg` (~3.5°), `knee_bend_deg` (~8°), `hip_sway_deg` (~2.5°), `ankle_deg` (~1.8°) | Additive. **Self-contained coordinated lower body** — one slow wandering weight signal drives contrapposto: hips/spine/chest lean + per-leg weight (free-leg knee bend, thigh ab/adduction) + ankle postural micro-sway, all phase-locked into one organic weight-transfer cycle. Drives the whole lower body, so **don't stack `weight_shift`/`sway` under it**. Replaces the old `weight_shift`+`sway` pair in the default living idle. |
 
 `breathing` now adds an asymmetric inhale/exhale curve + second harmonic + a touch of neck float (no new params).
 

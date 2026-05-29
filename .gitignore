@@ -35,3 +35,6 @@ JarvisIOS/Sources/JarvisIOS/assets/*
 .dev
 
 AGENTS.md
+CLAUDE.md
+.cursor/
+.claude/

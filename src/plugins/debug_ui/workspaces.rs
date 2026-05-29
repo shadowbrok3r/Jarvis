@@ -9,13 +9,14 @@ use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::config::Settings;
 
-use super::sections::{
-    channel_hub_panel, gateway_panel, look_at_panel, mcp_panel, tts_panel,
-};
+use super::network_trace::network_trace_panel;
+use super::sections::{channel_hub_panel, gateway_panel, mcp_panel, tts_panel};
 use super::services::services_panel;
+use super::DebugUiState;
 use crate::plugins::avatar::AvatarDebugStats;
 use crate::plugins::chat_pipeline_status::ChatPipelineStatus;
 use crate::plugins::service_status::ServiceStatus;
+use crate::plugins::traffic_log::TrafficLogSink;
 
 // ---------- Service Hub workspace ---------------------------------------------
 
@@ -84,74 +85,6 @@ pub fn draw_service_hub_window(
     settings.ui.show_service_hub = open;
 }
 
-// ---------- Graphics workspace -------------------------------------------------
-
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-pub enum GraphicsWorkspaceTab {
-    #[default]
-    Lights,
-    Advanced,
-    LookAt,
-}
-
-#[derive(Resource, Default)]
-pub struct GraphicsWorkspaceUiState {
-    pub tab: GraphicsWorkspaceTab,
-}
-
-pub fn draw_graphics_workspace_window(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<Settings>,
-    mut state: ResMut<GraphicsWorkspaceUiState>,
-) {
-    if !settings.ui.show_graphics_workspace {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-
-    let mut open = settings.ui.show_graphics_workspace;
-    egui::Window::new("Graphics workspace")
-        .default_width(420.0)
-        .default_height(520.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut state.tab, GraphicsWorkspaceTab::Lights, "Lights / basic");
-                ui.selectable_value(
-                    &mut state.tab,
-                    GraphicsWorkspaceTab::Advanced,
-                    "Advanced",
-                );
-                ui.selectable_value(&mut state.tab, GraphicsWorkspaceTab::LookAt, "Look-at");
-            });
-            ui.separator();
-
-            match state.tab {
-                GraphicsWorkspaceTab::Lights => {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        super::sections::draw_basic_graphics_inline(ui, &mut settings);
-                    });
-                }
-                GraphicsWorkspaceTab::Advanced => {
-                    ui.label(
-                        "Advanced post-processing (tonemapping, bloom, MToon material editor) \
-                         lives in the dedicated Graphics Advanced window because it owns mesh \
-                         queries that can't be inlined here.",
-                    );
-                    if ui.button("Open Graphics Advanced…").clicked() {
-                        settings.ui.show_graphics_advanced = true;
-                    }
-                }
-                GraphicsWorkspaceTab::LookAt => {
-                    look_at_panel(ui, &mut settings);
-                }
-            }
-        });
-    settings.ui.show_graphics_workspace = open;
-}
-
 // ---------- Diagnostics workspace ---------------------------------------------
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +106,8 @@ pub fn draw_diagnostics_workspace_window(
     mut state: ResMut<DiagnosticsUiState>,
     pipeline: Res<ChatPipelineStatus>,
     stats: Res<AvatarDebugStats>,
+    log: Option<Res<TrafficLogSink>>,
+    mut dbg: ResMut<DebugUiState>,
 ) {
     if !settings.ui.show_diagnostics_workspace {
         return;
@@ -183,8 +118,8 @@ pub fn draw_diagnostics_workspace_window(
 
     let mut open = settings.ui.show_diagnostics_workspace;
     egui::Window::new("Diagnostics")
-        .default_width(520.0)
-        .default_height(420.0)
+        .default_width(560.0)
+        .default_height(520.0)
         .open(&mut open)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -211,15 +146,12 @@ pub fn draw_diagnostics_workspace_window(
                         settings.avatar.world_position[1],
                     );
                 }
-                DiagnosticsTab::Network => {
-                    ui.label(
-                        "The full Network trace surface owns its own JSON tree + traffic \
-                         queries; open it as a separate window.",
-                    );
-                    if ui.button("Open Network trace…").clicked() {
-                        settings.ui.show_network_trace = true;
+                DiagnosticsTab::Network => match log.as_deref() {
+                    Some(log) => network_trace_panel(ui, log, &mut dbg),
+                    None => {
+                        ui.label("Traffic log not initialised yet.");
                     }
-                }
+                },
             }
         });
     settings.ui.show_diagnostics_workspace = open;

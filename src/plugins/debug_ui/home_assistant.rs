@@ -5,6 +5,8 @@ use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::home_assistant::{self, HaCameraEntity, HaDetectionSensorEntity, HaMediaEntity};
+use jarvis_avatar::icons;
+use jarvis_avatar::theme;
 
 use crate::plugins::VrmEyeLookatDebug;
 use crate::plugins::ha_vision_gaze::HaVisionGazeRuntime;
@@ -150,7 +152,7 @@ pub fn draw_home_assistant_window(
                             });
 
                             if let Some(ref err) = cache.last_error {
-                                ui.colored_label(egui::Color32::from_rgb(220, 140, 80), err);
+                                ui.colored_label(theme::warn(ui), err);
                             }
                         });
 
@@ -191,7 +193,8 @@ pub fn draw_home_assistant_window(
                                 );
                                 if !ha.detection_sensor_ids.is_empty() {
                                     ui.small(format!(
-                                        "Vision → gaze uses the first checked sensor: {}",
+                                        "Vision {} gaze uses the first checked sensor: {}",
+                                        icons::ARROW_RIGHT,
                                         ha.detection_sensor_ids[0]
                                     ));
                                 }
@@ -200,7 +203,7 @@ pub fn draw_home_assistant_window(
                         ui.label("No discovery snapshot yet. Configure HA and click Discover.");
                     }
 
-                    egui::CollapsingHeader::new("Vision → VRM gaze")
+                    egui::CollapsingHeader::new(format!("Vision {} VRM gaze", icons::ARROW_RIGHT))
                         .default_open(true)
                         .show(ui, |ui| {
                             ui.label(
@@ -252,11 +255,12 @@ pub fn draw_home_assistant_window(
                                     )
                                     .text("Horizontal sensitivity (VRM eye yaw range)"),
                                 )
-                                .on_hover_text(
-                                    "VRM look-at range-maps head→target yaw. If the target is too far to the side, \
+                                .on_hover_text(format!(
+                                    "VRM look-at range-maps head{a}target yaw. If the target is too far to the side, \
                                      yaw **saturates** and eyes only show full left or full right. Lower this to get \
                                      smooth left–center–right. Try 0.1–0.3 if you see that.",
-                                )
+                                    a = icons::ARROW_RIGHT
+                                ))
                                 .changed()
                             {
                                 ha.vision_gaze_horizontal_sensitivity = ha.vision_gaze_horizontal_sensitivity.clamp(0.01, 1.0);

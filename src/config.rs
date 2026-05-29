@@ -1451,10 +1451,6 @@ impl Settings {
     pub fn migrate_workspace_visibility(&mut self) {
         let u = &mut self.ui;
 
-        if !u.show_graphics_workspace && u.show_graphics_advanced {
-            u.show_graphics_workspace = true;
-        }
-
         if !u.show_diagnostics_workspace && u.show_network_trace {
             u.show_diagnostics_workspace = true;
         }

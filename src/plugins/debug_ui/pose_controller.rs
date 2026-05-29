@@ -28,7 +28,9 @@ use bevy_egui::{EguiContexts, egui};
 use bevy_vrm1::prelude::*;
 
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::icons;
 use jarvis_avatar::pose_library::{AnimationMeta, PoseFile};
+use jarvis_avatar::theme;
 
 use crate::mcp::pose_authoring::{bone_map_from_euler_deg, sanitize_bone_map, BoneEulerDeg};
 use crate::mcp::pose_intents::{
@@ -849,7 +851,7 @@ fn render_side_panel(
                 }
                 ui.with_layout(Layout::right_to_left(egui::Align::Max), |ui| {
                     if let Some(err) = library.last_error() {
-                        ui.colored_label(egui::Color32::from_rgb(200, 120, 120), err);
+                        ui.colored_label(theme::error(ui), err);
                     }
                 });
             });
@@ -879,7 +881,7 @@ fn side_panel_tab_bar(
             ui.menu_button("...", |ui| {
                 ui.label(egui::RichText::new("Move to...").strong());
                 ui.separator();
-                let mut send = |ui: &mut egui::Ui, label: &str, target: &'static str| {
+                let mut send = |ui: &mut egui::Ui, label: String, target: &'static str| {
                     let enabled = current_side != target;
                     if ui
                         .add_enabled(enabled, egui::Button::new(label))
@@ -889,16 +891,16 @@ fn side_panel_tab_bar(
                         ui.close();
                     }
                 };
-                send(ui, "Left side panel", "left");
-                send(ui, "Right side panel", "right");
-                send(ui, "Bottom panel (dopesheet)", "bottom");
-                send(ui, "Floating window", "floating");
+                send(ui, format!("{} Left side panel", icons::DOCK_LEFT), "left");
+                send(ui, format!("{} Right side panel", icons::DOCK_RIGHT), "right");
+                send(ui, format!("{} Bottom panel (dopesheet)", icons::DOCK_BOTTOM), "bottom");
+                send(ui, format!("{} Floating window", icons::FLOATING), "floating");
                 ui.separator();
-                if ui.button("Hide tab").clicked() {
+                if ui.button(format!("{} Hide tab", icons::HIDDEN)).clicked() {
                     pending_side_changes.push((*tab, "hidden"));
                     ui.close();
                 }
-                if ui.button("Reset to default side").clicked() {
+                if ui.button(format!("{} Reset to default side", icons::REVERSE)).clicked() {
                     pending_side_changes.push((*tab, "default"));
                     ui.close();
                 }
@@ -924,19 +926,19 @@ fn floating_tab_header(
         );
         ui.separator();
         ui.menu_button("Redock", |ui| {
-            if ui.button("Left side panel").clicked() {
+            if ui.button(format!("{} Left side panel", icons::DOCK_LEFT)).clicked() {
                 pending_side_changes.push((tab, "left"));
                 ui.close();
             }
-            if ui.button("Right side panel").clicked() {
+            if ui.button(format!("{} Right side panel", icons::DOCK_RIGHT)).clicked() {
                 pending_side_changes.push((tab, "right"));
                 ui.close();
             }
-            if ui.button("Bottom panel (dopesheet)").clicked() {
+            if ui.button(format!("{} Bottom panel (dopesheet)", icons::DOCK_BOTTOM)).clicked() {
                 pending_side_changes.push((tab, "bottom"));
                 ui.close();
             }
-            if ui.button("Default side").clicked() {
+            if ui.button(format!("{} Default side", icons::REVERSE)).clicked() {
                 pending_side_changes.push((tab, "default"));
                 ui.close();
             }
@@ -1554,7 +1556,7 @@ fn animation_tab(
         ui.add(egui::TextEdit::singleline(&mut state.search).desired_width(140.0));
         category_combobox(ui, "anim_filter_cat", &cats, &mut state.category_filter, "Category");
         ui.separator();
-        ui.menu_button(format!("{:?} ▼", state.default_playback_mode), |ui| {
+        ui.menu_button(format!("{:?} {}", state.default_playback_mode, icons::CHEV_OPEN), |ui| {
             ui.selectable_value(
                 &mut state.default_playback_mode,
                 PlaybackMode::Native,
@@ -1862,7 +1864,7 @@ fn anim_row(
                         }
                     }
                 } else if ui
-                    .button("🖊")
+                    .button(icons::icon(icons::EDIT))
                     .on_hover_text(
                         "Edit via animation layer stack — one layer per bone (opens Layers panel; Done bakes + saves)",
                     )
@@ -2012,7 +2014,7 @@ fn ai_gen_panel(
     ui.horizontal(|ui| {
         let enabled = kimodo.is_some() && tokio_rt.is_some() && !state.gen_prompt.trim().is_empty();
         if ui
-            .add_enabled(enabled, egui::Button::new("✨ Generate"))
+            .add_enabled(enabled, egui::Button::new(format!("{} Generate", icons::MAGIC)))
             .clicked()
         {
             if let (Some(k), Some(rt)) = (kimodo, tokio_rt) {
@@ -2262,7 +2264,7 @@ fn bones_panel(
                 .hint_text("Bone filter")
                 .desired_width((ui.available_width() - 90.0).clamp(120.0, 240.0)),
         );
-        if ui.button("Ｘ").clicked() {
+        if ui.button(icons::icon(icons::CLOSE)).clicked() {
             state.bone_search.clear();
         }
     });
@@ -2284,7 +2286,7 @@ fn bones_panel(
             state.status = Some("reset rig to bind pose".into());
         }
         if ui
-            .button("📷 Snapshot → sliders")
+            .button(format!("{} Snapshot {} sliders", icons::CAMERA, icons::ARROW_RIGHT))
             .on_hover_text(
                 "Seed the sliders with the current rig rotations so you can nudge from live pose.",
             )
@@ -2455,14 +2457,15 @@ fn intent_lab_tab(
     undo: Option<&UndoHistory>,
 ) {
     ui.label(egui::RichText::new("Intent Lab — semantic MCP tools").strong());
-    ui.label(
+    ui.label(format!(
         "Tune sign multipliers per loaded VRM so AI-facing tools (raise_leg, bend_knee, arms_down_rest) \
-move the body the way you expect. Use the AI wizard for a guided probe → confirm loop.",
-    );
+move the body the way you expect. Use the AI wizard for a guided probe {arrow} confirm loop.",
+        arrow = icons::ARROW_RIGHT
+    ));
 
     let Some(cal_h) = cal_handle else {
         ui.colored_label(
-            egui::Color32::from_rgb(220, 180, 80),
+            theme::warn(ui),
             "IntentCalibrationPlugin not loaded — add it before McpPlugin in main.rs.",
         );
         return;
@@ -2509,7 +2512,7 @@ each step. While awaiting confirm, answer in chat or use the buttons below.",
                 }
                 if let Some(pending) = awaiting.clone() {
                     ui.colored_label(
-                        egui::Color32::from_rgb(240, 200, 80),
+                        theme::warn(ui),
                         "AWAITING YOUR CONFIRM",
                     );
                     ui.label(egui::RichText::new(&pending.label).strong());
@@ -2518,19 +2521,19 @@ each step. While awaiting confirm, answer in chat or use the buttons below.",
                     ui.horizontal(|ui| {
                         if ui.button("Correct").clicked() {
                             match wiz.confirm(&step_id, ConfirmVerdict::Correct) {
-                                Ok(_) => pc.status = Some(format!("wizard: {step_id} → correct")),
+                                Ok(_) => pc.status = Some(format!("wizard: {step_id} {} correct", icons::ARROW_RIGHT)),
                                 Err(e) => pc.status = Some(format!("wizard confirm: {e}")),
                             }
                         }
                         if ui.button("Flip sign").clicked() {
                             match wiz.confirm(&step_id, ConfirmVerdict::Flip) {
-                                Ok(_) => pc.status = Some(format!("wizard: {step_id} → flip")),
+                                Ok(_) => pc.status = Some(format!("wizard: {step_id} {} flip", icons::ARROW_RIGHT)),
                                 Err(e) => pc.status = Some(format!("wizard confirm: {e}")),
                             }
                         }
                         if ui.button("Skip").clicked() {
                             match wiz.confirm(&step_id, ConfirmVerdict::Skip) {
-                                Ok(_) => pc.status = Some(format!("wizard: {step_id} → skip")),
+                                Ok(_) => pc.status = Some(format!("wizard: {step_id} {} skip", icons::ARROW_RIGHT)),
                                 Err(e) => pc.status = Some(format!("wizard confirm: {e}")),
                             }
                         }
@@ -2560,7 +2563,7 @@ each step. While awaiting confirm, answer in chat or use the buttons below.",
             WizardPhase::Complete { draft, log, .. } => {
                 pc.intent_lab_cal = draft.clone();
                 ui.colored_label(
-                    egui::Color32::from_rgb(120, 220, 140),
+                    theme::success(ui),
                     format!(
                         "Wizard complete — {} step(s) recorded. Save below or tell the agent save_intent_calibration.",
                         log.len()
@@ -2583,14 +2586,16 @@ each step. While awaiting confirm, answer in chat or use the buttons below.",
     egui::CollapsingHeader::new("Default rules (what each sign scales)")
         .default_open(false)
         .show(ui, |ui| {
-            ui.label(
-                "raise_leg forward → *UpperLeg intrinsic pitch (× raise_leg_forward_pitch_sign). \
-Outward → *UpperLeg roll with left/right mirror (× raise_leg_outward_roll_sign).",
-            );
-            ui.label(
-                "bend_knee → *LowerLeg pitch (× bend_knee_pitch_sign). \
-arms_down_rest → shoulder/upper-arm/lower-arm rolls & pitches (× the three arms_* signs).",
-            );
+            ui.label(format!(
+                "raise_leg forward {arrow} *UpperLeg intrinsic pitch (x raise_leg_forward_pitch_sign). \
+Outward {arrow} *UpperLeg roll with left/right mirror (x raise_leg_outward_roll_sign).",
+                arrow = icons::ARROW_RIGHT
+            ));
+            ui.label(format!(
+                "bend_knee {arrow} *LowerLeg pitch (x bend_knee_pitch_sign). \
+arms_down_rest {arrow} shoulder/upper-arm/lower-arm rolls & pitches (x the three arms_* signs).",
+                arrow = icons::ARROW_RIGHT
+            ));
             ui.label(
                 "If \"forward\" reads backward, flip forward pitch sign. If outward abduction twists wrong, flip outward roll sign.",
             );

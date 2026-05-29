@@ -18,6 +18,7 @@ use jarvis_avatar::config::{
     apply_character_showcase_lighting_preset, BloomSettings, LightRigSettings, LightSpec,
     Settings, msaa_allows_ssao,
 };
+use jarvis_avatar::icons;
 
 use crate::plugins::graphics_advanced::EnvironmentMapStatus;
 use crate::plugins::material_visibility::{
@@ -29,10 +30,21 @@ use crate::plugins::mtoon_overrides::{
 
 use super::widgets::{rgb_row, rgba_row, vec3_row};
 
+/// Tabs for the consolidated Graphics Workspace window.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicsWsTab {
+    #[default]
+    Lights,
+    Post,
+    Materials,
+    LookAt,
+}
+
 /// Transient per-window state. Persists only while the UI is open — actual
 /// override entries live on [`MToonOverridesStore`] and on disk.
 #[derive(Default)]
 pub struct GraphicsAdvancedUiState {
+    pub tab: GraphicsWsTab,
     pub selected_material: Option<String>,
     pub draft: Option<MaterialDraft>,
     /// Snapshot of the selected [`MToonMaterial`] when the draft was created, so live
@@ -393,35 +405,53 @@ pub fn draw_graphics_advanced_window(
         .count();
 
     let mut open = settings.ui.show_graphics_advanced;
-    egui::Window::new("Graphics Advanced")
-        .default_size([520.0, 620.0])
+    egui::Window::new("Graphics Workspace")
+        .default_size([540.0, 620.0])
         .open(&mut open)
         .show(ctx, |ui| {
+            let tab = &mut state.graphics_advanced.tab;
+            ui.horizontal(|ui| {
+                ui.selectable_value(tab, GraphicsWsTab::Lights, "Lights");
+                ui.selectable_value(tab, GraphicsWsTab::Post, "Post");
+                ui.selectable_value(tab, GraphicsWsTab::Materials, "Materials");
+                ui.selectable_value(tab, GraphicsWsTab::LookAt, "Look-at");
+            });
+            ui.separator();
+
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
-                draw_post_process(ui, &mut settings, env_status.as_deref());
-                ui.separator();
-                draw_light_rig(ui, &mut settings.light_rig);
-                ui.separator();
-                draw_material_visibility(
-                    ui,
-                    &vrm_roots,
-                    &child_of_q,
-                    &mtoon_meshes_q,
-                    &std_meshes_q,
-                    vis_store.as_deref(),
-                );
-                ui.separator();
-                draw_mtoon_editor(
-                    ui,
-                    &mut state.graphics_advanced,
-                    &materials,
-                    &mtoon_meshes_q,
-                    store.as_deref(),
-                    (!vrm_roots.is_empty()).then_some((std_under_vrm, mtoon_under_vrm)),
-                );
-            });
+                .show(ui, |ui| match state.graphics_advanced.tab {
+                    GraphicsWsTab::Lights => {
+                        super::sections::draw_basic_graphics_inline(ui, &mut settings);
+                        ui.separator();
+                        draw_light_rig(ui, &mut settings.light_rig);
+                    }
+                    GraphicsWsTab::Post => {
+                        draw_post_process(ui, &mut settings, env_status.as_deref());
+                    }
+                    GraphicsWsTab::Materials => {
+                        draw_material_visibility(
+                            ui,
+                            &vrm_roots,
+                            &child_of_q,
+                            &mtoon_meshes_q,
+                            &std_meshes_q,
+                            vis_store.as_deref(),
+                        );
+                        ui.separator();
+                        draw_mtoon_editor(
+                            ui,
+                            &mut state.graphics_advanced,
+                            &materials,
+                            &mtoon_meshes_q,
+                            store.as_deref(),
+                            (!vrm_roots.is_empty()).then_some((std_under_vrm, mtoon_under_vrm)),
+                        );
+                    }
+                    GraphicsWsTab::LookAt => {
+                        super::sections::look_at_panel(ui, &mut settings);
+                    }
+                });
         });
     settings.ui.show_graphics_advanced = open;
 }
@@ -493,7 +523,7 @@ fn draw_post_process(
             "Cubemap rotates with the view. Turn off for world-fixed studio orientation.",
         );
     ui.text_edit_singleline(&mut adv.environment_map)
-        .on_hover_text("assets/<stem>_diffuse.ktx2 + <stem>_specular.ktx2 (e.g. maps/ → maps/_diffuse.ktx2)");
+        .on_hover_text(format!("assets/<stem>_diffuse.ktx2 + <stem>_specular.ktx2 (e.g. maps/ {} maps/_diffuse.ktx2)", icons::ARROW_RIGHT));
     ui.add(
         egui::Slider::new(&mut adv.environment_intensity, 0.0..=500.0).text("intensity (nits)"),
     );

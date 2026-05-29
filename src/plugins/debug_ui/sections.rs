@@ -10,10 +10,12 @@ use bevy_egui::{EguiContexts, egui};
 use jarvis_avatar::act::Emotion;
 use jarvis_avatar::avatar_defaults::{avatar_defaults_path, load_avatar_defaults};
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::icons;
 use jarvis_avatar::model_catalog::{list_vrm_models, models_dir, resolve_vrm_load_argument};
+use jarvis_avatar::theme;
 
 use super::widgets::{rgb_row, rgba_row, vec3_row};
-use super::{AvatarDefaultsUiState, AvatarVrmPickerState, DebugUiState};
+use super::{AvatarVrmPickerState, DebugUiState};
 use crate::plugins::avatar::AvatarDebugStats;
 use crate::plugins::avatar_defaults::{
     apply_avatar_defaults_now, save_avatar_defaults_from_snapshot, AvatarDefaultsStatus,
@@ -58,49 +60,55 @@ pub fn draw_avatar_window(
     let mut pending_edit_idle_layers = false;
     egui::Window::new("Avatar")
         .default_width(380.0)
+        .default_height(560.0)
         .open(&mut open)
         .show(ctx, |ui| {
+          egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let a = &mut settings.avatar;
-            ui.label("Current model ([avatar].model_path):");
-            ui.monospace(a.model_path.as_str());
-            ui.small(
-                "Hot-swap updates this path immediately (same queue as MCP load_vrm). \
-                 Process cwd should be the crate root so assets/models resolves on disk.",
+            ui.horizontal(|ui| {
+                ui.label("Model");
+                ui.monospace(a.model_path.as_str());
+            })
+            .response
+            .on_hover_text(
+                "[avatar].model_path. Hot-swap updates this immediately (same queue as MCP \
+                 load_vrm). cwd should be the crate root so assets/models resolves on disk.",
             );
 
-            ui.separator();
-            ui.label("Pick VRM from assets/models/");
-            ui.small(format!("Scan directory: {}", models_dir().display()));
             let picker = &mut state.avatar_vrm_picker;
-            ui.horizontal(|ui| {
-                ui.label("Filter:");
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut picker.filter)
-                            .desired_width(ui.available_width().max(120.0)),
-                    )
-                    .changed()
-                {
-                    picker.op_error = None;
-                }
-            });
-
-            let filter_opt = {
-                let t = picker.filter.trim();
-                if t.is_empty() { None } else { Some(t) }
-            };
-
-            match list_vrm_models(filter_opt) {
+            match list_vrm_models(None) {
                 Ok(entries) => {
                     picker.list_error = None;
                     ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("avatar_vrm_pick")
+                            .selected_text(
+                                picker
+                                    .selected_basename
+                                    .clone()
+                                    .unwrap_or_else(|| "(pick a .vrm)".into()),
+                            )
+                            .width(230.0)
+                            .show_ui(ui, |ui| {
+                                for entry in &entries {
+                                    ui.selectable_value(
+                                        &mut picker.selected_basename,
+                                        Some(entry.basename.clone()),
+                                        &entry.basename,
+                                    );
+                                }
+                                if entries.is_empty() {
+                                    ui.weak("(no .vrm files)");
+                                }
+                            })
+                            .response
+                            .on_hover_text(format!("Scanning {}", models_dir().display()));
                         let can_load = picker.selected_basename.is_some() && pose_tx.is_some();
                         if ui
-                            .add_enabled(can_load, egui::Button::new("Load selected"))
+                            .add_enabled(can_load, egui::Button::new("Load"))
                             .on_disabled_hover_text(if pose_tx.is_none() {
                                 "PoseCommandSender not available"
                             } else {
-                                "Select a .vrm row first"
+                                "Pick a .vrm first"
                             })
                             .clicked()
                         {
@@ -109,30 +117,6 @@ pub fn draw_avatar_window(
                             }
                         }
                     });
-
-                    egui::ScrollArea::vertical()
-                        .max_height(220.0)
-                        .id_salt("avatar_vrm_model_list")
-                        .show(ui, |ui| {
-                            for entry in &entries {
-                                let selected = picker.selected_basename.as_deref()
-                                    == Some(entry.basename.as_str());
-                                let r = ui.selectable_label(selected, &entry.basename);
-                                if r.double_clicked() {
-                                    picker.selected_basename = Some(entry.basename.clone());
-                                    queue_avatar_vrm_load(
-                                        pose_tx.as_deref(),
-                                        entry.basename.as_str(),
-                                        picker,
-                                    );
-                                } else if r.clicked() {
-                                    picker.selected_basename = Some(entry.basename.clone());
-                                }
-                            }
-                            if entries.is_empty() {
-                                ui.weak("(no matching .vrm files)");
-                            }
-                        });
                 }
                 Err(e) => {
                     picker.list_error = Some(e);
@@ -140,39 +124,35 @@ pub fn draw_avatar_window(
             }
 
             if let Some(err) = &picker.list_error {
-                ui.colored_label(egui::Color32::from_rgb(255, 120, 140), err);
+                ui.colored_label(theme::error(ui), err);
             }
             if let Some(err) = &picker.op_error {
-                ui.colored_label(egui::Color32::from_rgb(255, 160, 120), err);
+                ui.colored_label(theme::warn(ui), err);
             }
 
             ui.separator();
-            ui.label("Default idle VRMA (spawned with VRM unless idle_use_layer_stack):");
             ui.horizontal(|ui| {
                 ui.add_enabled(
                     false,
-                    egui::TextEdit::singleline(&mut a.idle_vrma_path).desired_width(220.0),
-                );
-                ui.checkbox(
-                    &mut a.idle_use_layer_stack,
-                    "idle via layer stack",
+                    egui::TextEdit::singleline(&mut a.idle_vrma_path).desired_width(200.0),
                 )
-                .on_hover_text(
-                    "When enabled, skip VRMA autoplay and drive base idle from avatar_defaults.idle_clip / imported JSON clip layer.",
-                );
+                .on_hover_text("Default idle VRMA, spawned with the VRM unless idle via layer stack is on.");
+                ui.checkbox(&mut a.idle_use_layer_stack, "idle via layers")
+                    .on_hover_text(
+                        "Skip VRMA autoplay and drive base idle from avatar_defaults.idle_clip / imported JSON clip layer.",
+                    );
             });
             ui.checkbox(
                 &mut a.auto_apply_avatar_defaults,
-                "auto-apply avatar defaults on load",
+                "auto-apply defaults on load",
             );
 
             ui.separator();
-            ui.label("Avatar defaults (per model):");
-            ui.monospace(avatar_defaults_path(&a.model_path).display().to_string());
-            ui.small(
-                "Saves current expression overrides (+ optional rest pose / layer set) to config/ModelOverrides/{stem}/avatar_defaults.json",
-            );
             let defaults_ui = &mut state.avatar_defaults;
+            ui.label("Avatar defaults").on_hover_text(format!(
+                "Saves current expression overrides (+ optional rest pose / layer set) to {}",
+                avatar_defaults_path(&settings.avatar.model_path).display()
+            ));
             ui.horizontal(|ui| {
                 ui.label("rest_pose:");
                 ui.add(
@@ -180,13 +160,11 @@ pub fn draw_avatar_window(
                         .hint_text("optional pose library name")
                         .desired_width(160.0),
                 );
-            });
-            ui.horizontal(|ui| {
                 ui.label("layer_set:");
                 ui.add(
                     egui::TextEdit::singleline(&mut defaults_ui.layer_set)
-                        .hint_text("optional anim_layer_sets name")
-                        .desired_width(160.0),
+                        .hint_text("optional set name")
+                        .desired_width(140.0),
                 );
             });
             ui.horizontal(|ui| {
@@ -207,13 +185,13 @@ pub fn draw_avatar_window(
                 {
                     pending_apply_defaults = true;
                 }
-                if ui.button("Import idle VRMA → layers").on_hover_text(
+                if ui.button(format!("Import idle {} layers", icons::ARROW_RIGHT)).on_hover_text(
                     "Bake [avatar].idle_vrma_path to JSON @ 10 fps, one layer-stack layer per bone, enable idle via layer stack",
                 ).clicked() {
                     pending_import_idle = true;
                 }
                 if ui
-                    .button("Edit idle in layer stack")
+                    .button("Edit idle")
                     .on_hover_text(
                         "Open Animation Layers with one layer per bone. Import idle VRMA first if no JSON clip exists.",
                     )
@@ -223,14 +201,14 @@ pub fn draw_avatar_window(
                 }
             });
             if let Some(msg) = &defaults_ui.message {
-                ui.colored_label(egui::Color32::from_rgb(160, 200, 160), msg);
+                ui.colored_label(theme::success(ui), msg);
             }
             if let Some(st) = defaults_status.as_deref() {
                 if let Some(msg) = &st.last_message {
                     ui.small(msg);
                 }
                 if let Some(err) = &st.last_error {
-                    ui.colored_label(egui::Color32::from_rgb(220, 120, 120), err);
+                    ui.colored_label(theme::error(ui), err);
                 }
             }
             if let Some(import) = import_state.as_deref() {
@@ -238,12 +216,13 @@ pub fn draw_avatar_window(
                     ui.small(s);
                 }
                 if let Some(e) = &import.error {
-                    ui.colored_label(egui::Color32::from_rgb(220, 120, 120), e);
+                    ui.colored_label(theme::error(ui), e);
                 }
             }
 
+            let a = &mut settings.avatar;
             ui.separator();
-            ui.label("world_position (pulls rig toward origin/focus):");
+            ui.label("Position").on_hover_text("world_position — pulls the rig toward origin/focus.");
             vec3_row(ui, "pos", &mut a.world_position, -20.0..=20.0);
             ui.add(
                 egui::Slider::new(&mut a.uniform_scale, 0.1..=10.0)
@@ -252,29 +231,23 @@ pub fn draw_avatar_window(
             );
 
             ui.separator();
-            ui.label("Root-motion locking (see Y-diagnostics below):");
-            ui.checkbox(
-                &mut a.lock_root_xz,
-                "lock_root_xz · snap hips X/Z to bind pose after VRMA",
-            );
-            ui.checkbox(
-                &mut a.lock_root_y,
-                "lock_root_y · snap hips Y to bind pose after VRMA",
-            );
-            ui.checkbox(
-                &mut a.lock_vrm_root_y,
-                "lock_vrm_root_y · hard-clamp VRM root entity Y to world_position.y",
-            );
+            ui.label("Root-motion locking").on_hover_text("See the Y-axis diagnostics below.");
+            ui.checkbox(&mut a.lock_root_xz, "lock_root_xz")
+                .on_hover_text("snap hips X/Z to bind pose after VRMA");
+            ui.checkbox(&mut a.lock_root_y, "lock_root_y")
+                .on_hover_text("snap hips Y to bind pose after VRMA");
+            ui.checkbox(&mut a.lock_vrm_root_y, "lock_vrm_root_y")
+                .on_hover_text("hard-clamp VRM root entity Y to world_position.y");
 
             ui.separator();
             y_diagnostics_readout(ui, &stats, a.world_position[1]);
 
             ui.separator();
-            ui.label("background_color (RGBA linear):");
+            ui.label("Background").on_hover_text("background_color — RGBA linear.");
             rgba_row(ui, &mut a.background_color);
 
             ui.separator();
-            ui.label("Window (restart required):");
+            ui.label("Window size").on_hover_text("Restart required to apply.");
             let mut w = a.window_width as i32;
             let mut h = a.window_height as i32;
             ui.horizontal(|ui| {
@@ -283,6 +256,7 @@ pub fn draw_avatar_window(
             });
             a.window_width = w.max(0) as u32;
             a.window_height = h.max(0) as u32;
+          });
         });
     settings.ui.show_avatar = open;
 
@@ -300,7 +274,7 @@ pub fn draw_avatar_window(
                 settings.avatar.idle_use_layer_stack,
             ) {
                 Ok(p) => {
-                    defaults_ui.message = Some(format!("saved → {}", p.display()));
+                    defaults_ui.message = Some(format!("saved {} {}", icons::ARROW_RIGHT, p.display()));
                 }
                 Err(e) => defaults_ui.message = Some(e),
             }
@@ -349,7 +323,8 @@ pub fn draw_avatar_window(
             match begin_library_animation_edit(&filename, &lib.library, store, stack) {
                 Ok(msg) => defaults_ui.message = Some(msg),
                 Err(e) => defaults_ui.message = Some(format!(
-                    "idle layer edit failed: {e} — run Import idle VRMA → layers first"
+                    "idle layer edit failed: {e} — run Import idle VRMA {} layers first",
+                    icons::ARROW_RIGHT
                 )),
             }
         } else {
@@ -449,7 +424,7 @@ fn y_diagnostics_readout(ui: &mut egui::Ui, stats: &AvatarDebugStats, target_y: 
                 },
             );
         });
-    ui.small(
+    ui.small("drift help").on_hover_text(
         "If 'VRM root · local Y' drifts, `lock_vrm_root_y` will pin it. \
          If 'Hips · local Y' drifts away from 'Hips · rest local Y', `lock_root_y` \
          will pin the hips. If neither drifts but the rig still looks bobbing, it's \
@@ -750,26 +725,52 @@ pub fn draw_live_test_window(
 
 pub fn channel_hub_panel(ui: &mut egui::Ui, settings: &mut Settings) {
     let i = &mut settings.ironclaw;
-    ui.label("We HOST the IronClaw-style WS hub. Peers connect to ws://<this-host>/ws.");
-    ui.label("bind_address (restart to rebind):");
-    ui.text_edit_singleline(&mut i.bind_address);
-    ui.label("auth_token (empty = accept any peer):");
-    ui.text_edit_singleline(&mut i.auth_token);
-    ui.label("module_name (identity on envelopes we publish):");
-    ui.text_edit_singleline(&mut i.module_name);
+    ui.label("IronClaw WS hub")
+        .on_hover_text("We HOST the IronClaw-style WS hub. Peers connect to ws://<this-host>/ws.");
+    ui.horizontal(|ui| {
+        ui.label("bind_address");
+        ui.text_edit_singleline(&mut i.bind_address);
+    })
+    .response
+    .on_hover_text("Restart to rebind.");
+    ui.horizontal(|ui| {
+        ui.label("auth_token");
+        ui.text_edit_singleline(&mut i.auth_token);
+    })
+    .response
+    .on_hover_text("Empty = accept any peer.");
+    ui.horizontal(|ui| {
+        ui.label("module_name");
+        ui.text_edit_singleline(&mut i.module_name);
+    })
+    .response
+    .on_hover_text("Identity on envelopes we publish.");
 }
 
 // ---------- Gateway -----------------------------------------------------------
 
 pub fn gateway_panel(ui: &mut egui::Ui, settings: &mut Settings) {
     let g = &mut settings.gateway;
-    ui.label("IronClaw gateway (used by the chat client; SSE + thread CRUD).");
-    ui.label("base_url (no trailing slash; restart to apply):");
-    ui.text_edit_singleline(&mut g.base_url);
-    ui.label("auth_token (override IRONCLAW_GATEWAY_TOKEN env; restart to apply):");
-    ui.text_edit_singleline(&mut g.auth_token);
-    ui.label("default_thread_id (empty = use whatever the gateway returns active):");
-    ui.text_edit_singleline(&mut g.default_thread_id);
+    ui.label("IronClaw gateway")
+        .on_hover_text("Used by the chat client; SSE + thread CRUD.");
+    ui.horizontal(|ui| {
+        ui.label("base_url");
+        ui.text_edit_singleline(&mut g.base_url);
+    })
+    .response
+    .on_hover_text("No trailing slash; restart to apply.");
+    ui.horizontal(|ui| {
+        ui.label("auth_token");
+        ui.text_edit_singleline(&mut g.auth_token);
+    })
+    .response
+    .on_hover_text("Overrides IRONCLAW_GATEWAY_TOKEN env; restart to apply.");
+    ui.horizontal(|ui| {
+        ui.label("default_thread_id");
+        ui.text_edit_singleline(&mut g.default_thread_id);
+    })
+    .response
+    .on_hover_text("Empty = use whatever the gateway returns active.");
 
     let mut t = g.request_timeout_ms as i64;
     if ui
@@ -806,9 +807,14 @@ pub fn tts_panel(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.text_edit_singleline(&mut t.kokoro_url);
     ui.label("voice:");
     ui.text_edit_singleline(&mut t.voice);
-    ui.label("response_format (wav | pcm | mp3 | …):");
-    ui.text_edit_singleline(&mut t.response_format);
-    ui.checkbox(&mut t.stream, "stream (leave off for one-shot WAV/PCM)");
+    ui.horizontal(|ui| {
+        ui.label("response_format");
+        ui.text_edit_singleline(&mut t.response_format);
+    })
+    .response
+    .on_hover_text("wav | pcm | mp3 | …");
+    ui.checkbox(&mut t.stream, "stream")
+        .on_hover_text("Leave off for one-shot WAV/PCM.");
     let mut sr = t.pcm_sample_rate as i64;
     if ui
         .add(
@@ -836,29 +842,31 @@ pub fn look_at_panel(ui: &mut egui::Ui, settings: &mut Settings) {
 
 pub fn mcp_panel(ui: &mut egui::Ui, settings: &mut Settings) {
     egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.label(
-            "RMCP streamable-HTTP server exposing the pose / A2F / Kimodo tools\n\
-             to IronClaw (and any other MCP client). Changes marked (restart) take\n\
-             effect on the next launch.",
+        ui.label("MCP server").on_hover_text(
+            "RMCP streamable-HTTP server exposing the pose / A2F / Kimodo tools to IronClaw \
+             (and any other MCP client). Changes marked (restart) take effect on next launch.",
         );
-
-        ui.separator();
-        ui.label("MCP server:");
         ui.checkbox(&mut settings.mcp.enabled, "enabled (restart)");
         ui.horizontal(|ui| {
-            ui.label("bind_address (restart):");
+            ui.label("bind_address");
             ui.text_edit_singleline(&mut settings.mcp.bind_address);
-        });
+        })
+        .response
+        .on_hover_text("Restart to apply.");
         ui.horizontal(|ui| {
-            ui.label("path (restart):");
+            ui.label("path");
             ui.text_edit_singleline(&mut settings.mcp.path);
-        });
+        })
+        .response
+        .on_hover_text("Restart to apply.");
         ui.horizontal(|ui| {
-            ui.label("bearer auth_token (restart, empty = none):");
+            ui.label("auth_token");
             ui.text_edit_singleline(&mut settings.mcp.auth_token);
-        });
+        })
+        .response
+        .on_hover_text("Bearer token; restart to apply, empty = none.");
         ui.colored_label(
-            egui::Color32::from_rgb(160, 200, 240),
+            theme::info(ui),
             format!(
                 "URL: http://{}{}{}",
                 settings.mcp.bind_address,
@@ -868,11 +876,18 @@ pub fn mcp_panel(ui: &mut egui::Ui, settings: &mut Settings) {
         );
 
         ui.separator();
-        ui.label("Audio2Face-3D:");
+        ui.label("Audio2Face-3D").on_hover_text(format!(
+            "Tip: run the `a2f_status` MCP tool to probe /v1/health/ready and confirm the \
+             gRPC stream opens. Test Kokoro{a}A2F with MCP `a2f_from_text`.",
+            a = icons::ARROW_RIGHT
+        ));
         ui.checkbox(&mut settings.a2f.enabled, "enabled (restart)");
         ui.checkbox(
             &mut settings.a2f.apply_from_tts,
-            "apply_from_tts — Kokoro → A2F → face clip after each chat utterance (restart)",
+            format!(
+                "apply_from_tts — Kokoro {a} A2F {a} face clip after each chat utterance (restart)",
+                a = icons::ARROW_RIGHT
+            ),
         );
         ui.horizontal(|ui| {
             ui.label("gRPC endpoint:");
@@ -883,16 +898,17 @@ pub fn mcp_panel(ui: &mut egui::Ui, settings: &mut Settings) {
             ui.text_edit_singleline(&mut settings.a2f.health_url);
         });
         ui.horizontal(|ui| {
-            ui.label("function_id (match A2F --function-id, e.g. Claire):");
+            ui.label("function_id");
             ui.text_edit_singleline(&mut settings.a2f.function_id);
-        });
-        ui.label(
-            "Tip: run the `a2f_status` MCP tool to probe `/v1/health/ready` and\n\
-             confirm the gRPC stream can be opened. Test Kokoro→A2F with MCP `a2f_from_text`.",
-        );
+        })
+        .response
+        .on_hover_text("Match A2F --function-id, e.g. Claire.");
 
         ui.separator();
-        ui.label("Kimodo defaults:");
+        ui.label("Kimodo defaults").on_hover_text(
+            "Kimodo connects to our channel hub as a WS peer and consumes `kimodo:generate` \
+             envelopes; see kimodo-motion-service.py.",
+        );
         let mut dur = settings.kimodo.default_duration_sec;
         if ui
             .add(egui::Slider::new(&mut dur, 0.5..=20.0).text("default_duration_sec"))
@@ -914,13 +930,9 @@ pub fn mcp_panel(ui: &mut egui::Ui, settings: &mut Settings) {
         {
             settings.kimodo.generate_timeout_sec = to.max(1) as u64;
         }
-        ui.label(
-            "Kimodo connects to our channel hub as a WS peer and consumes\n\
-             `kimodo:generate` envelopes; see kimodo-motion-service.py.",
-        );
-
         ui.separator();
-        ui.label("Pose / animation library (shared with the Node pose-controller):");
+        ui.label("Pose / animation library")
+            .on_hover_text("Shared with the Node pose-controller.");
         ui.horizontal(|ui| {
             ui.label("poses_dir:");
             ui.text_edit_singleline(&mut settings.pose_library.poses_dir);

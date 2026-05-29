@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::theme;
 
 use crate::plugins::debug_ui::workspaces::{ServiceHubTab, ServiceHubUiState};
 use crate::plugins::service_status::{ServiceId, ServiceState, ServiceStatus};
@@ -19,7 +20,7 @@ pub fn services_panel(
 
     let Some(status) = status else {
         ui.colored_label(
-            egui::Color32::from_rgb(235, 85, 100),
+            theme::error(ui),
             "ServiceStatus resource is missing — is ServiceStatusPlugin registered?",
         );
         return;

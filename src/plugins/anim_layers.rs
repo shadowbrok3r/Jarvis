@@ -83,6 +83,7 @@ impl Plugin for AnimLayersPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(LayerStackHandle::default())
             .insert_resource(RestPoseSnapshot::default())
+            .init_resource::<LayerGlitchMonitor>()
             .add_systems(Startup, maybe_auto_install_default_layers)
             // PostUpdate chain (see `pose_driver`): VRMA / `AnimationSystems` first, then
             // `sync_bone_entity_index` fills `IndexedBones`, we refresh rest locals, layers
@@ -915,6 +916,7 @@ fn advance_and_apply_layers(
     indexed: Option<Res<IndexedBones>>,
     hierarchy: Option<Res<BoneHierarchy>>,
     look_at: Option<Res<crate::plugins::look_at::LookAtRuntime>>,
+    mut glitch: ResMut<LayerGlitchMonitor>,
 ) {
     let Some(sender) = sender else { return };
     let Some(indexed) = indexed else { return };
@@ -937,8 +939,15 @@ fn advance_and_apply_layers(
         }
 
         let solo = stack.solo_mode.then_some(stack.solo_only_ids.clone());
-        let (accumulator, expressions) =
-            compose_layers(&mut stack.layers, &snap, hierarchy, dt, solo.as_ref(), gaze_active);
+        let (accumulator, expressions) = compose_layers(
+            &mut stack.layers,
+            &snap,
+            hierarchy,
+            dt,
+            solo.as_ref(),
+            gaze_active,
+            Some(&mut glitch),
+        );
         expressions_out = expressions;
 
         // Only emit bones whose composed rotation differs meaningfully
@@ -1043,6 +1052,130 @@ pub fn advance_layer_playheads(
 
 /// Sample every enabled layer once and fold into raw-local bone rotations +
 /// expression weights. Also advances layer playheads when `dt > 0`.
+/// One detected per-layer motion spike, surfaced to the debug UI so the
+/// offending layer can be flashed at the instant it pops.
+#[derive(Debug, Clone)]
+pub struct GlitchEvent {
+    /// [`LayerGlitchMonitor::now`] timestamp when the spike fired.
+    pub at: f32,
+    /// Peak angular velocity across the layer's bones, in degrees/second.
+    pub peak_dps: f32,
+    /// Bone that carried the peak (e.g. `rightLowerLeg`).
+    pub bone: String,
+    /// How many times the spike exceeded the layer's recent baseline.
+    pub ratio: f32,
+}
+
+/// Per-layer rolling state the monitor keeps between frames.
+#[derive(Debug, Default)]
+struct GlitchState {
+    /// Previous frame's raw sample (`bone -> delta/absolute quat`).
+    prev: HashMap<String, Quat>,
+    /// Exponentially-weighted mean of the per-frame peak angular velocity.
+    /// Used as the "normal motion" baseline a spike must clear.
+    ema_dps: f32,
+}
+
+/// Runtime-only diagnostic: watches each layer's sampled output frame-to-frame
+/// and records a [`GlitchEvent`] when a bone's angular velocity spikes far
+/// above that layer's own recent baseline — i.e. a discontinuity/pop that the
+/// steady procedural motion never produces. The debug UI reads `events` to
+/// flash the layer the moment it glitches, so the user can identify *which*
+/// layer jitters and *when*.
+#[derive(Resource, Debug)]
+pub struct LayerGlitchMonitor {
+    /// Master on/off for detection (cheap, but lets the user silence flashes).
+    pub enabled: bool,
+    /// A frame's peak must exceed `sensitivity × baseline` to count as a spike.
+    pub sensitivity: f32,
+    /// …and also clear this absolute floor (deg/s), so slow steady motion and
+    /// sub-degree numerical noise never trip a flash.
+    pub floor_dps: f32,
+    /// Seconds a flash stays lit in the UI after a spike.
+    pub flash_secs: f32,
+    /// Monotonic clock advanced by `dt` each live compose (own time base so the
+    /// UI fade is independent of the stack's pausable `clock`).
+    pub now: f32,
+    states: HashMap<u64, GlitchState>,
+    /// Last spike per layer id (most recent wins). Read by the UI.
+    pub events: HashMap<u64, GlitchEvent>,
+}
+
+impl Default for LayerGlitchMonitor {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sensitivity: 5.0,
+            floor_dps: 45.0,
+            flash_secs: 0.7,
+            now: 0.0,
+            states: HashMap::new(),
+            events: HashMap::new(),
+        }
+    }
+}
+
+impl LayerGlitchMonitor {
+    /// Compare this frame's sample to the last one for `layer_id`, update the
+    /// baseline, and record a [`GlitchEvent`] if the peak angular velocity is a
+    /// spike. `dt` must be > 0.
+    fn observe(&mut self, layer_id: u64, sample: &HashMap<String, Quat>, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        let floor = self.floor_dps;
+        let sensitivity = self.sensitivity;
+        let now = self.now;
+        let st = self.states.entry(layer_id).or_default();
+
+        let mut peak_dps = 0.0f32;
+        let mut peak_bone: Option<&str> = None;
+        for (bone, q) in sample {
+            if let Some(prev) = st.prev.get(bone) {
+                // `angle_between` is unsigned in [0, π]; per-frame that's the
+                // magnitude of the rotation this bone took this tick.
+                let dps = prev.angle_between(*q).to_degrees() / dt;
+                if dps > peak_dps {
+                    peak_dps = dps;
+                    peak_bone = Some(bone.as_str());
+                }
+            }
+        }
+
+        let base = st.ema_dps;
+        let is_spike = peak_dps >= floor && peak_dps >= sensitivity * (base + 1.0);
+        if is_spike {
+            if let Some(bone) = peak_bone {
+                self.events.insert(
+                    layer_id,
+                    GlitchEvent {
+                        at: now,
+                        peak_dps,
+                        bone: bone.to_string(),
+                        ratio: peak_dps / (base + 1.0),
+                    },
+                );
+            }
+        }
+
+        // Cap the spike's contribution so a single pop doesn't poison the
+        // baseline (otherwise the next frames' threshold would jump and we'd
+        // miss a repeating glitch).
+        let st = self.states.entry(layer_id).or_default();
+        let capped = peak_dps.min(base * 3.0 + floor);
+        st.ema_dps = base * 0.9 + capped * 0.1;
+        st.prev.clear();
+        st.prev
+            .extend(sample.iter().map(|(k, v)| (k.clone(), *v)));
+    }
+
+    /// Drop state/events for layers that no longer exist.
+    fn gc(&mut self, live_ids: &HashSet<u64>) {
+        self.states.retain(|id, _| live_ids.contains(id));
+        self.events.retain(|id, _| live_ids.contains(id));
+    }
+}
+
 pub fn compose_layers(
     layers: &mut [Layer],
     snap: &RestPoseSnapshot,
@@ -1050,9 +1183,16 @@ pub fn compose_layers(
     dt: f32,
     solo_only_ids: Option<&HashSet<u64>>,
     gaze_active: bool,
+    mut glitch: Option<&mut LayerGlitchMonitor>,
 ) -> (HashMap<String, Quat>, HashMap<String, f32>) {
     let mut accumulator: HashMap<String, Quat> = snap.rest.clone();
     let mut expressions_out: HashMap<String, f32> = HashMap::new();
+
+    if let Some(mon) = glitch.as_deref_mut() {
+        if mon.enabled {
+            mon.now += dt;
+        }
+    }
 
     for layer in &mut *layers {
         if let Some(ids) = solo_only_ids {
@@ -1069,6 +1209,14 @@ pub fn compose_layers(
         }
 
         let sample = sample_layer(layer, snap, dt, gaze_active);
+
+        // Spike detection runs on the raw driver output (before weight/mask
+        // fold) so it isolates the driver's own math, not blend dynamics.
+        if let Some(mon) = glitch.as_deref_mut() {
+            if mon.enabled && !sample.bones.is_empty() {
+                mon.observe(layer.id, &sample.bones, dt);
+            }
+        }
 
         for (bone, quat) in sample.bones {
             if !layer.mask.allows(&bone, hierarchy) {
@@ -1093,6 +1241,13 @@ pub fn compose_layers(
                 BlendMode::RestRelative => (current + weight_in * weight).clamp(0.0, 1.0),
             };
             expressions_out.insert(name, folded.clamp(0.0, 1.0));
+        }
+    }
+
+    if let Some(mon) = glitch.as_deref_mut() {
+        if mon.enabled {
+            let live: HashSet<u64> = layers.iter().map(|l| l.id).collect();
+            mon.gc(&live);
         }
     }
 
@@ -1412,7 +1567,7 @@ pub fn bake_layer_stack_to_animation(
 
     for _ in 0..frame_count {
         let (accumulator, expressions) =
-            compose_layers(&mut work.layers, snap, hierarchy, dt, None, false);
+            compose_layers(&mut work.layers, snap, hierarchy, dt, None, false, None);
 
         let mut bones = HashMap::with_capacity(accumulator.len());
         for (name, q_raw) in &accumulator {

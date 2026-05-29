@@ -21,6 +21,8 @@ use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::emotions::EmotionBinding;
+use jarvis_avatar::icons;
+use jarvis_avatar::theme;
 
 use crate::plugins::emotion_map::EmotionMapRes;
 use crate::plugins::pose_library_assets::PoseLibraryAssets;
@@ -94,13 +96,13 @@ pub fn draw_emotion_mappings_window(
             add_row(ui, &mut ui_state.emotion_mappings, &mut map);
             if let Some(status) = &ui_state.emotion_mappings.status {
                 ui.add_space(4.0);
-                ui.colored_label(egui::Color32::from_rgb(170, 200, 170), status);
+                ui.colored_label(theme::success(ui), status);
             }
             if let Some(status) = &map.last_status {
-                ui.colored_label(egui::Color32::from_rgb(170, 180, 220), status);
+                ui.colored_label(theme::info(ui), status);
             }
             if let Some(err) = &map.inner.last_error {
-                ui.colored_label(egui::Color32::from_rgb(220, 120, 120), err);
+                ui.colored_label(theme::error(ui), err);
             }
         });
     settings.ui.show_emotion_mappings = open;
@@ -112,7 +114,7 @@ fn toolbar(ui: &mut egui::Ui, _state: &mut EmotionMappingsUiState, map: &mut Emo
         ui.separator();
         if ui
             .button("Save")
-            .on_hover_text(format!("write → {}", map.inner.path.display()))
+            .on_hover_text(format!("write {} {}", icons::ARROW_RIGHT, map.inner.path.display()))
             .clicked()
         {
             map.save();
@@ -425,7 +427,7 @@ fn add_row(ui: &mut egui::Ui, state: &mut EmotionMappingsUiState, map: &mut Emot
                 .mappings
                 .contains_key(&state.new_label.trim().to_ascii_lowercase());
         if ui
-            .add_enabled(can_add, egui::Button::new("➕ Add"))
+            .add_enabled(can_add, egui::Button::new(format!("{} Add", icons::PLUS)))
             .clicked()
         {
             let label = state.new_label.trim().to_string();

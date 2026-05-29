@@ -24,6 +24,7 @@ use bevy_vrm1::prelude::{
 };
 
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::icons;
 
 use crate::plugins::mirror::{MirrorChain, MirrorState, chain_bones, mirror_quat, resolve_pair};
 use crate::plugins::pose_driver::{
@@ -84,12 +85,13 @@ pub fn rig_tab(
 
     ui.horizontal(|ui| {
         ui.toggle_value(&mut rig.edit_mode, "Edit mode")
-            .on_hover_text(
+            .on_hover_text(format!(
                 "Master toggle for viewport hover and axis-ring drag.\n\
-                 • LMB on an axis ring → rotate around that axis.\n\
-                 • RMB on a bone → select it (LMB never selects a bone).\n\
-                 • Off = standard orbit / pan / zoom only.",
-            );
+                 - LMB on an axis ring {arrow} rotate around that axis.\n\
+                 - RMB on a bone {arrow} select it (LMB never selects a bone).\n\
+                 - Off = standard orbit / pan / zoom only.",
+                arrow = icons::ARROW_RIGHT
+            ));
         ui.separator();
         ui.toggle_value(&mut rig.twist_drag_enabled, "Drag-rotate")
             .on_hover_text(
@@ -334,7 +336,7 @@ fn mirror_panel(
 
     egui::ComboBox::from_id_salt("rig_mirror_chain_pick")
         .width(220.0)
-        .selected_text("Mirror chain →")
+        .selected_text(format!("Mirror chain {}", icons::ARROW_RIGHT))
         .show_ui(ui, |ui| {
             for chain in [
                 MirrorChain::LeftArm,

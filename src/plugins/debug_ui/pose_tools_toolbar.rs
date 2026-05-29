@@ -24,6 +24,7 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::icons;
 
 use crate::plugins::mirror::{MirrorChain, MirrorState};
 use crate::plugins::pose_driver::PoseCommandSender;
@@ -220,7 +221,7 @@ fn panel_visibility_section(
     anim_resp.context_menu(|ui| {
         ui.label(egui::RichText::new("Animation Layers panel").strong());
         ui.separator();
-        let mut button = |ui: &mut egui::Ui, label: &str, target: &str| {
+        let mut button = |ui: &mut egui::Ui, label: String, target: &str| {
             let active = settings.ui.anim_layers_dock_side == target;
             if ui
                 .add_enabled(!active, egui::Button::new(label))
@@ -231,10 +232,10 @@ fn panel_visibility_section(
                 ui.close();
             }
         };
-        button(ui, "Bottom panel (dopesheet)", "bottom");
-        button(ui, "Left side panel", "left");
-        button(ui, "Right side panel", "right");
-        button(ui, "Floating window", "floating");
+        button(ui, format!("{} Bottom panel (dopesheet)", icons::DOCK_BOTTOM), "bottom");
+        button(ui, format!("{} Left side panel", icons::DOCK_LEFT), "left");
+        button(ui, format!("{} Right side panel", icons::DOCK_RIGHT), "right");
+        button(ui, format!("{} Floating window", icons::FLOATING), "floating");
     });
 
     // Quick read-out of the per-side active-tab map so users can see what's

@@ -29,7 +29,9 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::icons;
 use jarvis_avatar::pose_library::{AnimationFile, slugify};
+use jarvis_avatar::theme;
 
 use crate::plugins::anim_layer_sets::LayerSetsStore;
 use crate::plugins::anim_layers::{
@@ -131,6 +133,7 @@ pub struct AnimLayersWindowParams<'w> {
     pub hierarchy: Option<Res<'w, BoneHierarchy>>,
     pub layer_sets: Option<Res<'w, LayerSetsStore>>,
     pub snapshot: Option<Res<'w, BoneSnapshotHandle>>,
+    pub glitch: Option<ResMut<'w, crate::plugins::anim_layers::LayerGlitchMonitor>>,
 }
 
 pub fn draw_anim_layers_window(
@@ -145,6 +148,11 @@ pub fn draw_anim_layers_window(
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let Some(handle) = params.handle.as_ref() else { return };
 
+    // Partial-move the glitch monitor out of `params` so the render closure can
+    // borrow it mutably (config edits) independently of the immutable borrows it
+    // takes on the other `params` fields.
+    let mut glitch = params.glitch;
+
     let available_bones = available_bone_names(params.indexed.as_deref());
 
     let dock_side = settings.ui.anim_layers_dock_side.clone();
@@ -158,20 +166,19 @@ pub fn draw_anim_layers_window(
     let mut window_open = settings.ui.show_anim_layers;
 
     let mut render = |ui: &mut egui::Ui| {
-        anim_layers_dock_header(ui, &dock_side, &mut requested_dock_side);
-        ui.separator();
         handle.with_write(|stack| {
-            top_bar(ui, &mut state.anim_layers, stack, params.rest.as_deref());
-            ui.separator();
-            layer_sets_bar(
+            menu_bar_row(
                 ui,
                 &mut state.anim_layers,
                 stack,
+                params.rest.as_deref(),
                 params.layer_sets.as_deref(),
                 params.library.as_deref(),
+                glitch.as_deref_mut(),
+                &dock_side,
+                &mut requested_dock_side,
             );
-            ui.separator();
-            layer_filter_bar(ui, &mut state.anim_layers, stack);
+            master_filter_row(ui, &mut state.anim_layers, stack);
             ui.separator();
             egui::TopBottomPanel::bottom("anim_layers_inner_toolbar")
                 .exact_height(ADD_BAR_HEIGHT)
@@ -191,15 +198,16 @@ pub fn draw_anim_layers_window(
                 stack,
                 &available_bones,
                 params.hierarchy.as_deref(),
+                glitch.as_deref(),
             );
             if let Some(msg) = &state.anim_layers.status {
                 ui.add_space(4.0);
-                ui.colored_label(egui::Color32::from_rgb(160, 200, 160), msg);
+                ui.colored_label(theme::success(ui), msg);
             }
             if let Some(store) = params.layer_sets.as_deref() {
                 let guard = store.inner.read();
                 if let Some(err) = &guard.last_error {
-                    ui.colored_label(egui::Color32::from_rgb(220, 120, 120), err);
+                    ui.colored_label(theme::error(ui), err);
                 }
             }
         });
@@ -271,29 +279,217 @@ pub fn draw_anim_layers_window(
     }
 }
 
-/// Tiny header row inside the Animation Layers panel — lets users pick
-/// which side the panel docks to without going through the global
-/// toolbar.
-fn anim_layers_dock_header(
+/// Dock-side picker as a single icon menu button (replaces the old
+/// Bottom/Left/Right/Float text-button row).
+fn dock_menu_button(ui: &mut egui::Ui, current: &str, requested_dock_side: &mut Option<String>) {
+    let icon = match current {
+        "left" => icons::DOCK_LEFT,
+        "right" => icons::DOCK_RIGHT,
+        "bottom" => icons::DOCK_BOTTOM,
+        _ => icons::FLOATING,
+    };
+    ui.menu_button(format!("{} {}", icon, icons::CHEV_OPEN), |ui| {
+        let mut pick = |ui: &mut egui::Ui, label: String, target: &str| {
+            if ui
+                .add_enabled(current != target, egui::Button::new(label))
+                .clicked()
+            {
+                *requested_dock_side = Some(target.to_string());
+                ui.close();
+            }
+        };
+        pick(ui, format!("{} Bottom", icons::DOCK_BOTTOM), "bottom");
+        pick(ui, format!("{} Left", icons::DOCK_LEFT), "left");
+        pick(ui, format!("{} Right", icons::DOCK_RIGHT), "right");
+        pick(ui, format!("{} Float", icons::FLOATING), "floating");
+    })
+    .response
+    .on_hover_text("Dock side");
+}
+
+/// Compact top menu bar: dock picker, play/pause-all, Sets + Glitch popups,
+/// and a right-aligned layer/rest/clock readout.
+#[allow(clippy::too_many_arguments)]
+fn menu_bar_row(
     ui: &mut egui::Ui,
-    current: &str,
+    ui_state: &mut AnimLayersUiState,
+    stack: &mut LayerStack,
+    rest: Option<&RestPoseSnapshot>,
+    store: Option<&LayerSetsStore>,
+    library: Option<&PoseLibraryAssets>,
+    glitch: Option<&mut crate::plugins::anim_layers::LayerGlitchMonitor>,
+    dock_side: &str,
     requested_dock_side: &mut Option<String>,
 ) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Animation Layers").strong());
+        dock_menu_button(ui, dock_side, requested_dock_side);
         ui.separator();
-        ui.label(egui::RichText::new("Dock:").small().weak());
-        let mut button = |ui: &mut egui::Ui, label: &str, target: &str| {
-            let selected = current == target;
-            if ui.selectable_label(selected, label).clicked() && !selected {
-                *requested_dock_side = Some(target.to_string());
+        if ui
+            .button(icons::icon(icons::PLAY))
+            .on_hover_text("Play all layers")
+            .clicked()
+        {
+            for layer in &mut stack.layers {
+                layer.playing = true;
             }
-        };
-        button(ui, "Bottom", "bottom");
-        button(ui, "Left", "left");
-        button(ui, "Right", "right");
-        button(ui, "Float", "floating");
+            ui_state.status = Some("all layers playing".into());
+        }
+        if ui
+            .button(icons::icon(icons::PAUSE))
+            .on_hover_text("Pause all layers")
+            .clicked()
+        {
+            for layer in &mut stack.layers {
+                layer.playing = false;
+            }
+            ui_state.status = Some("all layers paused".into());
+        }
+        ui.separator();
+        ui.menu_button(format!("Sets {}", icons::CHEV_OPEN), |ui| {
+            layer_sets_bar(ui, ui_state, stack, store, library);
+        });
+        if let Some(mon) = glitch {
+            ui.menu_button(format!("{} Glitch", icons::STATUS_WARN), |ui| {
+                glitch_controls_bar(ui, mon);
+            });
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(format!("t {:.1}s", stack.clock))
+                    .monospace()
+                    .color(theme::weak_text(ui)),
+            );
+            ui.separator();
+            let bones = rest.map(|r| r.captured).unwrap_or(0);
+            ui.label(
+                egui::RichText::new(format!("{bones} rest"))
+                    .monospace()
+                    .color(if bones == 0 {
+                        theme::warn(ui)
+                    } else {
+                        theme::success(ui)
+                    }),
+            )
+            .on_hover_text(
+                "Bones with captured rest rotations. Procedural layers need this > 0 \
+                 (give it a second after VRM load).",
+            );
+            ui.separator();
+            ui.label(egui::RichText::new(format!("{} layers", stack.layers.len())).monospace());
+        });
     });
+}
+
+/// Master-enable checkbox on the left with a right-aligned filter / hide / solo
+/// cluster on the same row. A contextual filtered-actions row only appears
+/// while a non-empty filter matches layers.
+fn master_filter_row(ui: &mut egui::Ui, ui_state: &mut AnimLayersUiState, stack: &mut LayerStack) {
+    let hide_disabled = ui_state.hide_disabled_layers;
+    let filter = ui_state.layer_filter.trim().to_string();
+    let visible_ids: HashSet<u64> = stack
+        .layers
+        .iter()
+        .filter(|l| layer_visible_in_list(l, &filter, hide_disabled))
+        .map(|l| l.id)
+        .collect();
+
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut stack.master_enabled, "Master enabled")
+            .on_hover_text(
+                "When off, the stack is a no-op — the rig is fully driven by manual MCP / \
+                 idle VRMA / slider writes. On runs every layer below.",
+            );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if stack.solo_mode {
+                if ui
+                    .button(format!("Unsolo ({})", stack.solo_only_ids.len()))
+                    .on_hover_text("resume composing every enabled layer")
+                    .clicked()
+                {
+                    stack.solo_mode = false;
+                    stack.solo_only_ids.clear();
+                    ui_state.status = Some("solo off — all enabled layers compose again".into());
+                }
+            } else if ui
+                .button(format!("Solo ({})", visible_ids.len()))
+                .on_hover_text("compose & advance only the layers currently shown in the list")
+                .clicked()
+            {
+                if visible_ids.is_empty() {
+                    ui_state.status = Some("nothing visible to solo".into());
+                } else {
+                    stack.solo_mode = true;
+                    stack.solo_only_ids = visible_ids.clone();
+                    ui_state.status =
+                        Some(format!("solo: {} layer(s)", stack.solo_only_ids.len()));
+                }
+            }
+            ui.checkbox(&mut ui_state.hide_disabled_layers, "Hide disabled")
+                .on_hover_text("omit disabled layers from the list below");
+            if ui
+                .button(icons::icon(icons::CLOSE))
+                .on_hover_text("clear filter")
+                .clicked()
+            {
+                ui_state.layer_filter.clear();
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut ui_state.layer_filter)
+                    .hint_text("filter…")
+                    .desired_width(150.0),
+            );
+        });
+    });
+
+    let filter_now = ui_state.layer_filter.trim().to_string();
+    if !filter_now.is_empty() {
+        let matching_ids: Vec<u64> = stack
+            .layers
+            .iter()
+            .filter(|l| layer_matches_filter(l, &filter_now))
+            .map(|l| l.id)
+            .collect();
+        if !matching_ids.is_empty() {
+            ui.horizontal(|ui| {
+                ui.small(format!("{} match", matching_ids.len()));
+                if ui
+                    .small_button("Disable")
+                    .on_hover_text("disable every matching layer")
+                    .clicked()
+                {
+                    for layer in &mut stack.layers {
+                        if matching_ids.contains(&layer.id) {
+                            layer.enabled = false;
+                        }
+                    }
+                    ui_state.status = Some(format!("disabled {} layer(s)", matching_ids.len()));
+                }
+                if ui
+                    .small_button("Enable")
+                    .on_hover_text("re-enable every matching layer")
+                    .clicked()
+                {
+                    for layer in &mut stack.layers {
+                        if matching_ids.contains(&layer.id) {
+                            layer.enabled = true;
+                        }
+                    }
+                    ui_state.status = Some(format!("enabled {} layer(s)", matching_ids.len()));
+                }
+                if ui
+                    .small_button(icons::icon(icons::TRASH))
+                    .on_hover_text("permanently remove every matching layer")
+                    .clicked()
+                {
+                    let n = matching_ids.len();
+                    for id in matching_ids {
+                        stack.remove_layer(id);
+                    }
+                    ui_state.status = Some(format!("deleted {n} layer(s)"));
+                }
+            });
+        }
+    }
 }
 
 /// Build a sorted, de-duplicated bone list for dropdowns. Prefers the
@@ -312,69 +508,6 @@ fn available_bone_names(indexed: Option<&IndexedBones>) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-
-fn top_bar(
-    ui: &mut egui::Ui,
-    ui_state: &mut AnimLayersUiState,
-    stack: &mut LayerStack,
-    rest: Option<&RestPoseSnapshot>,
-) {
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut stack.master_enabled, "Master enabled")
-            .on_hover_text(
-                "When off, the stack is a no-op — the rig is fully driven by \
-                 manual MCP / idle VRMA / slider writes. Flip this on to run \
-                 every layer below.",
-            );
-        ui.separator();
-        if ui
-            .button("Play all")
-            .on_hover_text("Set every layer's playing flag to true")
-            .clicked()
-        {
-            for layer in &mut stack.layers {
-                layer.playing = true;
-            }
-            ui_state.status = Some("all layers playing".into());
-        }
-        if ui
-            .button("Pause all")
-            .on_hover_text("Set every layer's playing flag to false")
-            .clicked()
-        {
-            for layer in &mut stack.layers {
-                layer.playing = false;
-            }
-            ui_state.status = Some("all layers paused".into());
-        }
-        ui.separator();
-        ui.label(egui::RichText::new(format!("{} layer(s)", stack.layers.len())).monospace());
-        ui.separator();
-        let bones = rest.map(|r| r.captured).unwrap_or(0);
-        ui.label(
-            egui::RichText::new(format!("{bones} rest bones"))
-                .monospace()
-                .color(if bones == 0 {
-                    egui::Color32::from_rgb(200, 150, 120)
-                } else {
-                    egui::Color32::from_rgb(140, 200, 140)
-                }),
-        )
-        .on_hover_text(
-            "How many bones the layer-stack has captured rest rotations for. \
-             Procedural layers need this populated before they produce \
-             anything sensible — if it's stuck at 0 the pose driver's bone \
-             index isn't settled yet (give it a second after VRM load).",
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(format!("t = {:.2}s", stack.clock))
-                    .monospace()
-                    .color(egui::Color32::from_gray(150)),
-            );
-        });
-    });
-}
 
 fn layer_sets_bar(
     ui: &mut egui::Ui,
@@ -564,135 +697,56 @@ const BONE_SUBGROUP_ORDER: &[&str] = &[
     "Right Hand Fingers",
 ];
 
-fn layer_filter_bar(
+/// Controls for the per-layer jitter/glitch detector. Lets the user toggle the
+/// detector, tune how aggressively it flags discontinuities, and clear stale
+/// flashes. The flash itself is drawn in `layer_row`.
+fn glitch_controls_bar(
     ui: &mut egui::Ui,
-    ui_state: &mut AnimLayersUiState,
-    stack: &mut LayerStack,
+    mon: &mut crate::plugins::anim_layers::LayerGlitchMonitor,
 ) {
     ui.horizontal(|ui| {
-        ui.label("Filter:");
-        ui.add(
-            egui::TextEdit::singleline(&mut ui_state.layer_filter)
-                .hint_text("bone name, label, kind…")
-                .desired_width(ui.available_width().min(220.0)),
-        );
-        if ui.button("Clear").clicked() {
-            ui_state.layer_filter.clear();
-        }
-    });
-
-    let filter = ui_state.layer_filter.trim();
-    let filter_lc = filter.to_ascii_lowercase();
-    let matching_ids: Vec<u64> = stack
-        .layers
-        .iter()
-        .filter(|l| layer_matches_filter(l, filter))
-        .map(|l| l.id)
-        .collect();
-    if !filter_lc.is_empty() && !matching_ids.is_empty() {
-        ui.horizontal(|ui| {
-            ui.label(format!("{} matching", matching_ids.len()));
-            if ui
-                .button("Disable filtered")
-                .on_hover_text("disable every layer that matches the filter")
-                .clicked()
-            {
-                for layer in &mut stack.layers {
-                    if matching_ids.contains(&layer.id) {
-                        layer.enabled = false;
-                    }
-                }
-                ui_state.status = Some(format!("disabled {} layer(s)", matching_ids.len()));
-            }
-            if ui
-                .button("Enable filtered")
-                .on_hover_text("re-enable every layer that matches the filter")
-                .clicked()
-            {
-                for layer in &mut stack.layers {
-                    if matching_ids.contains(&layer.id) {
-                        layer.enabled = true;
-                    }
-                }
-                ui_state.status = Some(format!("enabled {} layer(s)", matching_ids.len()));
-            }
-            if ui
-                .button("Delete filtered")
-                .on_hover_text("permanently remove every layer that matches the filter")
-                .clicked()
-            {
-                let n = matching_ids.len();
-                for id in matching_ids {
-                    stack.remove_layer(id);
-                }
-                ui_state.status = Some(format!("deleted {n} layer(s)"));
-            }
-        });
-    }
-
-    let disabled_count = stack.layers.iter().filter(|l| !l.enabled).count();
-    ui.horizontal(|ui| {
-        if ui
-            .checkbox(&mut ui_state.hide_disabled_layers, "Hide disabled")
-            .on_hover_text("omit disabled layers from the list below")
-            .changed()
-            && ui_state.hide_disabled_layers
-        {
-            ui_state.status = Some(format!(
-                "hiding {disabled_count} disabled layer(s) — use Show disabled to reveal"
-            ));
-        }
-        if ui_state.hide_disabled_layers && disabled_count > 0 {
-            if ui
-                .button(format!("Show disabled ({disabled_count})"))
-                .on_hover_text("show disabled layers in the list again")
-                .clicked()
-            {
-                ui_state.hide_disabled_layers = false;
-                ui_state.status = Some(format!("showing {disabled_count} disabled layer(s)"));
-            }
-        }
-    });
-
-    let hide_disabled = ui_state.hide_disabled_layers;
-    let visible_ids: HashSet<u64> = stack
-        .layers
-        .iter()
-        .filter(|l| layer_visible_in_list(l, filter, hide_disabled))
-        .map(|l| l.id)
-        .collect();
-    ui.horizontal(|ui| {
-        if stack.solo_mode {
-            if ui
-                .button(format!("Unsolo ({})", stack.solo_only_ids.len()))
-                .on_hover_text("resume composing every enabled layer")
-                .clicked()
-            {
-                stack.solo_mode = false;
-                stack.solo_only_ids.clear();
-                ui_state.status = Some("solo off — all enabled layers compose again".into());
-            }
-            ui.colored_label(
-                egui::Color32::from_rgb(240, 200, 80),
-                egui::RichText::new("SOLO active").strong(),
-            );
-        } else if ui
-            .button(format!("Solo visible ({})", visible_ids.len()))
+        ui.checkbox(&mut mon.enabled, format!("{} Glitch detect", icons::STATUS_WARN))
             .on_hover_text(
-                "compose and advance playheads only for layers currently shown in the list",
-            )
+                "flash a layer's row when its bones jump faster than expected \
+                 (spots arm/leg/sway jitter as it happens)",
+            );
+        if !mon.enabled {
+            return;
+        }
+        ui.separator();
+        ui.label("Sensitivity")
+            .on_hover_text("lower = flag smaller spikes (multiplier over each layer's moving baseline)");
+        ui.add(
+            egui::Slider::new(&mut mon.sensitivity, 1.5..=12.0)
+                .fixed_decimals(1)
+                .suffix("×"),
+        );
+        ui.separator();
+        ui.label("Floor")
+            .on_hover_text("ignore spikes below this absolute angular speed (deg/s) — kills noise");
+        ui.add(
+            egui::Slider::new(&mut mon.floor_dps, 10.0..=180.0)
+                .fixed_decimals(0)
+                .suffix("°/s"),
+        );
+        ui.separator();
+        if ui
+            .button("Clear flashes")
+            .on_hover_text("dismiss any currently-flashing layers")
             .clicked()
         {
-            if visible_ids.is_empty() {
-                ui_state.status = Some("nothing visible to solo".into());
-            } else {
-                stack.solo_mode = true;
-                stack.solo_only_ids = visible_ids;
-                ui_state.status = Some(format!(
-                    "solo: {} layer(s) — only visible layers are composed",
-                    stack.solo_only_ids.len()
-                ));
-            }
+            mon.events.clear();
+        }
+        let active = mon
+            .events
+            .values()
+            .filter(|ev| mon.now - ev.at <= mon.flash_secs)
+            .count();
+        if active > 0 {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 170, 70),
+                format!("{active} flashing"),
+            );
         }
     });
 }
@@ -816,6 +870,7 @@ fn layer_list(
     stack: &mut LayerStack,
     bone_names: &[String],
     hierarchy: Option<&BoneHierarchy>,
+    glitch: Option<&crate::plugins::anim_layers::LayerGlitchMonitor>,
 ) {
     let mut to_remove: Option<u64> = None;
     let mut to_move: Option<(usize, isize)> = None;
@@ -864,7 +919,11 @@ fn layer_list(
                 let mut open = !ui_state.collapsed_groups.contains(&group);
                 ui.horizontal(|ui| {
                     if ui
-                        .small_button(if open { "▼" } else { "▶" })
+                        .small_button(icons::icon(if open {
+                            icons::CHEV_OPEN
+                        } else {
+                            icons::CHEV_CLOSED
+                        }))
                         .on_hover_text("expand / collapse group")
                         .clicked()
                     {
@@ -882,7 +941,7 @@ fn layer_list(
                                 continue;
                             };
                             let action =
-                                layer_row(ui, ui_state, idx, layer, bone_names, hierarchy);
+                                layer_row(ui, ui_state, idx, layer, bone_names, hierarchy, glitch);
                             match action {
                                 Some(LayerAction::Delete) => to_remove = Some(layer.id),
                                 Some(LayerAction::MoveUp) => to_move = Some((idx, -1)),
@@ -914,9 +973,9 @@ fn layer_list(
     if let Some((id, flip_reverse)) = to_duplicate {
         if let Some(new_id) = stack.duplicate_layer(id, flip_reverse) {
             ui_state.status = Some(if flip_reverse {
-                format!("duplicated layer {id} reversed → id {new_id}")
+                format!("duplicated layer {id} reversed {} id {new_id}", icons::ARROW_RIGHT)
             } else {
-                format!("duplicated layer {id} → id {new_id}")
+                format!("duplicated layer {id} {} id {new_id}", icons::ARROW_RIGHT)
             });
         }
     }
@@ -946,6 +1005,7 @@ fn layer_row(
     layer: &mut Layer,
     bone_names: &[String],
     hierarchy: Option<&BoneHierarchy>,
+    glitch: Option<&crate::plugins::anim_layers::LayerGlitchMonitor>,
 ) -> Option<LayerAction> {
     let mut action: Option<LayerAction> = None;
     let header_color = kind_color(layer.driver.kind_label());
@@ -961,9 +1021,41 @@ fn layer_row(
     };
     let expanded = ui_state.expanded.contains(&layer.id);
 
-    egui::Frame::group(ui.style())
-        .fill(frame_color)
+    // Glitch flash: if this layer popped within `flash_secs`, ring its frame in
+    // a fading amber→red stroke and stash the event so we can label it.
+    let flash = glitch.and_then(|mon| {
+        let ev = mon.events.get(&layer.id)?;
+        let age = mon.now - ev.at;
+        (age >= 0.0 && age <= mon.flash_secs).then(|| {
+            ui.ctx().request_repaint(); // keep the fade animating
+            let k = 1.0 - (age / mon.flash_secs).clamp(0.0, 1.0); // 1 fresh → 0 expired
+            (ev.clone(), k)
+        })
+    });
+
+    let mut frame = egui::Frame::group(ui.style()).fill(frame_color);
+    if let Some((_, k)) = &flash {
+        let a = (40.0 + 215.0 * *k) as u8;
+        frame = frame.stroke(egui::Stroke::new(
+            1.0 + 1.5 * *k,
+            egui::Color32::from_rgba_unmultiplied(255, 140, 40, a),
+        ));
+    }
+    frame
         .show(ui, |ui| {
+            if let Some((ev, _)) = &flash {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 170, 70),
+                    format!(
+                        "{} jitter {:.0}°/s @ {} ({:.1}× baseline, {:.2}s ago)",
+                        icons::STATUS_WARN,
+                        ev.peak_dps,
+                        ev.bone,
+                        ev.ratio,
+                        glitch.map(|m| m.now - ev.at).unwrap_or(0.0),
+                    ),
+                );
+            }
             // Row 1: fixed left (enable, kind, label) + right-aligned controls
             ui.horizontal(|ui| {
                 ui.checkbox(&mut layer.enabled, "");
@@ -988,12 +1080,16 @@ fn layer_row(
                     egui::vec2(right_w, ui.spacing().interact_size.y),
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
-                        if ui.button("Del").on_hover_text("delete layer").clicked() {
+                        if ui
+                            .button(icons::icon(icons::TRASH))
+                            .on_hover_text("delete layer")
+                            .clicked()
+                        {
                             action = Some(LayerAction::Delete);
                         }
-                        let expand_icon = if expanded { "-" } else { "+" };
+                        let expand_icon = if expanded { icons::MINUS } else { icons::PLUS };
                         if ui
-                            .button(expand_icon)
+                            .button(icons::icon(expand_icon))
                             .on_hover_text("expand / collapse driver params")
                             .clicked()
                         {
@@ -1003,10 +1099,18 @@ fn layer_row(
                                 ui_state.expanded.insert(layer.id);
                             }
                         }
-                        if ui.button("v").on_hover_text("move down").clicked() {
+                        if ui
+                            .button(icons::icon(icons::DOWN))
+                            .on_hover_text("move down")
+                            .clicked()
+                        {
                             action = Some(LayerAction::MoveDown);
                         }
-                        if ui.button("^").on_hover_text("move up").clicked() {
+                        if ui
+                            .button(icons::icon(icons::UP))
+                            .on_hover_text("move up")
+                            .clicked()
+                        {
                             action = Some(LayerAction::MoveUp);
                         }
                         if layer_supports_reverse(layer) {
@@ -1102,14 +1206,18 @@ fn timeline(ui: &mut egui::Ui, layer: &Layer) {
             egui::pos2(head_x, rect.top()),
             egui::pos2(head_x, rect.bottom()),
         ],
-        egui::Stroke::new(1.5, egui::Color32::from_rgb(240, 220, 120)),
+        egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 255, 240)),
     );
     // Time text.
     let label = if layer.duration.is_some() {
-        let rev = if layer.reverse { " ↺" } else { "" };
+        let rev = if layer.reverse {
+            format!(" {}", icons::REVERSE)
+        } else {
+            String::new()
+        };
         format!("{:0.2} / {:0.2}s{rev}", t, duration)
     } else {
-        format!("∞  phase {:0.2}s", t)
+        format!("{}  phase {:0.2}s", icons::INFINITY, t)
     };
     painter.text(
         rect.right_top() + egui::vec2(-4.0, 2.0),
@@ -1173,7 +1281,7 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
                 ui.horizontal(|ui| {
                     ui.monospace(name);
                     ui.add(egui::Slider::new(weight, 0.0..=1.0).fixed_decimals(2));
-                    if ui.button("×").clicked() {
+                    if ui.button(icons::icon(icons::CLOSE)).clicked() {
                         remove = Some(name.clone());
                     }
                 });
@@ -1283,8 +1391,9 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             slider(ui, "pitch (°)", pitch_deg, 0.0..=20.0);
             ui.label(
                 egui::RichText::new(format!(
-                    "gaze damp: {:.2} (1 = free, →0 = locked forward while a face is tracked)",
-                    damp
+                    "gaze damp: {:.2} (1 = free, {}0 = locked forward while a face is tracked)",
+                    damp,
+                    icons::ARROW_RIGHT
                 ))
                 .small()
                 .color(egui::Color32::from_gray(170)),
@@ -1368,7 +1477,10 @@ fn mask_and_blend(
         bone_names,
         hierarchy,
     );
-    ui.small("Empty include = all bones. Subtree chips (↓) match that bone and all descendants.");
+    ui.small(format!(
+        "Empty include = all bones. Subtree chips ({}) match that bone and all descendants.",
+        icons::SUBTREE
+    ));
 }
 
 /// Chip-style bone mask editor:
@@ -1407,7 +1519,7 @@ fn bone_mask_editor(
                     egui::Color32::from_rgb(220, 170, 120)
                 };
                 let chip = egui::Button::new(
-                    egui::RichText::new(format!("{bone}  ×"))
+                    egui::RichText::new(format!("{bone}  {}", icons::CLOSE))
                         .small()
                         .color(color),
                 );
@@ -1437,7 +1549,7 @@ fn bone_mask_editor(
                     .map(|h| h.descendants(bone).len())
                     .unwrap_or(1);
                 let chip = egui::Button::new(
-                    egui::RichText::new(format!("{bone} ↓  ×"))
+                    egui::RichText::new(format!("{bone} {}  {}", icons::SUBTREE, icons::CLOSE))
                         .small()
                         .color(egui::Color32::from_rgb(180, 230, 200)),
                 );
@@ -1483,7 +1595,7 @@ fn bone_mask_editor(
                 }
             });
 
-        ui.checkbox(&mut subtree_mode, "↓ subtree")
+        ui.checkbox(&mut subtree_mode, format!("{} subtree", icons::SUBTREE))
             .on_hover_text("When checked, bones added via + bone… include that bone and all descendants");
 
         // Manual input for bones outside the humanoid set. We stash the
@@ -1622,7 +1734,7 @@ fn add_layer_bar(
                 });
         }
 
-        if ui.button("➕ Add").clicked() {
+        if ui.button(format!("{} Add", icons::PLUS)).clicked() {
             match try_build_layer(ui_state, library) {
                 Ok(layer) => {
                     let id = stack.add_layer(layer);
@@ -1776,19 +1888,21 @@ fn try_build_layer(
 // Palette helpers
 // ---------------------------------------------------------------------------
 
+/// Neon / galactic palette for layer-kind tags and timeline fills.
 fn kind_color(kind: &str) -> egui::Color32 {
     match kind {
-        "clip" => egui::Color32::from_rgb(120, 190, 255),
-        "pose-hold" => egui::Color32::from_rgb(200, 160, 255),
-        "expression-hold" => egui::Color32::from_rgb(255, 180, 220),
-        "breathing" => egui::Color32::from_rgb(160, 220, 160),
-        "auto-blink" => egui::Color32::from_rgb(220, 200, 130),
-        "weight-shift" => egui::Color32::from_rgb(210, 150, 220),
-        "finger-fidget" => egui::Color32::from_rgb(220, 160, 140),
-        "toe-fidget" => egui::Color32::from_rgb(140, 200, 220),
-        "look-around" => egui::Color32::from_rgb(170, 210, 150),
-        "sway" => egui::Color32::from_rgb(150, 190, 210),
-        "arm-sway" => egui::Color32::from_rgb(200, 180, 150),
-        _ => egui::Color32::from_gray(200),
+        "clip" => egui::Color32::from_rgb(0, 229, 255),
+        "pose-hold" => egui::Color32::from_rgb(179, 102, 255),
+        "expression-hold" => egui::Color32::from_rgb(255, 64, 200),
+        "breathing" => egui::Color32::from_rgb(0, 255, 170),
+        "auto-blink" => egui::Color32::from_rgb(255, 209, 64),
+        "weight-shift" => egui::Color32::from_rgb(150, 80, 255),
+        "finger-fidget" => egui::Color32::from_rgb(255, 122, 89),
+        "toe-fidget" => egui::Color32::from_rgb(64, 224, 255),
+        "look-around" => egui::Color32::from_rgb(148, 255, 70),
+        "sway" => egui::Color32::from_rgb(70, 160, 255),
+        "arm-sway" => egui::Color32::from_rgb(255, 170, 60),
+        "leg-shift" => egui::Color32::from_rgb(124, 110, 255),
+        _ => egui::Color32::from_rgb(170, 180, 210),
     }
 }

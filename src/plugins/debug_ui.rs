@@ -21,8 +21,6 @@ pub mod sections;
 pub mod services;
 mod widgets;
 pub mod workspaces;
-
-use bevy_egui::egui::Layout;
 pub use chat::ChatUiState;
 pub use pose_controller::{KimodoClientRes, PoseControllerUiState};
 
@@ -34,6 +32,7 @@ use bevy_vrm1::prelude::Vrma;
 
 use jarvis_avatar::act::Emotion;
 use jarvis_avatar::config::Settings;
+use jarvis_avatar::icons;
 
 use crate::plugins::chat_pipeline_status::ChatPipelineStatus;
 use crate::plugins::jarvis_ios_hub::write_vrm_graphics_override;
@@ -49,7 +48,6 @@ impl Plugin for DebugUiPlugin {
         app.add_plugins(EguiPlugin::default())
             .init_resource::<DebugUiState>()
             .init_resource::<workspaces::ServiceHubUiState>()
-            .init_resource::<workspaces::GraphicsWorkspaceUiState>()
             .init_resource::<workspaces::DiagnosticsUiState>()
             .add_systems(
                 Update,
@@ -81,18 +79,12 @@ impl Plugin for DebugUiPlugin {
             )
             .add_systems(
                 EguiPrimaryContextPass,
-                network_trace::draw_network_trace_window
-                    .after(home_assistant::draw_home_assistant_window),
-            )
-            .add_systems(
-                EguiPrimaryContextPass,
                 (
                     workspaces::draw_service_hub_window,
-                    workspaces::draw_graphics_workspace_window,
                     workspaces::draw_diagnostics_workspace_window,
                 )
                     .chain()
-                    .after(network_trace::draw_network_trace_window),
+                    .after(home_assistant::draw_home_assistant_window),
             )
             .add_systems(
                 EguiPrimaryContextPass,
@@ -209,7 +201,6 @@ pub struct DebugUiState {
 /// Transient state for the Avatar window's runtime VRM list (not persisted to `user.toml`).
 #[derive(Debug, Clone)]
 pub struct AvatarVrmPickerState {
-    pub filter: String,
     pub selected_basename: Option<String>,
     /// `list_vrm_models` / missing `assets/models` (refreshed each frame while the window is open).
     pub list_error: Option<String>,
@@ -220,7 +211,6 @@ pub struct AvatarVrmPickerState {
 impl Default for AvatarVrmPickerState {
     fn default() -> Self {
         Self {
-            filter: String::new(),
             selected_basename: None,
             list_error: None,
             op_error: None,
@@ -298,6 +288,9 @@ fn draw_menu_bar(
 
     if state.first_run {
         state.first_run = false;
+        let mut fonts = egui::FontDefinitions::default();
+        jarvis_avatar::icons::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
         match serde_json::from_str::<egui::Style>(jarvis_avatar::egui_theme::STYLE) {
             Ok(theme) => {
                 let style = std::sync::Arc::new(theme);
@@ -313,9 +306,7 @@ fn draw_menu_bar(
     egui::TopBottomPanel::top("jarvis_menu_bar").show(ctx, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             file_menu(ui, &mut settings, &mut state, &mut exit);
-            view_menu(ui, &mut settings);
-            test_menu(ui, &mut settings);
-            help_menu(ui, &mut state);
+            view_menu(ui, &mut settings, &mut state);
 
             // Pose-controller-only inline strip — transport buttons + rig
             // hover hint live here so the user always sees `[edit] hover: …
@@ -346,12 +337,13 @@ fn draw_menu_bar(
             // appear right-to-left, so the **first** widget is rightmost.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(msg) = &state.save_status {
-                    ui.colored_label(egui::Color32::from_rgb(150, 200, 150), msg);
+                    ui.colored_label(jarvis_avatar::theme::success(ui), msg);
                 }
+                let info = jarvis_avatar::theme::info(ui);
                 ui.label(
                     egui::RichText::new(pipeline.menu_line())
                         .small()
-                        .color(egui::Color32::from_rgb(200, 215, 255)),
+                        .color(info),
                 );
                 if pose_controller_open {
                     pose_controller::playback_indicator(ui, &active_anim);
@@ -421,8 +413,8 @@ fn file_menu(
     });
 }
 
-fn view_menu(ui: &mut egui::Ui, settings: &mut Settings) {
-    ui.menu_button("View", |ui| {
+fn view_menu(ui: &mut egui::Ui, settings: &mut Settings, state: &mut DebugUiState) {
+    ui.menu_button(icons::menu_item(icons::EYE, "View"), |ui| {
         ui.checkbox(&mut settings.ui.show_chat, "Chat");
         ui.separator();
 
@@ -438,15 +430,14 @@ fn view_menu(ui: &mut egui::Ui, settings: &mut Settings) {
                 "Tabbed view of Channel hub, Gateway, TTS, MCP, and the live \
                  Services overview — replaces five floating windows.",
             );
-        ui.checkbox(&mut settings.ui.show_graphics_workspace, "Graphics workspace")
+        ui.checkbox(&mut settings.ui.show_graphics_advanced, "Graphics Workspace")
             .on_hover_text(
-                "Tabbed Lights / Advanced / Look-at view — Look-at no longer needs \
-                 its own floating window.",
+                "Tabbed Lights / Post / Materials / Look-at — lighting, post-processing, \
+                 material visibility, the MToon editor, and gaze tuning in one window.",
             );
         ui.checkbox(&mut settings.ui.show_diagnostics_workspace, "Diagnostics")
             .on_hover_text(
-                "Chat pipeline, avatar Y-axis stats, and a quick-jump to the \
-                 Network trace window.",
+                "Chat pipeline, avatar Y-axis stats, and the live Network trace tab.",
             );
 
         // ---- Pose Controller per-tab show/hide ----
@@ -463,8 +454,15 @@ fn view_menu(ui: &mut egui::Ui, settings: &mut Settings) {
         ui.checkbox(&mut settings.ui.show_camera, "Camera");
         ui.checkbox(&mut settings.ui.show_emotion_mappings, "Emotion Mappings");
         ui.checkbox(&mut settings.ui.show_home_assistant, "Home Assistant");
-        ui.checkbox(&mut settings.ui.show_graphics_advanced, "Graphics Advanced");
-        ui.checkbox(&mut settings.ui.show_network_trace, "Network trace");
+        ui.checkbox(&mut settings.ui.show_live_test, "Live / Test bench");
+
+        ui.separator();
+        ui.menu_button(icons::menu_item(icons::INFO, "Help"), |ui| {
+            if ui.button("About jarvis-avatar").clicked() {
+                state.show_about = true;
+                ui.close();
+            }
+        });
     });
 }
 
@@ -493,8 +491,8 @@ fn pose_panel_visibility_menu(ui: &mut egui::Ui, settings: &mut Settings) {
                         .insert(key.clone(), "hidden".to_string());
                 }
             }
-            ui.menu_button(format!("{} ▼", side_label_for(&current)), |ui| {
-                let mut send = |ui: &mut egui::Ui, label: &str, target: &str| {
+            ui.menu_button(format!("{} {}", side_label_for(&current), icons::CHEV_OPEN), |ui| {
+                let mut send = |ui: &mut egui::Ui, label: String, target: &str| {
                     let active = current == target;
                     if ui
                         .add_enabled(!active, egui::Button::new(label))
@@ -507,12 +505,12 @@ fn pose_panel_visibility_menu(ui: &mut egui::Ui, settings: &mut Settings) {
                         ui.close();
                     }
                 };
-                send(ui, "◀ Left", "left");
-                send(ui, "▶ Right", "right");
-                send(ui, "▼ Bottom", "bottom");
-                send(ui, "⬚ Floating", "floating");
+                send(ui, format!("{} Left", icons::DOCK_LEFT), "left");
+                send(ui, format!("{} Right", icons::DOCK_RIGHT), "right");
+                send(ui, format!("{} Bottom", icons::DOCK_BOTTOM), "bottom");
+                send(ui, format!("{} Floating", icons::FLOATING), "floating");
                 ui.separator();
-                if ui.button("↺ Default side").clicked() {
+                if ui.button(format!("{} Default side", icons::REVERSE)).clicked() {
                     settings.ui.pose_controller_tab_dock_sides.remove(&key);
                     ui.close();
                 }
@@ -527,8 +525,8 @@ fn anim_layers_visibility_menu(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.horizontal(|ui| {
         ui.checkbox(&mut settings.ui.show_anim_layers, "Animation Layers");
         let current = settings.ui.anim_layers_dock_side.clone();
-        ui.menu_button(format!("{} ▼", side_label_for(&current)), |ui| {
-            let mut button = |ui: &mut egui::Ui, label: &str, target: &str| {
+        ui.menu_button(format!("{} {}", side_label_for(&current), icons::CHEV_OPEN), |ui| {
+            let mut button = |ui: &mut egui::Ui, label: String, target: &str| {
                 let active = current == target;
                 if ui
                     .add_enabled(!active, egui::Button::new(label))
@@ -539,21 +537,21 @@ fn anim_layers_visibility_menu(ui: &mut egui::Ui, settings: &mut Settings) {
                     ui.close();
                 }
             };
-            button(ui, "▼ Bottom (dopesheet)", "bottom");
-            button(ui, "◀ Left", "left");
-            button(ui, "▶ Right", "right");
-            button(ui, "⬚ Floating", "floating");
+            button(ui, format!("{} Bottom (dopesheet)", icons::DOCK_BOTTOM), "bottom");
+            button(ui, format!("{} Left", icons::DOCK_LEFT), "left");
+            button(ui, format!("{} Right", icons::DOCK_RIGHT), "right");
+            button(ui, format!("{} Floating", icons::FLOATING), "floating");
         });
     });
 }
 
 fn side_label_for(side: &str) -> &'static str {
     match side {
-        "left" => "◀",
-        "right" => "▶",
-        "bottom" => "▼",
-        "floating" => "⬚",
-        "hidden" => "⊘",
+        "left" => icons::DOCK_LEFT,
+        "right" => icons::DOCK_RIGHT,
+        "bottom" => icons::DOCK_BOTTOM,
+        "floating" => icons::FLOATING,
+        "hidden" => icons::HIDDEN,
         _ => "—",
     }
 }
