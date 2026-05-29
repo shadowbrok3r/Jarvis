@@ -7,9 +7,23 @@ use std::collections::HashSet;
 use bevy::gltf::GltfMaterialName;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use bevy_egui::egui::{self, RichText};
+use bevy_egui::egui::{self, FontDefinitions, FontFamily, RichText};
 use bevy_egui::EguiContexts;
 use bevy_vrm1::prelude::{MToonMaterial, Vrm};
+
+fn install_phosphor_fonts(fonts: &mut FontDefinitions) {
+    egui_phosphor::add_to_fonts(fonts, egui_phosphor::Variant::Regular);
+    for family in [
+        FontFamily::Name("Regular".into()),
+        FontFamily::Name("Bold".into()),
+    ] {
+        if let Some(keys) = fonts.families.get_mut(&family) {
+            if !keys.iter().any(|k| k == "phosphor") {
+                keys.insert(1.min(keys.len()), "phosphor".into());
+            }
+        }
+    }
+}
 
 /// Which egui panels are open (View menu toggles).
 #[derive(Resource)]
@@ -38,6 +52,9 @@ pub fn jarvis_ios_egui_apply_theme(
     }
     state.theme_applied = true;
     let ctx = contexts.ctx_mut()?;
+    let mut fonts = egui::FontDefinitions::default();
+    install_phosphor_fonts(&mut fonts);
+    ctx.set_fonts(fonts);
     match serde_json::from_str::<egui::Style>(crate::jarvis_egui_theme::STYLE_JSON) {
         Ok(theme) => {
             ctx.set_style(std::sync::Arc::new(theme));
@@ -109,10 +126,10 @@ pub fn jarvis_ios_egui_windows(
             .resizable(true)
             .open(&mut show)
             .show(ctx, |ui| {
-                ui.label(RichText::new("Material visibility").strong());
-                ui.small(
-                    "Toggles apply immediately. Save stores per-model on this device; hub sync can also push desktop presets.",
-                );
+                ui.label(RichText::new("Material visibility").strong())
+                    .on_hover_text(
+                        "Toggles apply immediately. Save stores per-model on this device; hub sync can also push desktop presets.",
+                    );
                 if material_keys.is_empty() {
                     ui.label("No materials found under the active VRM.");
                 } else {
@@ -168,13 +185,8 @@ pub fn jarvis_ios_egui_windows(
             .resizable(true)
             .open(&mut show)
             .show(ctx, |ui| {
-                ui.label(RichText::new("Verbosity").strong());
-                ui.label(
-                    RichText::new(
-                        "Lower verbosity = fewer file writes. Use QUIET / OFF to test whether logging contributes to frame stalls.",
-                    )
-                    .weak()
-                    .small(),
+                ui.label(RichText::new("Verbosity").strong()).on_hover_text(
+                    "Lower verbosity = fewer file writes. Use QUIET / OFF to test whether logging contributes to frame stalls.",
                 );
                 ui.separator();
                 let prev = current;

@@ -44,6 +44,7 @@ pub const CHEV_CLOSED: &str = p::CARET_RIGHT;
 pub const STOP: &str = p::STOP;
 pub const PLAY: &str = p::PLAY;
 pub const PAUSE: &str = p::PAUSE;
+pub const REWIND: &str = p::SKIP_BACK;
 
 pub const UP: &str = p::ARROW_UP;
 pub const DOWN: &str = p::ARROW_DOWN;

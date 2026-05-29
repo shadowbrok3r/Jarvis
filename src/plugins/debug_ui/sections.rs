@@ -4,8 +4,9 @@
 //! when the matching `settings.ui.show_*` flag is false so closed windows cost
 //! almost nothing. The menu bar in [`super::draw_menu_bar`] flips those flags.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, egui};
+use bevy_egui::egui;
 
 use jarvis_avatar::act::Emotion;
 use jarvis_avatar::avatar_defaults::{avatar_defaults_path, load_avatar_defaults};
@@ -33,36 +34,44 @@ use crate::plugins::vrma_clip_import::{StartVrmaClipImport, VrmaClipImportState}
 
 // ---------- Avatar ------------------------------------------------------------
 
-pub fn draw_avatar_window(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<Settings>,
-    mut state: ResMut<DebugUiState>,
-    stats: Res<AvatarDebugStats>,
-    pose_tx: Option<Res<PoseCommandSender>>,
-    snapshot: Option<Res<BoneSnapshotHandle>>,
-    defaults_status: Option<Res<AvatarDefaultsStatus>>,
-    layer_sets: Option<Res<LayerSetsStore>>,
-    library: Option<Res<PoseLibraryAssets>>,
-    stack: Option<Res<LayerStackHandle>>,
-    import_state: Option<Res<VrmaClipImportState>>,
-    mut import_events: MessageWriter<StartVrmaClipImport>,
+/// Resources/queries the Avatar panel needs, bundled to stay under Bevy's
+/// per-system param limit when combined into the Settings workspace.
+#[derive(SystemParam)]
+pub struct AvatarPanelParams<'w> {
+    pub stats: Res<'w, AvatarDebugStats>,
+    pub pose_tx: Option<Res<'w, PoseCommandSender>>,
+    pub snapshot: Option<Res<'w, BoneSnapshotHandle>>,
+    pub defaults_status: Option<Res<'w, AvatarDefaultsStatus>>,
+    pub layer_sets: Option<Res<'w, LayerSetsStore>>,
+    pub library: Option<Res<'w, PoseLibraryAssets>>,
+    pub stack: Option<Res<'w, LayerStackHandle>>,
+    pub import_state: Option<Res<'w, VrmaClipImportState>>,
+    pub import_events: MessageWriter<'w, StartVrmaClipImport>,
+}
+
+/// Avatar panel — rendered as a tab inside the Settings window.
+pub fn avatar_panel(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    state: &mut DebugUiState,
+    p: &mut AvatarPanelParams,
 ) {
-    if !settings.ui.show_avatar {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let mut open = settings.ui.show_avatar;
+    let AvatarPanelParams {
+        stats,
+        pose_tx,
+        snapshot,
+        defaults_status,
+        layer_sets,
+        library,
+        stack,
+        import_state,
+        import_events,
+    } = p;
     let mut pending_save_defaults = false;
     let mut pending_apply_defaults = false;
     let mut pending_import_idle = false;
     let mut pending_edit_idle_layers = false;
-    egui::Window::new("Avatar")
-        .default_width(380.0)
-        .default_height(560.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
+    {
           egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let a = &mut settings.avatar;
             ui.horizontal(|ui| {
@@ -257,8 +266,7 @@ pub fn draw_avatar_window(
             a.window_width = w.max(0) as u32;
             a.window_height = h.max(0) as u32;
           });
-        });
-    settings.ui.show_avatar = open;
+    }
 
     if pending_save_defaults {
         let defaults_ui = &mut state.avatar_defaults;
@@ -444,22 +452,9 @@ fn format_y(y: f32) -> String {
 
 // ---------- Camera ------------------------------------------------------------
 
-pub fn draw_camera_window(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<Settings>,
-    mut state: ResMut<DebugUiState>,
-) {
-    if !settings.ui.show_camera {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let mut open = settings.ui.show_camera;
-    egui::Window::new("Camera")
-        .default_width(360.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
+/// Camera panel — rendered as a tab inside the Settings window.
+pub fn camera_panel(ui: &mut egui::Ui, settings: &mut Settings, state: &mut DebugUiState) {
+    {
             let cam = &mut settings.camera;
             ui.label("LMB orbit · MMB pan · scroll zoom");
             ui.separator();
@@ -514,8 +509,7 @@ pub fn draw_camera_window(
             {
                 state.resnap_requested = true;
             }
-        });
-    settings.ui.show_camera = open;
+    }
 }
 
 // ---------- Graphics ----------------------------------------------------------
@@ -585,140 +579,114 @@ pub fn draw_basic_graphics_inline(ui: &mut egui::Ui, settings: &mut Settings) {
 
 // ---------- Live / Test -------------------------------------------------------
 
-pub fn draw_live_test_window(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<Settings>,
-    mut state: ResMut<DebugUiState>,
-    hub_state: Res<HubState>,
-    hub_out: Option<Res<HubBroadcast>>,
-    mut chat_writer: MessageWriter<ChatCompleteMessage>,
-    mut look_writer: MessageWriter<LookAtRequestMessage>,
-    mut tts_writer: MessageWriter<TtsSpeakMessage>,
+/// Live / Test bench panel — now rendered as a tab inside the Diagnostics
+/// window (see `draw_diagnostics_workspace_window`).
+#[allow(clippy::too_many_arguments)]
+pub fn live_test_panel(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    test: &mut super::LiveTestUiState,
+    hub_state: &HubState,
+    hub_out: Option<&HubBroadcast>,
+    chat_writer: &mut MessageWriter<ChatCompleteMessage>,
+    look_writer: &mut MessageWriter<LookAtRequestMessage>,
+    tts_writer: &mut MessageWriter<TtsSpeakMessage>,
 ) {
-    if !settings.ui.show_live_test {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let mut open = settings.ui.show_live_test;
-    egui::Window::new("Live · Test bench")
-        .default_width(380.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                let (status, color) = if hub_state.peer_count > 0 {
-                    (
-                        format!("{} peer(s) connected", hub_state.peer_count),
-                        egui::Color32::from_rgb(80, 200, 120),
-                    )
-                } else if hub_state.bound_to.is_some() {
-                    (
-                        "listening · no peers yet".into(),
-                        egui::Color32::from_rgb(230, 200, 80),
-                    )
-                } else {
-                    ("not bound".into(), egui::Color32::from_rgb(220, 90, 90))
-                };
-                ui.horizontal(|ui| {
-                    ui.label("Channel hub:");
-                    ui.colored_label(color, status);
-                    if let Some(bind) = &hub_state.bound_to {
-                        ui.label(format!("@ ws://{bind}/ws"));
-                    }
-                });
-
-                ui.separator();
-                ui.label("Broadcast input:text to all peers (simulate a Wyoming utterance):");
-                ui.horizontal(|ui| {
-                    let avail = (ui.available_width() - 90.0).max(140.0);
-                    ui.add_sized(
-                        [avail, 22.0],
-                        egui::TextEdit::singleline(&mut state.test.input_text),
-                    );
-                    let disabled = hub_out.is_none();
-                    if ui
-                        .add_enabled(!disabled, egui::Button::new("send"))
-                        .on_disabled_hover_text("hub broadcaster unavailable")
-                        .clicked()
-                    {
-                        if let Some(out) = hub_out.as_deref() {
-                            out.send_input_text(
-                                &state.test.input_text,
-                                &settings.ironclaw.module_name,
-                            );
-                        }
-                    }
-                });
-
-                ui.separator();
-                ui.label("Expression test (fires ACT-style ChatCompleteMessage):");
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_label("emotion")
-                        .selected_text(format!("{:?}", state.test.emotion))
-                        .show_ui(ui, |ui| {
-                            for e in [
-                                Emotion::Happy,
-                                Emotion::Sad,
-                                Emotion::Angry,
-                                Emotion::Think,
-                                Emotion::Surprised,
-                                Emotion::Awkward,
-                                Emotion::Question,
-                                Emotion::Curious,
-                                Emotion::Neutral,
-                            ] {
-                                ui.selectable_value(
-                                    &mut state.test.emotion,
-                                    e.clone(),
-                                    format!("{e:?}"),
-                                );
-                            }
-                        });
-                    if ui.button("trigger").clicked() {
-                        let emotion_label = format!("{:?}", state.test.emotion).to_lowercase();
-                        chat_writer.write(ChatCompleteMessage {
-                            content: format!("<|ACT:{{\"emotion\":\"{emotion_label}\"}}|>test"),
-                        });
-                    }
-                });
-
-                ui.separator();
-                ui.label("Look-at target (rig-local meters):");
-                vec3_row(ui, "look", &mut state.test.look_at, -3.0..=3.0);
-                ui.horizontal(|ui| {
-                    if ui.button("look at point").clicked() {
-                        look_writer.write(LookAtRequestMessage {
-                            local_target: Some(Vec3::from_array(state.test.look_at)),
-                        });
-                    }
-                    if ui.button("back to cursor").clicked() {
-                        look_writer.write(LookAtRequestMessage { local_target: None });
-                    }
-                });
-
-                ui.separator();
-                ui.label("TTS test (Kokoro):");
-                ui.horizontal(|ui| {
-                    let avail = (ui.available_width() - 90.0).max(140.0);
-                    ui.add_sized(
-                        [avail, 22.0],
-                        egui::TextEdit::singleline(&mut state.test.tts_text),
-                    );
-                    let disabled = !settings.tts.enabled;
-                    if ui
-                        .add_enabled(!disabled, egui::Button::new("speak"))
-                        .on_disabled_hover_text("tts.enabled is false")
-                        .clicked()
-                    {
-                        tts_writer.write(TtsSpeakMessage {
-                            text: state.test.tts_text.clone(),
-                        });
-                    }
-                });
-            });
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let (status, color) = if hub_state.peer_count > 0 {
+            (
+                format!("{} peer(s) connected", hub_state.peer_count),
+                theme::success(ui),
+            )
+        } else if hub_state.bound_to.is_some() {
+            ("listening · no peers yet".into(), theme::warn(ui))
+        } else {
+            ("not bound".into(), theme::error(ui))
+        };
+        ui.horizontal(|ui| {
+            ui.label("Channel hub:");
+            ui.colored_label(color, status);
+            if let Some(bind) = &hub_state.bound_to {
+                ui.label(format!("@ ws://{bind}/ws"));
+            }
         });
-    settings.ui.show_live_test = open;
+
+        ui.separator();
+        ui.label("Broadcast input:text to all peers (simulate a Wyoming utterance):");
+        ui.horizontal(|ui| {
+            let avail = (ui.available_width() - 90.0).max(140.0);
+            ui.add_sized([avail, 22.0], egui::TextEdit::singleline(&mut test.input_text));
+            let disabled = hub_out.is_none();
+            if ui
+                .add_enabled(!disabled, egui::Button::new("send"))
+                .on_disabled_hover_text("hub broadcaster unavailable")
+                .clicked()
+            {
+                if let Some(out) = hub_out {
+                    out.send_input_text(&test.input_text, &settings.ironclaw.module_name);
+                }
+            }
+        });
+
+        ui.separator();
+        ui.label("Expression test (fires ACT-style ChatCompleteMessage):");
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_label("emotion")
+                .selected_text(format!("{:?}", test.emotion))
+                .show_ui(ui, |ui| {
+                    for e in [
+                        Emotion::Happy,
+                        Emotion::Sad,
+                        Emotion::Angry,
+                        Emotion::Think,
+                        Emotion::Surprised,
+                        Emotion::Awkward,
+                        Emotion::Question,
+                        Emotion::Curious,
+                        Emotion::Neutral,
+                    ] {
+                        ui.selectable_value(&mut test.emotion, e.clone(), format!("{e:?}"));
+                    }
+                });
+            if ui.button("trigger").clicked() {
+                let emotion_label = format!("{:?}", test.emotion).to_lowercase();
+                chat_writer.write(ChatCompleteMessage {
+                    content: format!("<|ACT:{{\"emotion\":\"{emotion_label}\"}}|>test"),
+                });
+            }
+        });
+
+        ui.separator();
+        ui.label("Look-at target (rig-local meters):");
+        vec3_row(ui, "look", &mut test.look_at, -3.0..=3.0);
+        ui.horizontal(|ui| {
+            if ui.button("look at point").clicked() {
+                look_writer.write(LookAtRequestMessage {
+                    local_target: Some(Vec3::from_array(test.look_at)),
+                });
+            }
+            if ui.button("back to cursor").clicked() {
+                look_writer.write(LookAtRequestMessage { local_target: None });
+            }
+        });
+
+        ui.separator();
+        ui.label("TTS test (Kokoro):");
+        ui.horizontal(|ui| {
+            let avail = (ui.available_width() - 90.0).max(140.0);
+            ui.add_sized([avail, 22.0], egui::TextEdit::singleline(&mut test.tts_text));
+            let disabled = !settings.tts.enabled;
+            if ui
+                .add_enabled(!disabled, egui::Button::new("speak"))
+                .on_disabled_hover_text("tts.enabled is false")
+                .clicked()
+            {
+                tts_writer.write(TtsSpeakMessage {
+                    text: test.tts_text.clone(),
+                });
+            }
+        });
+    });
 }
 
 // ---------- Channel hub (IronClaw protocol) -----------------------------------

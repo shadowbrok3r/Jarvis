@@ -82,6 +82,10 @@ pub struct UiSettings {
     pub show_avatar: bool,
     #[serde(default)]
     pub show_camera: bool,
+    /// Phase-5 consolidation: unified "Settings" workspace combining the
+    /// Avatar / Camera / Emotion mappings / Graphics panels in tabs.
+    #[serde(default)]
+    pub show_settings: bool,
     #[serde(default)]
     pub show_live_test: bool,
     #[serde(default)]
@@ -166,6 +170,7 @@ impl Default for UiSettings {
             show_chat: true,
             show_avatar: false,
             show_camera: false,
+            show_settings: false,
             show_live_test: false,
             show_pose_controller: false,
             pose_controller_dock_side: default_pose_dock_side(),
@@ -1453,6 +1458,15 @@ impl Settings {
 
         if !u.show_diagnostics_workspace && u.show_network_trace {
             u.show_diagnostics_workspace = true;
+        }
+
+        if !u.show_settings
+            && (u.show_avatar
+                || u.show_camera
+                || u.show_emotion_mappings
+                || u.show_graphics_advanced)
+        {
+            u.show_settings = true;
         }
     }
 }

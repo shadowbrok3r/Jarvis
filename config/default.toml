@@ -284,6 +284,7 @@ path = "config/mtoon_overrides.json"
 show_chat = true
 show_avatar = false
 show_camera = false
+show_settings = false
 show_live_test = false
 show_pose_controller = true
 show_rig_editor = false

@@ -315,9 +315,13 @@ private struct AvatarLayersPanelView: View {
                     ForEach($layers) { $row in
                         VStack(alignment: .leading, spacing: 6) {
                             Toggle(isOn: $row.enabled) {
-                                VStack(alignment: .leading) {
-                                    Text(row.label).font(.subheadline)
-                                    Text(row.kind).font(.caption2).foregroundStyle(.secondary)
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text(row.label)
+                                        .font(.subheadline)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    Text("[\(row.kind)]")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
                                 }
                             }
                             .onChange(of: row.enabled) { _, on in

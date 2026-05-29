@@ -14,14 +14,13 @@
 //!   without going through the View menu — handy when the workspace gets
 //!   crowded.
 //!
-//! The toolbar only renders when `settings.ui.show_pose_controller` is true
-//! (the same gate that controls the rest of the Pose Controller surface),
-//! and it's positioned via `egui::TopBottomPanel::top` so it sits between
-//! the menu bar and the rig hover-hint strip drawn by
-//! [`super::pose_controller::draw_pose_controller_window`].
+//! These controls used to live in a second `TopBottomPanel` under the menu
+//! bar. They now render **inline in the application menu bar** via
+//! [`pose_tools_menu`], called from `draw_menu_bar` when
+//! `settings.ui.show_pose_controller` is true.
 
-use bevy::prelude::*;
-use bevy_egui::{EguiContexts, egui};
+use bevy::prelude::Color;
+use bevy_egui::egui;
 
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::icons;
@@ -33,40 +32,24 @@ use crate::plugins::rig_editor::{RigEditAxis, RigEditorState};
 use super::pose_controller::{PoseControllerTab, PoseControllerUiState};
 use super::rig_editor::{mirror_chain_action, mirror_one_bone};
 
-/// Render the global Pose Tools toolbar — see module docs.
-pub fn draw_pose_tools_toolbar(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<Settings>,
-    mut state: ResMut<super::DebugUiState>,
-    mut rig: ResMut<RigEditorState>,
-    mut mirror: ResMut<MirrorState>,
-    sender: Option<Res<PoseCommandSender>>,
+/// Render the Pose Tools controls inline in the top menu bar — edit-mode
+/// menu, axis picker, mirror menu, and panel visibility menu.
+pub fn pose_tools_menu(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    rig: &mut RigEditorState,
+    mirror: &mut MirrorState,
+    pc: &mut PoseControllerUiState,
+    sender: Option<&PoseCommandSender>,
 ) {
-    if !settings.ui.show_pose_controller {
-        return;
-    }
-    if settings.ui.pose_tools_toolbar_pos == "none" {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-
-    egui::TopBottomPanel::top("pose_tools_global_toolbar").show(ctx, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            edit_mode_section(ui, &mut rig);
-            ui.separator();
-            axis_section(ui, &mut rig);
-            ui.separator();
-            mirror_section(ui, &mut state.pose_controller, &mut mirror, sender.as_deref());
-            ui.separator();
-            panel_visibility_section(ui, &mut settings, &state.pose_controller);
-        });
-    });
+    edit_mode_section(ui, rig);
+    axis_section(ui, rig);
+    mirror_section(ui, pc, mirror, sender);
+    panel_visibility_section(ui, settings, pc);
 }
 
 fn edit_mode_section(ui: &mut egui::Ui, rig: &mut RigEditorState) {
-    ui.menu_button("Edit", |ui| {
+    ui.menu_button(icons::menu_item(icons::EDIT, "Edit"), |ui| {
         ui.toggle_value(&mut rig.edit_mode, "Edit mode")
             .on_hover_text(
                 "Master toggle for viewport hover and axis-ring drag.\n\
@@ -112,48 +95,43 @@ fn mirror_section(
     mirror: &mut MirrorState,
     sender: Option<&PoseCommandSender>,
 ) {
-    ui.toggle_value(&mut mirror.realtime, "Realtime mirror")
-        .on_hover_text(
-            "When on, every bone-list slider drag and rig-handle rotation \
-             also writes the mirrored value to the partner bone.",
-        );
-    if ui
-        .button("Mirror selected")
-        .on_hover_text(
-            "Snapshot the currently selected bone's rotation and apply the \
-             mirrored value to the partner.",
-        )
-        .clicked()
-    {
-        mirror_one_bone(pc, sender, mirror);
-    }
-    egui::ComboBox::from_id_salt("global_mirror_chain_pick")
-        .width(180.0)
-        .selected_text("Mirror chain")
-        .show_ui(ui, |ui| {
-            for chain in [
-                MirrorChain::LeftArm,
-                MirrorChain::RightArm,
-                MirrorChain::LeftLeg,
-                MirrorChain::RightLeg,
-                MirrorChain::LeftHand,
-                MirrorChain::RightHand,
-                MirrorChain::LeftSide,
-                MirrorChain::RightSide,
-                MirrorChain::AllPaired,
-            ] {
-                if ui.button(chain.label()).clicked() {
-                    mirror_chain_action(pc, sender, chain);
-                    pc.mirror_chain_status = Some(format!("Mirrored chain: {}", chain.label()));
-                }
+    ui.menu_button(icons::menu_label("Mirror"), |ui| {
+        ui.toggle_value(&mut mirror.realtime, "Realtime mirror")
+            .on_hover_text(
+                "When on, every bone-list slider drag and rig-handle rotation \
+                 also writes the mirrored value to the partner bone.",
+            );
+        if ui
+            .button("Mirror selected")
+            .on_hover_text(
+                "Snapshot the currently selected bone's rotation and apply the \
+                 mirrored value to the partner.",
+            )
+            .clicked()
+        {
+            mirror_one_bone(pc, sender, mirror);
+            ui.close();
+        }
+        ui.separator();
+        ui.label(egui::RichText::new("Mirror chain").small().weak());
+        for chain in [
+            MirrorChain::LeftArm,
+            MirrorChain::RightArm,
+            MirrorChain::LeftLeg,
+            MirrorChain::RightLeg,
+            MirrorChain::LeftHand,
+            MirrorChain::RightHand,
+            MirrorChain::LeftSide,
+            MirrorChain::RightSide,
+            MirrorChain::AllPaired,
+        ] {
+            if ui.button(chain.label()).clicked() {
+                mirror_chain_action(pc, sender, chain);
+                pc.mirror_chain_status = Some(format!("Mirrored chain: {}", chain.label()));
+                ui.close();
             }
-        });
-    if let Some(name) = &pc.mirror_chain_status {
-        ui.colored_label(
-            egui::Color32::from_rgb(140, 200, 220),
-            egui::RichText::new(name).small(),
-        );
-    }
+        }
+    });
 }
 
 /// Per-panel show/hide row. Each tab gets a small toggle button — clicking
@@ -165,7 +143,7 @@ fn panel_visibility_section(
     settings: &mut Settings,
     pc: &PoseControllerUiState,
 ) {
-    ui.menu_button("Panels", |ui| {
+    ui.menu_button(icons::menu_item(icons::GRID, "Panels"), |ui| {
         let default_side = settings.ui.pose_controller_dock_side.clone();
         for tab in PoseControllerTab::all() {
             let key = tab.config_key().to_string();
@@ -176,7 +154,7 @@ fn panel_visibility_section(
                 .cloned()
                 .unwrap_or_else(|| default_side.clone());
             let visible = current != "hidden";
-            let label = format!("{}{}", tab.label(), side_glyph_for(&current));
+            let label = format!("{} {}", tab.label(), side_glyph_for(&current));
             let resp = ui
                 .selectable_label(visible, label)
                 .on_hover_text(format!(
@@ -205,9 +183,9 @@ fn panel_visibility_section(
     ui.separator();
     let anim_visible = settings.ui.show_anim_layers;
     let anim_label = if anim_visible {
-        format!("Anim Layers {}", anim_layers_side_glyph(&settings.ui.anim_layers_dock_side))
+        format!("Anim Layers {}", side_glyph_for(&settings.ui.anim_layers_dock_side))
     } else {
-        "Anim Layers (off)".to_string()
+        format!("Anim Layers {}", icons::HIDDEN)
     };
     let anim_resp = ui
         .selectable_label(anim_visible, anim_label)
@@ -259,21 +237,11 @@ fn panel_visibility_section(
 
 fn side_glyph_for(side: &str) -> &'static str {
     match side {
-        "left" => " [L]",
-        "right" => " [R]",
-        "bottom" => " [B]",
-        "floating" => " [F]",
-        "hidden" => " (off)",
-        _ => "",
-    }
-}
-
-fn anim_layers_side_glyph(side: &str) -> &'static str {
-    match side {
-        "left" => "[L]",
-        "right" => "[R]",
-        "bottom" => "[B]",
-        "floating" => "[F]",
+        "left" => icons::DOCK_LEFT,
+        "right" => icons::DOCK_RIGHT,
+        "bottom" => icons::DOCK_BOTTOM,
+        "floating" => icons::FLOATING,
+        "hidden" => icons::HIDDEN,
         _ => "",
     }
 }

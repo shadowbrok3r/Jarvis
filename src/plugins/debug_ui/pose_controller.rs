@@ -988,15 +988,13 @@ fn render_tab_body(
             sender,
             snapshot,
             indexed,
-            &mut rig_params.rig,
-            &mut rig_params.mirror,
-            &settings.pose_controller,
+            settings,
+            rig_params,
             undo,
         ),
         PoseControllerTab::Rig => super::rig_editor::rig_tab(
             ui,
             pc,
-            settings,
             sender,
             indexed,
             rig_params,
@@ -1266,18 +1264,46 @@ fn library_tab(
     let poses = library.poses();
     let search = state.search.trim().to_ascii_lowercase();
     let cat = state.category_filter.trim().to_ascii_lowercase();
-    egui::ScrollArea::both()
+
+    // Group filtered poses by category so each renders in its own collapsible
+    // section. BTreeMap keeps the section order stable/alphabetical.
+    let mut grouped: std::collections::BTreeMap<String, Vec<PoseFile>> =
+        std::collections::BTreeMap::new();
+    for pose in poses {
+        if !search.is_empty() && !pose.name.to_ascii_lowercase().contains(&search) {
+            continue;
+        }
+        if !cat.is_empty() && pose.category.to_ascii_lowercase() != cat {
+            continue;
+        }
+        let key = if pose.category.trim().is_empty() {
+            "(uncategorized)".to_string()
+        } else {
+            pose.category.clone()
+        };
+        grouped.entry(key).or_default().push(pose);
+    }
+
+    egui::ScrollArea::vertical()
         .max_height(ui.available_height() / 1.1)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for pose in poses {
-                if !search.is_empty() && !pose.name.to_ascii_lowercase().contains(&search) {
-                    continue;
-                }
-                if !cat.is_empty() && pose.category.to_ascii_lowercase() != cat {
-                    continue;
-                }
-                pose_row(ui, state, library, sender, &categories, &pose, snapshot, undo);
+            if grouped.is_empty() {
+                ui.label(egui::RichText::new("no poses match").weak());
+                return;
+            }
+            for (category, poses) in &grouped {
+                let header = format!("{} ({})", category, poses.len());
+                egui::CollapsingHeader::new(header)
+                    .id_salt(format!("pose-cat-section-{category}"))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for pose in poses {
+                            pose_row(
+                                ui, state, library, sender, &categories, pose, snapshot, undo,
+                            );
+                        }
+                    });
             }
         });
 }
@@ -1340,146 +1366,39 @@ fn pose_row(
     undo: Option<&UndoHistory>,
 ) {
     let editing = state.editing_pose.as_deref() == Some(pose.name.as_str());
-    let renaming = state.renaming_pose.as_deref() == Some(pose.name.as_str());
 
-    let frame_color = if editing {
-        egui::Color32::from_rgba_unmultiplied(80, 100, 160, 36)
-    } else {
-        ui.style().visuals.faint_bg_color
-    };
+    if editing {
+        pose_edit_row(ui, state, library, categories, pose);
+        return;
+    }
 
-    let frame = egui::Frame::group(ui.style()).fill(frame_color);
-    let response = frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
-            // Title cell — click toggles inline rename mode.
-            if renaming {
-                let buf = state
-                    .rename_buf
-                    .entry(pose.name.clone())
-                    .or_insert_with(|| pose.name.clone());
-                let r = ui.add(egui::TextEdit::singleline(buf).desired_width(160.0));
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    let new_name = buf.trim().to_string();
-                    if !new_name.is_empty() && new_name != pose.name {
-                        match library.library.rename_pose(&pose.name, &new_name) {
-                            Ok(()) => {
-                                state.status = Some(format!("{} → {new_name}", pose.name));
-                                library.mark_dirty();
-                            }
-                            Err(e) => state.status = Some(format!("rename failed: {e}")),
-                        }
-                    }
-                    state.renaming_pose = None;
-                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    state.renaming_pose = None;
-                }
-                if ui.button("save").on_hover_text("Save (Enter)").clicked() {
-                    let new_name = buf.trim().to_string();
-                    if !new_name.is_empty() && new_name != pose.name {
-                        let _ = library.library.rename_pose(&pose.name, &new_name);
-                        library.mark_dirty();
-                    }
-                    state.renaming_pose = None;
-                }
-                if ui.button("cancel").on_hover_text("Cancel (Esc)").clicked() {
-                    state.renaming_pose = None;
-                }
-            } else {
-                let title_resp = ui
-                    .add(
-                        egui::Label::new(egui::RichText::new(&pose.name).strong())
-                            .sense(egui::Sense::click()),
-                    )
-                    .on_hover_text("Click to rename. Click row body to apply this pose.");
-                if title_resp.clicked() {
-                    state.renaming_pose = Some(pose.name.clone());
-                }
-                ui.label(egui::RichText::new(format!("[{}]", pose.category)).weak());
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if editing {
-                    // Edit-mode actions: category combobox + delete.
-                    if ui
-                        .button("delete")
-                        .on_hover_text("Delete this pose from the library")
-                        .clicked()
-                    {
-                        match library.library.delete_pose(&pose.name) {
-                            Ok(()) => {
-                                state.status = Some(format!("deleted {}", pose.name));
-                                library.mark_dirty();
-                                state.editing_pose = None;
-                            }
-                            Err(e) => state.status = Some(format!("delete failed: {e}")),
-                        }
-                    }
-                    ui.label("category:");
-                    if state.new_category_buf.contains_key(&pose.name) {
-                        let buf = state
-                            .new_category_buf
-                            .get_mut(&pose.name)
-                            .unwrap();
-                        let r = ui.add(egui::TextEdit::singleline(buf).desired_width(110.0));
-                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            commit_new_category(library, state, &pose.name);
-                        }
-                        if ui.button("save").clicked() {
-                            commit_new_category(library, state, &pose.name);
-                        }
-                        if ui.button("cancel").clicked() {
-                            state.new_category_buf.remove(&pose.name);
-                        }
-                    } else {
-                        let cat_buf = state
-                            .category_buf
-                            .entry(pose.name.clone())
-                            .or_insert_with(|| pose.category.clone());
-                        egui::ComboBox::from_id_salt(format!("pose-cat-{}", pose.name))
-                            .width(120.0)
-                            .selected_text(cat_buf.clone())
-                            .show_ui(ui, |ui| {
-                                for c in categories {
-                                    if ui.selectable_label(cat_buf == c, c).clicked() {
-                                        *cat_buf = c.clone();
-                                        let _ = library
-                                            .library
-                                            .update_pose_category(&pose.name, c);
-                                        library.mark_dirty();
-                                        state.status =
-                                            Some(format!("{} category → {c}", pose.name));
-                                    }
-                                }
-                                ui.separator();
-                                if ui
-                                    .selectable_label(false, "+ New category…")
-                                    .clicked()
-                                {
-                                    state
-                                        .new_category_buf
-                                        .insert(pose.name.clone(), String::new());
-                                }
-                            });
-                    }
-                    if ui.button("done").clicked() {
-                        state.editing_pose = None;
-                    }
-                } else if ui
-                    .button("edit")
-                    .on_hover_text("Enter edit mode (rename, change category, delete)")
-                    .clicked()
-                {
-                    state.editing_pose = Some(pose.name.clone());
-                }
-            });
-        });
+    // Compact, full-row clickable: the pose name is a selectable label that
+    // fills the row width (minus the trailing edit button) and applies the pose
+    // on click. Hover styling comes from the selectable, so the row reads as
+    // interactive. The edit button is rendered separately so it stays clickable.
+    let mut apply = false;
+    let row_h = ui.spacing().interact_size.y;
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        if ui
+            .button(icons::icon(icons::EDIT))
+            .on_hover_text("Edit (rename, change category, delete)")
+            .clicked()
+        {
+            state.editing_pose = Some(pose.name.clone());
+        }
+        let resp = jarvis_avatar::egui_widgets::full_width_selectable_row(
+            ui,
+            false,
+            egui::RichText::new(&pose.name).strong(),
+            row_h,
+        )
+        .on_hover_text("Apply this pose");
+        if resp.clicked() {
+            apply = true;
+        }
     });
 
-    // Row body click — apply the pose. We use a separate `interact` so the
-    // title click (rename) and the row click (apply) don't fight.
-    let row_id = response.response.id.with("__pose_apply");
-    let click_resp = ui.interact(response.response.rect, row_id, egui::Sense::click());
-    if click_resp.clicked() && !renaming {
+    if apply {
         if let Some(s) = sender {
             if let (Some(h), Some(snap)) = (undo, snapshot) {
                 h.record(snap, &state.bone_euler, format!("apply pose {}", pose.name));
@@ -1504,6 +1423,109 @@ fn pose_row(
             state.status = Some(format!("applied {}", pose.name));
         }
     }
+}
+
+/// Inline edit row for a single pose: rename field, category picker, delete,
+/// and done. Shown in place of the normal row while `state.editing_pose`
+/// matches this pose.
+fn pose_edit_row(
+    ui: &mut egui::Ui,
+    state: &mut PoseControllerUiState,
+    library: &PoseLibraryAssets,
+    categories: &[String],
+    pose: &PoseFile,
+) {
+    let frame = egui::Frame::group(ui.style())
+        .fill(egui::Color32::from_rgba_unmultiplied(80, 100, 160, 36));
+    frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("name");
+            let buf = state
+                .rename_buf
+                .entry(pose.name.clone())
+                .or_insert_with(|| pose.name.clone());
+            let r = ui.add(egui::TextEdit::singleline(buf).desired_width(150.0));
+            let commit = (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                || ui
+                    .button(icons::icon(icons::SAVE))
+                    .on_hover_text("Rename (Enter)")
+                    .clicked();
+            if commit {
+                let new_name = buf.trim().to_string();
+                if !new_name.is_empty() && new_name != pose.name {
+                    match library.library.rename_pose(&pose.name, &new_name) {
+                        Ok(()) => {
+                            state.status = Some(format!("{} → {new_name}", pose.name));
+                            library.mark_dirty();
+                            state.editing_pose = Some(new_name);
+                        }
+                        Err(e) => state.status = Some(format!("rename failed: {e}")),
+                    }
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("category");
+            if state.new_category_buf.contains_key(&pose.name) {
+                let buf = state.new_category_buf.get_mut(&pose.name).unwrap();
+                let r = ui.add(egui::TextEdit::singleline(buf).desired_width(110.0));
+                if (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.button(icons::icon(icons::SAVE)).clicked()
+                {
+                    commit_new_category(library, state, &pose.name);
+                }
+                if ui.button(icons::icon(icons::CLOSE)).clicked() {
+                    state.new_category_buf.remove(&pose.name);
+                }
+            } else {
+                let cat_buf = state
+                    .category_buf
+                    .entry(pose.name.clone())
+                    .or_insert_with(|| pose.category.clone());
+                egui::ComboBox::from_id_salt(format!("pose-cat-{}", pose.name))
+                    .width(120.0)
+                    .selected_text(cat_buf.clone())
+                    .show_ui(ui, |ui| {
+                        for c in categories {
+                            if ui.selectable_label(cat_buf == c, c).clicked() {
+                                *cat_buf = c.clone();
+                                let _ = library.library.update_pose_category(&pose.name, c);
+                                library.mark_dirty();
+                                state.status = Some(format!("{} category → {c}", pose.name));
+                            }
+                        }
+                        ui.separator();
+                        if ui.selectable_label(false, "+ New category…").clicked() {
+                            state
+                                .new_category_buf
+                                .insert(pose.name.clone(), String::new());
+                        }
+                    });
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button(icons::menu_item(icons::TRASH, "Delete"))
+                .on_hover_text("Delete this pose from the library")
+                .clicked()
+            {
+                match library.library.delete_pose(&pose.name) {
+                    Ok(()) => {
+                        state.status = Some(format!("deleted {}", pose.name));
+                        library.mark_dirty();
+                        state.editing_pose = None;
+                    }
+                    Err(e) => state.status = Some(format!("delete failed: {e}")),
+                }
+            }
+            if ui
+                .button(icons::menu_item(icons::STATUS_READY, "Done"))
+                .clicked()
+            {
+                state.editing_pose = None;
+            }
+        });
+    });
 }
 
 /// Commit "+ New category" inline-text input → write to disk + refresh.
@@ -2215,11 +2237,20 @@ fn bones_with_expressions_tab(
     sender: Option<&PoseCommandSender>,
     snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
     indexed: Option<&IndexedBones>,
-    rig: &mut crate::plugins::rig_editor::RigEditorState,
-    mirror: &mut crate::plugins::mirror::MirrorState,
-    pose_settings: &jarvis_avatar::config::PoseControllerSettings,
+    settings: &mut Settings,
+    rig_params: &mut super::rig_editor::RigTabSystemParam,
     undo: Option<&UndoHistory>,
 ) {
+    let super::rig_editor::RigTabSystemParam {
+        rig,
+        mirror,
+        vrm_q,
+        springs,
+        colliders,
+    } = rig_params;
+    let rig: &mut crate::plugins::rig_editor::RigEditorState = rig;
+    let mirror: &mut crate::plugins::mirror::MirrorState = mirror;
+
     let avail_h = ui.available_height();
     let total_w = ui.available_width();
     let left_w = (total_w * 0.62).max(280.0);
@@ -2234,11 +2265,41 @@ fn bones_with_expressions_tab(
             },
         );
         ui.separator();
+        // Right column: expression presets (top half) stacked over the spring
+        // bone physics panels (bottom half), each its own vertical scroll list.
         ui.allocate_ui_with_layout(
             egui::vec2(right_w, avail_h),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                expressions_panel(ui, state, sender, snapshot, pose_settings);
+                let half = ((avail_h - 8.0) * 0.5).max(120.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_w, half),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        expressions_panel(
+                            ui,
+                            state,
+                            sender,
+                            snapshot,
+                            &settings.pose_controller,
+                        );
+                    },
+                );
+                ui.separator();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_w, half),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.label(egui::RichText::new("Spring bone physics").strong());
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                super::rig_editor::spring_panels(
+                                    ui, settings, rig, vrm_q, springs, colliders,
+                                );
+                            });
+                    },
+                );
             },
         );
     });
@@ -2446,6 +2507,24 @@ fn bones_panel(
         });
 }
 
+/// One calibration-sign row: `[slider value] [Flip] label`. The Flip button
+/// sits right after the slider's drag value so the controls line up vertically
+/// across rows, with the descriptive label trailing.
+fn cal_sign_row(ui: &mut egui::Ui, value: &mut f32, label: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().slider_width = 150.0;
+        ui.add(egui::Slider::new(value, -1.0..=1.0).step_by(0.01));
+        if ui
+            .button(icons::menu_item(icons::REVERSE, "Flip"))
+            .on_hover_text(format!("Flip sign of {label}"))
+            .clicked()
+        {
+            *value *= -1.0;
+        }
+        ui.label(label);
+    });
+}
+
 fn intent_lab_tab(
     ui: &mut egui::Ui,
     pc: &mut PoseControllerUiState,
@@ -2603,56 +2682,12 @@ arms_down_rest {arrow} shoulder/upper-arm/lower-arm rolls & pitches (x the three
 
     ui.separator();
     ui.label(egui::RichText::new("Calibration multipliers (−1 … +1)").strong());
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Slider::new(&mut pc.intent_lab_cal.raise_leg_forward_pitch_sign, -1.0..=1.0)
-                .text("raise_leg forward pitch"),
-        );
-        if ui.button("Flip").clicked() {
-            pc.intent_lab_cal.raise_leg_forward_pitch_sign *= -1.0;
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Slider::new(&mut pc.intent_lab_cal.raise_leg_outward_roll_sign, -1.0..=1.0)
-                .text("raise_leg outward roll"),
-        );
-        if ui.button("Flip").clicked() {
-            pc.intent_lab_cal.raise_leg_outward_roll_sign *= -1.0;
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.add(egui::Slider::new(&mut pc.intent_lab_cal.bend_knee_pitch_sign, -1.0..=1.0).text("bend_knee pitch"));
-        if ui.button("Flip").clicked() {
-            pc.intent_lab_cal.bend_knee_pitch_sign *= -1.0;
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Slider::new(&mut pc.intent_lab_cal.arms_down_rest_upper_arm_roll_sign, -1.0..=1.0)
-                .text("arms_down_rest upper-arm roll"),
-        );
-        if ui.button("Flip").clicked() {
-            pc.intent_lab_cal.arms_down_rest_upper_arm_roll_sign *= -1.0;
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Slider::new(&mut pc.intent_lab_cal.arms_down_rest_elbow_pitch_sign, -1.0..=1.0)
-                .text("arms_down_rest elbow pitch"),
-        );
-        if ui.button("Flip").clicked() {
-            pc.intent_lab_cal.arms_down_rest_elbow_pitch_sign *= -1.0;
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Slider::new(&mut pc.intent_lab_cal.arms_down_rest_shoulder_sign, -1.0..=1.0).text("arms_down_rest shoulder"),
-        );
-        if ui.button("Flip").clicked() {
-            pc.intent_lab_cal.arms_down_rest_shoulder_sign *= -1.0;
-        }
-    });
+    cal_sign_row(ui, &mut pc.intent_lab_cal.raise_leg_forward_pitch_sign, "raise_leg forward pitch");
+    cal_sign_row(ui, &mut pc.intent_lab_cal.raise_leg_outward_roll_sign, "raise_leg outward roll");
+    cal_sign_row(ui, &mut pc.intent_lab_cal.bend_knee_pitch_sign, "bend_knee pitch");
+    cal_sign_row(ui, &mut pc.intent_lab_cal.arms_down_rest_upper_arm_roll_sign, "arms_down_rest upper-arm roll");
+    cal_sign_row(ui, &mut pc.intent_lab_cal.arms_down_rest_elbow_pitch_sign, "arms_down_rest elbow pitch");
+    cal_sign_row(ui, &mut pc.intent_lab_cal.arms_down_rest_shoulder_sign, "arms_down_rest shoulder");
 
     ui.horizontal(|ui| {
         if ui

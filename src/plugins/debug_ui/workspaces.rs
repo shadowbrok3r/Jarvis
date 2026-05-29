@@ -14,9 +14,18 @@ use super::sections::{channel_hub_panel, gateway_panel, mcp_panel, tts_panel};
 use super::services::services_panel;
 use super::DebugUiState;
 use crate::plugins::avatar::AvatarDebugStats;
+use crate::plugins::channel_server::{
+    ChatCompleteMessage, HubBroadcast, HubState, LookAtRequestMessage, TtsSpeakMessage,
+};
 use crate::plugins::chat_pipeline_status::ChatPipelineStatus;
+use crate::plugins::ha_vision_gaze::HaVisionGazeRuntime;
+use crate::plugins::home_assistant::{HaDiscoverBridge, HaDiscoveryUiCache};
+use crate::plugins::home_assistant_routing::PresenceRouting;
+use crate::plugins::ironclaw_chat::ChatState;
 use crate::plugins::service_status::ServiceStatus;
+use crate::plugins::shared_runtime::SharedTokio;
 use crate::plugins::traffic_log::TrafficLogSink;
+use crate::plugins::VrmEyeLookatDebug;
 
 // ---------- Service Hub workspace ---------------------------------------------
 
@@ -29,6 +38,7 @@ pub enum ServiceHubTab {
     Gateway,
     Tts,
     Mcp,
+    HomeAssistant,
 }
 
 #[derive(Resource, Default)]
@@ -36,11 +46,20 @@ pub struct ServiceHubUiState {
     pub tab: ServiceHubTab,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_service_hub_window(
     mut contexts: EguiContexts,
     mut settings: ResMut<Settings>,
     mut state: ResMut<ServiceHubUiState>,
     status: Option<Res<ServiceStatus>>,
+    mut ha_cache: ResMut<HaDiscoveryUiCache>,
+    mut ha_routing: ResMut<PresenceRouting>,
+    ha_bridge: Option<Res<HaDiscoverBridge>>,
+    ha_tokio: Option<Res<SharedTokio>>,
+    ha_traffic: Option<Res<TrafficLogSink>>,
+    ha_chat: Option<Res<ChatState>>,
+    ha_vision_gaze: Option<Res<HaVisionGazeRuntime>>,
+    ha_eye_vrm: Res<VrmEyeLookatDebug>,
 ) {
     if !settings.ui.show_service_hub {
         return;
@@ -61,6 +80,11 @@ pub fn draw_service_hub_window(
                 ui.selectable_value(&mut state.tab, ServiceHubTab::Gateway, "Gateway");
                 ui.selectable_value(&mut state.tab, ServiceHubTab::Tts, "TTS");
                 ui.selectable_value(&mut state.tab, ServiceHubTab::Mcp, "MCP");
+                ui.selectable_value(
+                    &mut state.tab,
+                    ServiceHubTab::HomeAssistant,
+                    "Home Assistant",
+                );
             });
             ui.separator();
 
@@ -80,6 +104,20 @@ pub fn draw_service_hub_window(
                 ServiceHubTab::Mcp => {
                     mcp_panel(ui, &mut settings);
                 }
+                ServiceHubTab::HomeAssistant => {
+                    super::home_assistant::home_assistant_panel(
+                        ui,
+                        &mut settings,
+                        &mut ha_cache,
+                        &mut ha_routing,
+                        ha_bridge.as_deref(),
+                        ha_tokio.as_deref(),
+                        ha_traffic.as_deref(),
+                        ha_chat.as_deref(),
+                        ha_vision_gaze.as_deref(),
+                        &ha_eye_vrm,
+                    );
+                }
             }
         });
     settings.ui.show_service_hub = open;
@@ -93,6 +131,7 @@ pub enum DiagnosticsTab {
     Pipeline,
     Avatar,
     Network,
+    LiveTest,
 }
 
 #[derive(Resource, Default)]
@@ -100,6 +139,7 @@ pub struct DiagnosticsUiState {
     pub tab: DiagnosticsTab,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_diagnostics_workspace_window(
     mut contexts: EguiContexts,
     mut settings: ResMut<Settings>,
@@ -108,6 +148,11 @@ pub fn draw_diagnostics_workspace_window(
     stats: Res<AvatarDebugStats>,
     log: Option<Res<TrafficLogSink>>,
     mut dbg: ResMut<DebugUiState>,
+    hub_state: Res<HubState>,
+    hub_out: Option<Res<HubBroadcast>>,
+    mut chat_writer: MessageWriter<ChatCompleteMessage>,
+    mut look_writer: MessageWriter<LookAtRequestMessage>,
+    mut tts_writer: MessageWriter<TtsSpeakMessage>,
 ) {
     if !settings.ui.show_diagnostics_workspace {
         return;
@@ -126,6 +171,7 @@ pub fn draw_diagnostics_workspace_window(
                 ui.selectable_value(&mut state.tab, DiagnosticsTab::Pipeline, "Chat pipeline");
                 ui.selectable_value(&mut state.tab, DiagnosticsTab::Avatar, "Avatar (Y-axis)");
                 ui.selectable_value(&mut state.tab, DiagnosticsTab::Network, "Network trace");
+                ui.selectable_value(&mut state.tab, DiagnosticsTab::LiveTest, "Live / Test");
             });
             ui.separator();
 
@@ -152,6 +198,18 @@ pub fn draw_diagnostics_workspace_window(
                         ui.label("Traffic log not initialised yet.");
                     }
                 },
+                DiagnosticsTab::LiveTest => {
+                    super::sections::live_test_panel(
+                        ui,
+                        &mut settings,
+                        &mut dbg.test,
+                        &hub_state,
+                        hub_out.as_deref(),
+                        &mut chat_writer,
+                        &mut look_writer,
+                        &mut tts_writer,
+                    );
+                }
             }
         });
     settings.ui.show_diagnostics_workspace = open;

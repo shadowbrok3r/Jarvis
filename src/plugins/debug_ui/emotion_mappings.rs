@@ -16,10 +16,10 @@
 
 use std::collections::HashSet;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, egui};
+use bevy_egui::egui;
 
-use jarvis_avatar::config::Settings;
 use jarvis_avatar::emotions::EmotionBinding;
 use jarvis_avatar::icons;
 use jarvis_avatar::theme;
@@ -61,51 +61,48 @@ const VRM_PRESETS: &[&str] = &[
     "thinking",
 ];
 
-pub fn draw_emotion_mappings_window(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<Settings>,
-    mut ui_state: ResMut<super::DebugUiState>,
-    map: Option<ResMut<EmotionMapRes>>,
-    library: Option<Res<PoseLibraryAssets>>,
+/// Resources the Emotion Mappings panel needs, bundled for the Settings workspace.
+#[derive(SystemParam)]
+pub struct EmotionPanelParams<'w> {
+    pub map: Option<ResMut<'w, EmotionMapRes>>,
+    pub library: Option<Res<'w, PoseLibraryAssets>>,
+}
+
+/// Emotion mappings panel — rendered as a tab inside the Settings window.
+pub fn emotion_mappings_panel(
+    ui: &mut egui::Ui,
+    ui_state: &mut super::DebugUiState,
+    p: &mut EmotionPanelParams,
 ) {
-    if !settings.ui.show_emotion_mappings {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
+    let Some(map) = p.map.as_mut() else {
+        ui.label("Emotion map not initialised yet.");
         return;
     };
-    let Some(mut map) = map else { return };
+    let map: &mut EmotionMapRes = map;
 
-    let animations = library
+    let animations = p
+        .library
         .as_deref()
         .map(|l| l.animations())
         .unwrap_or_default();
 
-    let mut open = settings.ui.show_emotion_mappings;
-    egui::Window::new("Emotion Mappings")
-        .default_size([720.0, 600.0])
-        .resizable(true)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            toolbar(ui, &mut ui_state.emotion_mappings, &mut map);
-            ui.separator();
-            mappings_table(ui, &mut map, &animations);
-            ui.separator();
-            expression_blend_panel(ui, &mut ui_state.emotion_mappings, &mut map);
-            ui.separator();
-            add_row(ui, &mut ui_state.emotion_mappings, &mut map);
-            if let Some(status) = &ui_state.emotion_mappings.status {
-                ui.add_space(4.0);
-                ui.colored_label(theme::success(ui), status);
-            }
-            if let Some(status) = &map.last_status {
-                ui.colored_label(theme::info(ui), status);
-            }
-            if let Some(err) = &map.inner.last_error {
-                ui.colored_label(theme::error(ui), err);
-            }
-        });
-    settings.ui.show_emotion_mappings = open;
+    toolbar(ui, &mut ui_state.emotion_mappings, map);
+    ui.separator();
+    mappings_table(ui, map, &animations);
+    ui.separator();
+    expression_blend_panel(ui, &mut ui_state.emotion_mappings, map);
+    ui.separator();
+    add_row(ui, &mut ui_state.emotion_mappings, map);
+    if let Some(status) = &ui_state.emotion_mappings.status {
+        ui.add_space(4.0);
+        ui.colored_label(theme::success(ui), status);
+    }
+    if let Some(status) = &map.last_status {
+        ui.colored_label(theme::info(ui), status);
+    }
+    if let Some(err) = &map.inner.last_error {
+        ui.colored_label(theme::error(ui), err);
+    }
 }
 
 fn toolbar(ui: &mut egui::Ui, _state: &mut EmotionMappingsUiState, map: &mut EmotionMapRes) {

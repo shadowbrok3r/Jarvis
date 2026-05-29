@@ -19,6 +19,7 @@ pub mod pose_tools_toolbar;
 pub mod rig_editor;
 pub mod sections;
 pub mod services;
+pub mod settings_workspace;
 mod widgets;
 pub mod workspaces;
 pub use chat::ChatUiState;
@@ -36,6 +37,7 @@ use jarvis_avatar::icons;
 
 use crate::plugins::chat_pipeline_status::ChatPipelineStatus;
 use crate::plugins::jarvis_ios_hub::write_vrm_graphics_override;
+use crate::plugins::mirror::MirrorState;
 use crate::plugins::native_anim_player::ActiveNativeAnimation;
 use crate::plugins::pose_driver::PoseCommandSender;
 use crate::plugins::rig_editor::RigEditorState;
@@ -49,6 +51,7 @@ impl Plugin for DebugUiPlugin {
             .init_resource::<DebugUiState>()
             .init_resource::<workspaces::ServiceHubUiState>()
             .init_resource::<workspaces::DiagnosticsUiState>()
+            .init_resource::<settings_workspace::SettingsUiState>()
             .add_systems(
                 Update,
                 (
@@ -62,18 +65,12 @@ impl Plugin for DebugUiPlugin {
                 EguiPrimaryContextPass,
                 (
                     draw_menu_bar,
-                    pose_tools_toolbar::draw_pose_tools_toolbar,
                     draw_restore_defaults_modal,
                     draw_about_window,
                     chat::draw_chat_window,
-                    sections::draw_avatar_window,
-                    sections::draw_camera_window,
-                    sections::draw_live_test_window,
                     pose_controller::draw_pose_controller_window,
-                    graphics_advanced::draw_graphics_advanced_window,
+                    settings_workspace::draw_settings_window,
                     anim_layers::draw_anim_layers_window,
-                    emotion_mappings::draw_emotion_mappings_window,
-                    home_assistant::draw_home_assistant_window,
                 )
                     .chain(),
             )
@@ -83,13 +80,12 @@ impl Plugin for DebugUiPlugin {
                     workspaces::draw_service_hub_window,
                     workspaces::draw_diagnostics_workspace_window,
                 )
-                    .chain()
-                    .after(home_assistant::draw_home_assistant_window),
+                    .chain(),
             )
             .add_systems(
                 EguiPrimaryContextPass,
                 graphics_advanced::apply_mtoon_material_live_preview
-                    .after(graphics_advanced::draw_graphics_advanced_window),
+                    .after(settings_workspace::draw_settings_window),
             )
             .add_systems(
                 Update,
@@ -274,7 +270,8 @@ fn draw_menu_bar(
     mut state: ResMut<DebugUiState>,
     mut exit: MessageWriter<AppExit>,
     pipeline: Res<ChatPipelineStatus>,
-    rig: Res<RigEditorState>,
+    mut rig: ResMut<RigEditorState>,
+    mut mirror: ResMut<MirrorState>,
     sender: Option<Res<PoseCommandSender>>,
     mut active_anim: ResMut<ActiveNativeAnimation>,
     vrma_q: Query<Entity, With<Vrma>>,
@@ -316,8 +313,17 @@ fn draw_menu_bar(
             // users running purely in chat / services mode keep a clean
             // menu bar.
             if pose_controller_open {
-                ui.add_space(ui.available_width() / 3.);
-                
+                ui.separator();
+                pose_tools_toolbar::pose_tools_menu(
+                    ui,
+                    &mut settings,
+                    &mut rig,
+                    &mut mirror,
+                    &mut state.pose_controller,
+                    sender.as_deref(),
+                );
+                ui.add_space(ui.available_width() / 4.);
+
                 pose_controller::transport_toolbar(
                     ui,
                     &mut state.pose_controller,
@@ -362,9 +368,9 @@ fn file_menu(
     state: &mut DebugUiState,
     exit: &mut MessageWriter<AppExit>,
 ) {
-    ui.menu_button("File", |ui| {
+    ui.menu_button(icons::menu_item(icons::FOLDER, "File"), |ui| {
         if ui
-            .button("Save settings")
+            .button(icons::menu_item(icons::SAVE, "Save settings"))
             .on_hover_text(
                 "Writes the current values to config/user.toml (default.toml is preserved)",
             )
@@ -430,14 +436,13 @@ fn view_menu(ui: &mut egui::Ui, settings: &mut Settings, state: &mut DebugUiStat
                 "Tabbed view of Channel hub, Gateway, TTS, MCP, and the live \
                  Services overview — replaces five floating windows.",
             );
-        ui.checkbox(&mut settings.ui.show_graphics_advanced, "Graphics Workspace")
+        ui.checkbox(&mut settings.ui.show_settings, "Settings")
             .on_hover_text(
-                "Tabbed Lights / Post / Materials / Look-at — lighting, post-processing, \
-                 material visibility, the MToon editor, and gaze tuning in one window.",
+                "Avatar, camera, emotion mappings, and graphics (lights / post / MToon / look-at).",
             );
         ui.checkbox(&mut settings.ui.show_diagnostics_workspace, "Diagnostics")
             .on_hover_text(
-                "Chat pipeline, avatar Y-axis stats, and the live Network trace tab.",
+                "Chat pipeline, avatar Y-axis stats, network trace, and live / test bench.",
             );
 
         // ---- Pose Controller per-tab show/hide ----
@@ -450,11 +455,6 @@ fn view_menu(ui: &mut egui::Ui, settings: &mut Settings, state: &mut DebugUiStat
         ui.separator();
         ui.label(egui::RichText::new("Standalone panels").small().weak());
         anim_layers_visibility_menu(ui, settings);
-        ui.checkbox(&mut settings.ui.show_avatar, "Avatar");
-        ui.checkbox(&mut settings.ui.show_camera, "Camera");
-        ui.checkbox(&mut settings.ui.show_emotion_mappings, "Emotion Mappings");
-        ui.checkbox(&mut settings.ui.show_home_assistant, "Home Assistant");
-        ui.checkbox(&mut settings.ui.show_live_test, "Live / Test bench");
 
         ui.separator();
         ui.menu_button(icons::menu_item(icons::INFO, "Help"), |ui| {
@@ -554,28 +554,6 @@ fn side_label_for(side: &str) -> &'static str {
         "hidden" => icons::HIDDEN,
         _ => "—",
     }
-}
-
-fn test_menu(ui: &mut egui::Ui, settings: &mut Settings) {
-    ui.menu_button("Test", |ui| {
-        if ui
-            .button("Open Live / Test bench")
-            .on_hover_text("Broadcast hub messages, trigger expressions, send look-at + TTS")
-            .clicked()
-        {
-            settings.ui.show_live_test = true;
-            ui.close();
-        }
-    });
-}
-
-fn help_menu(ui: &mut egui::Ui, state: &mut DebugUiState) {
-    ui.menu_button("Help", |ui| {
-        if ui.button("About jarvis-avatar").clicked() {
-            state.show_about = true;
-            ui.close();
-        }
-    });
 }
 
 // ---------- Confirm modal -----------------------------------------------------

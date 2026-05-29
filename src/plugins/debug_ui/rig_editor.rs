@@ -66,19 +66,21 @@ pub struct RigTabSystemParam<'w, 's> {
 pub fn rig_tab(
     ui: &mut egui::Ui,
     pc: &mut super::pose_controller::PoseControllerUiState,
-    settings: &mut Settings,
     sender: Option<&PoseCommandSender>,
     indexed: Option<&IndexedBones>,
     rig_params: &mut RigTabSystemParam,
 ) {
     // Disjoint field borrows so the closure captured by `ScrollArea` can also
     // see `springs`/`colliders` without a re-borrow conflict on `rig_params`.
+    // Spring / collider panels were moved to the Bones + Expressions tab
+    // (rendered below the expression presets), so the rig tab only needs
+    // the rig + mirror state now.
     let RigTabSystemParam {
         rig,
         mirror,
-        vrm_q,
-        springs,
-        colliders,
+        vrm_q: _,
+        springs: _,
+        colliders: _,
     } = rig_params;
     let rig: &mut RigEditorState = rig;
     let mirror: &mut MirrorState = mirror;
@@ -276,12 +278,6 @@ pub fn rig_tab(
         }
     }
 
-    ui.separator();
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            spring_panels(ui, settings, rig, vrm_q, springs, colliders);
-        });
 }
 
 /// Mirror controls — realtime toggle, per-bone "mirror selected to other
@@ -494,7 +490,7 @@ fn color_picker_rgb(ui: &mut egui::Ui, color: &mut [f32; 3], _id_salt: &str) {
 
 // ---------- Spring joint / collider sub-panels (carried over verbatim) -------
 
-fn spring_panels(
+pub fn spring_panels(
     ui: &mut egui::Ui,
     settings: &mut Settings,
     rig: &mut RigEditorState,

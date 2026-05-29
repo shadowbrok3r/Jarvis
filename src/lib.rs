@@ -14,5 +14,6 @@ pub mod zeroclaw;
 pub mod model_catalog;
 pub mod paths;
 pub mod pose_library;
+pub mod egui_widgets;
 pub mod icons;
 pub mod theme;

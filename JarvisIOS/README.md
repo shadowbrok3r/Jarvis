@@ -95,6 +95,10 @@ Uncomment `iconPath` in `xtool.yml` and add a **1024×1024** PNG at that path wh
 - **Swift**: `JarvisBevyView` passes the view pointer into `jarvis_renderer_*` FFI and ticks `jarvis_renderer_render` from a **`CADisplayLink`** on the main thread (mirrors the TailscaleDrive / Metal host pattern, but with Bevy instead of raw wgpu+egui).
 - **Cross-compiling** `aarch64-apple-ios` on Linux: the crate trims **`bevy_audio`** (no `coreaudio-sys`), patches **`tracing-oslog`** to a stub, and forces **`blake3`** `pure` so most builds avoid Apple-only C tooling. A direct **`bevy_ecs`** dependency satisfies **`#[derive(Component)]` / `#[derive(Resource)]`** for `bevy` with `default-features = false`. If another dependency still runs `xcrun --show-sdk-path`, point **`SDKROOT`** at your iPhoneOS SDK and put this package’s **`scripts/`** first on **`PATH`** so the checked-in **`scripts/xcrun`** shim is used (same idea as a fake `xcrun` on a Linux box). Host `cargo check` uses non-iOS stubs for the renderer FFI.
 
+- **egui on device**: `rust/src/ios_egui_ui.rs` applies the same **`assets/egui_jarvis_theme.json`** as desktop, installs **Phosphor** on first frame, and keeps panel copy in **hover text** (Materials / Logging). Avatar tools (chat, expressions, motion, layers) are **SwiftUI** in `AvatarToolsOverlay.swift` — layer rows use **name left / `[kind]` right**, matching desktop animation layers. There is no desktop **Poses** library panel on iOS; motion clips use leading-aligned Swift `Text` rows.
+
+**UI parity with desktop:** see **`.cursor/skills/jarvis-egui-style/SKILL.md`** (JarvisIOS parity table). When you change desktop debug UI, update the matching iOS surface in that table if one exists.
+
 ## Desktop hub: profile sync over HTTP
 
 The **`jarvis-avatar`** channel hub (same port as **`/ws`**, default **`6121`**) exposes:

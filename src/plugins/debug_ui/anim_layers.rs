@@ -26,7 +26,12 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, egui};
+use bevy_egui::{
+    egui,
+    egui::containers::menu::{MenuButton, MenuConfig},
+    egui::PopupCloseBehavior,
+    EguiContexts,
+};
 
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::icons;
@@ -122,6 +127,10 @@ const LAYER_LABEL_WIDTH: f32 = 120.0;
 /// Kind tag column — fits `[expression-hold]` so labels align across rows.
 const LAYER_KIND_TAG_WIDTH: f32 = 108.0;
 const LAYER_WEIGHT_SLIDER_WIDTH: f32 = 96.0;
+/// Right-aligned labels for expanded driver / mask rows.
+const LAYER_PARAM_LABEL_WIDTH: f32 = 108.0;
+/// Max width for widgets in `param_row` (avoids combobox stretching the panel).
+const LAYER_PARAM_WIDGET_MAX: f32 = 240.0;
 
 /// Layer-stack resources for the Animation Layers window.
 #[derive(SystemParam)]
@@ -279,6 +288,14 @@ pub fn draw_anim_layers_window(
     }
 }
 
+/// Dropdown for toolbar panels with comboboxes / collapsing headers.
+/// Default `menu_button` uses `CloseOnClick` and dismisses on any inner click.
+fn toolbar_panel_menu<R>(ui: &mut egui::Ui, title: impl Into<egui::WidgetText>, body: impl FnOnce(&mut egui::Ui) -> R) {
+    MenuButton::new(title)
+        .config(MenuConfig::new().close_behavior(PopupCloseBehavior::CloseOnClickOutside))
+        .ui(ui, body);
+}
+
 /// Dock-side picker as a single icon menu button (replaces the old
 /// Bottom/Left/Right/Float text-button row).
 fn dock_menu_button(ui: &mut egui::Ui, current: &str, requested_dock_side: &mut Option<String>) {
@@ -345,11 +362,11 @@ fn menu_bar_row(
             ui_state.status = Some("all layers paused".into());
         }
         ui.separator();
-        ui.menu_button(format!("Sets {}", icons::CHEV_OPEN), |ui| {
+        toolbar_panel_menu(ui, format!("Sets {}", icons::CHEV_OPEN), |ui| {
             layer_sets_bar(ui, ui_state, stack, store, library);
         });
         if let Some(mon) = glitch {
-            ui.menu_button(format!("{} Glitch", icons::STATUS_WARN), |ui| {
+            toolbar_panel_menu(ui, format!("{} Glitch", icons::STATUS_WARN), |ui| {
                 glitch_controls_bar(ui, mon);
             });
         }
@@ -521,55 +538,61 @@ fn layer_sets_bar(
         return;
     };
     let names = store.sorted_names();
-    ui.horizontal(|ui| {
-        ui.label("Set:");
-        egui::ComboBox::from_id_salt("anim_layer_set_pick")
-            .selected_text(if ui_state.picked_set.is_empty() {
-                "(pick a saved set)"
-            } else {
-                ui_state.picked_set.as_str()
-            })
-            .width(220.0)
-            .show_ui(ui, |ui| {
-                for n in &names {
-                    ui.selectable_value(&mut ui_state.picked_set, n.clone(), n);
-                }
-            });
-        let has_pick = !ui_state.picked_set.is_empty();
-        if ui
-            .add_enabled(has_pick, egui::Button::new("Load"))
-            .on_hover_text("Replace the current stack with the selected set")
-            .clicked()
-        {
-            if let Some(lib) = library {
-                match store.load_into(&ui_state.picked_set, stack, &lib.library) {
-                    Ok(count) => {
-                        ui_state.status =
-                            Some(format!("loaded '{}' ({count} layers)", ui_state.picked_set));
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.label("Set:");
+            egui::ComboBox::from_id_salt("anim_layer_set_pick")
+                .selected_text(if ui_state.picked_set.is_empty() {
+                    "(pick a saved set)"
+                } else {
+                    ui_state.picked_set.as_str()
+                })
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for n in &names {
+                        ui.selectable_value(&mut ui_state.picked_set, n.clone(), n);
                     }
-                    Err(e) => ui_state.status = Some(e),
+                });
+        });
+        let has_pick = !ui_state.picked_set.is_empty();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_pick, egui::Button::new("Load"))
+                .on_hover_text("Replace the current stack with the selected set")
+                .clicked()
+            {
+                if let Some(lib) = library {
+                    match store.load_into(&ui_state.picked_set, stack, &lib.library) {
+                        Ok(count) => {
+                            ui_state.status =
+                                Some(format!("loaded '{}' ({count} layers)", ui_state.picked_set));
+                        }
+                        Err(e) => ui_state.status = Some(e),
+                    }
+                } else {
+                    ui_state.status = Some("pose library not ready".into());
                 }
-            } else {
-                ui_state.status = Some("pose library not ready".into());
             }
-        }
-        if ui
-            .add_enabled(has_pick, egui::Button::new("Delete"))
-            .on_hover_text("Remove the selected set (save to persist)")
-            .clicked()
-        {
-            let name = ui_state.picked_set.clone();
-            store.delete(&name);
-            ui_state.picked_set.clear();
-            ui_state.status = Some(format!("deleted '{name}'"));
-        }
+            if ui
+                .add_enabled(has_pick, egui::Button::new("Delete"))
+                .on_hover_text("Remove the selected set (save to persist)")
+                .clicked()
+            {
+                let name = ui_state.picked_set.clone();
+                store.delete(&name);
+                ui_state.picked_set.clear();
+                ui_state.status = Some(format!("deleted '{name}'"));
+            }
+        });
         ui.separator();
-        ui.label("Save as:");
-        ui.add(
-            egui::TextEdit::singleline(&mut ui_state.new_set_name)
-                .hint_text("e.g. idle-relaxed")
-                .desired_width(180.0),
-        );
+        ui.horizontal(|ui| {
+            ui.label("Save as:");
+            ui.add(
+                egui::TextEdit::singleline(&mut ui_state.new_set_name)
+                    .hint_text("e.g. idle-relaxed")
+                    .desired_width(180.0),
+            );
+        });
         let can_save = !ui_state.new_set_name.trim().is_empty();
         if ui
             .add_enabled(can_save, egui::Button::new("Save current"))
@@ -582,28 +605,31 @@ fn layer_sets_bar(
             ui_state.new_set_name.clear();
             ui_state.status = Some(format!("saved '{name}' (click Persist to disk)"));
         }
-        if ui
-            .button("Persist")
-            .on_hover_text("Flush all saved sets to config/anim_layer_sets.json")
-            .clicked()
-        {
-            store.persist();
-            let msg = store
-                .inner
-                .read()
-                .last_status
-                .clone()
-                .unwrap_or_else(|| "persisted".into());
-            ui_state.status = Some(msg);
-        }
-        if ui
-            .button("Reload")
-            .on_hover_text("Drop in-memory sets and re-read from disk")
-            .clicked()
-        {
-            store.reload();
-            ui_state.status = Some("reloaded from disk".into());
-        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui
+                .button("Persist")
+                .on_hover_text("Flush all saved sets to config/anim_layer_sets.json")
+                .clicked()
+            {
+                store.persist();
+                let msg = store
+                    .inner
+                    .read()
+                    .last_status
+                    .clone()
+                    .unwrap_or_else(|| "persisted".into());
+                ui_state.status = Some(msg);
+            }
+            if ui
+                .button("Reload")
+                .on_hover_text("Drop in-memory sets and re-read from disk")
+                .clicked()
+            {
+                store.reload();
+                ui_state.status = Some("reloaded from disk".into());
+            }
+        });
     });
 }
 
@@ -704,7 +730,7 @@ fn glitch_controls_bar(
     ui: &mut egui::Ui,
     mon: &mut crate::plugins::anim_layers::LayerGlitchMonitor,
 ) {
-    ui.horizontal(|ui| {
+    ui.vertical(|ui| {
         ui.checkbox(&mut mon.enabled, format!("{} Glitch detect", icons::STATUS_WARN))
             .on_hover_text(
                 "flash a layer's row when its bones jump faster than expected \
@@ -714,41 +740,87 @@ fn glitch_controls_bar(
             return;
         }
         ui.separator();
-        ui.label("Sensitivity")
-            .on_hover_text("lower = flag smaller spikes (multiplier over each layer's moving baseline)");
-        ui.add(
-            egui::Slider::new(&mut mon.sensitivity, 1.5..=12.0)
-                .fixed_decimals(1)
-                .suffix("×"),
-        );
-        ui.separator();
-        ui.label("Floor")
-            .on_hover_text("ignore spikes below this absolute angular speed (deg/s) — kills noise");
-        ui.add(
-            egui::Slider::new(&mut mon.floor_dps, 10.0..=180.0)
-                .fixed_decimals(0)
-                .suffix("°/s"),
-        );
-        ui.separator();
-        if ui
-            .button("Clear flashes")
-            .on_hover_text("dismiss any currently-flashing layers")
-            .clicked()
-        {
-            mon.events.clear();
-        }
-        let active = mon
-            .events
-            .values()
-            .filter(|ev| mon.now - ev.at <= mon.flash_secs)
-            .count();
-        if active > 0 {
-            ui.colored_label(
-                egui::Color32::from_rgb(255, 170, 70),
-                format!("{active} flashing"),
+        ui.horizontal(|ui| {
+            ui.label("Sensitivity").on_hover_text(
+                "lower = flag smaller spikes (multiplier over each layer's moving baseline)",
             );
-        }
+            ui.add(
+                egui::Slider::new(&mut mon.sensitivity, 1.5..=12.0)
+                    .fixed_decimals(1)
+                    .suffix("×"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Floor").on_hover_text(
+                "ignore spikes below this absolute angular speed (deg/s) — kills noise",
+            );
+            ui.add(
+                egui::Slider::new(&mut mon.floor_dps, 10.0..=180.0)
+                    .fixed_decimals(0)
+                    .suffix("°/s"),
+            );
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(format!("{} log", mon.log.len()))
+                .on_hover_text("spikes captured since the log was last cleared");
+            if ui
+                .add_enabled(!mon.log.is_empty(), egui::Button::new("Copy"))
+                .on_hover_text("copy the full glitch log to the clipboard")
+                .clicked()
+            {
+                ui.ctx().copy_text(format_glitch_log(mon));
+            }
+            if ui
+                .add_enabled(!mon.log.is_empty(), egui::Button::new("Clear log"))
+                .on_hover_text("empty the glitch log")
+                .clicked()
+            {
+                mon.log.clear();
+                mon.events.clear();
+            }
+        });
     });
+
+    if mon.enabled && !mon.log.is_empty() {
+        egui::CollapsingHeader::new(format!("glitch log ({})", mon.log.len()))
+            .default_open(false)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(140.0)
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        // Newest last so the bottom (stuck) shows the latest pop.
+                        for ev in &mon.log {
+                            ui.label(
+                                egui::RichText::new(format_glitch_line(ev)).monospace(),
+                            );
+                        }
+                    });
+            });
+    }
+}
+
+/// One log line: layer timeline position first (what the user asked for), then
+/// the spike magnitude / bone / baseline ratio, then the monitor wall clock.
+fn format_glitch_line(ev: &crate::plugins::anim_layers::GlitchEvent) -> String {
+    format!(
+        "t={:6.2}s  {:<16}  {:>4.0}°/s  {:<16}  {:>4.1}x  @{:.1}s",
+        ev.layer_time, ev.layer_label, ev.peak_dps, ev.bone, ev.ratio, ev.at,
+    )
+}
+
+/// The whole log as copyable text, oldest → newest.
+fn format_glitch_log(mon: &crate::plugins::anim_layers::LayerGlitchMonitor) -> String {
+    let mut out = String::from(
+        "# layer-timeline-t   layer            peak°/s  bone              ratio  monitor-t\n",
+    );
+    for ev in &mon.log {
+        out.push_str(&format_glitch_line(ev));
+        out.push('\n');
+    }
+    out
 }
 
 fn clip_label_parent(label: &str) -> String {
@@ -895,6 +967,7 @@ fn layer_list(
         .id_salt("anim_layers_list")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.set_max_width(ui.available_width());
             if stack.layers.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(24.0);
@@ -1022,58 +1095,64 @@ fn layer_row(
     let expanded = ui_state.expanded.contains(&layer.id);
 
     // Glitch flash: if this layer popped within `flash_secs`, ring its frame in
-    // a fading amber→red stroke and stash the event so we can label it.
-    let flash = glitch.and_then(|mon| {
+    // a fading amber→red stroke. The spike details go to the copyable log in the
+    // controls bar (the flash is too quick to read), so the row itself stays clean.
+    let flash_k = glitch.and_then(|mon| {
         let ev = mon.events.get(&layer.id)?;
         let age = mon.now - ev.at;
         (age >= 0.0 && age <= mon.flash_secs).then(|| {
             ui.ctx().request_repaint(); // keep the fade animating
-            let k = 1.0 - (age / mon.flash_secs).clamp(0.0, 1.0); // 1 fresh → 0 expired
-            (ev.clone(), k)
+            1.0 - (age / mon.flash_secs).clamp(0.0, 1.0) // 1 fresh → 0 expired
         })
     });
 
     let mut frame = egui::Frame::group(ui.style()).fill(frame_color);
-    if let Some((_, k)) = &flash {
-        let a = (40.0 + 215.0 * *k) as u8;
+    if let Some(k) = flash_k {
+        let a = (40.0 + 215.0 * k) as u8;
         frame = frame.stroke(egui::Stroke::new(
-            1.0 + 1.5 * *k,
+            1.0 + 1.5 * k,
             egui::Color32::from_rgba_unmultiplied(255, 140, 40, a),
         ));
     }
     frame
         .show(ui, |ui| {
-            if let Some((ev, _)) = &flash {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 170, 70),
-                    format!(
-                        "{} jitter {:.0}°/s @ {} ({:.1}× baseline, {:.2}s ago)",
-                        icons::STATUS_WARN,
-                        ev.peak_dps,
-                        ev.bone,
-                        ev.ratio,
-                        glitch.map(|m| m.now - ev.at).unwrap_or(0.0),
-                    ),
-                );
-            }
-            // Row 1: fixed left (enable, kind, label) + right-aligned controls
+            ui.set_max_width(ui.available_width());
+            // Row 1: enable + expand + name on the left, kind tag + transport on the right.
             ui.horizontal(|ui| {
                 ui.checkbox(&mut layer.enabled, "");
-                ui.allocate_ui_with_layout(
-                    egui::vec2(LAYER_KIND_TAG_WIDTH, ui.spacing().interact_size.y),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.colored_label(
-                            header_color,
-                            format!("[{}]", layer.driver.kind_label()),
-                        );
-                    },
-                );
-                ui.add(
-                    egui::TextEdit::singleline(&mut layer.label)
-                        .desired_width(LAYER_LABEL_WIDTH)
-                        .min_size(egui::vec2(LAYER_LABEL_WIDTH, 0.0)),
-                );
+                if ui
+                    .small_button(icons::icon(if expanded {
+                        icons::CHEV_OPEN
+                    } else {
+                        icons::CHEV_CLOSED
+                    }))
+                    .on_hover_text(if expanded {
+                        "collapse layer"
+                    } else {
+                        "expand layer"
+                    })
+                    .clicked()
+                {
+                    if expanded {
+                        ui_state.expanded.remove(&layer.id);
+                    } else {
+                        ui_state.expanded.insert(layer.id);
+                    }
+                }
+                if expanded {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut layer.label)
+                            .desired_width(LAYER_LABEL_WIDTH)
+                            .min_size(egui::vec2(LAYER_LABEL_WIDTH, 0.0)),
+                    );
+                } else {
+                    let name_resp = ui
+                        .button(egui::RichText::new(layer.label.as_str()).strong())
+                        .on_hover_text("expand layer — driver params, mask, blend");
+                    if name_resp.clicked() {
+                        ui_state.expanded.insert(layer.id);
+                    }
+                }
 
                 let right_w = ui.available_width().max(0.0);
                 ui.allocate_ui_with_layout(
@@ -1086,18 +1165,6 @@ fn layer_row(
                             .clicked()
                         {
                             action = Some(LayerAction::Delete);
-                        }
-                        let expand_icon = if expanded { icons::MINUS } else { icons::PLUS };
-                        if ui
-                            .button(icons::icon(expand_icon))
-                            .on_hover_text("expand / collapse driver params")
-                            .clicked()
-                        {
-                            if expanded {
-                                ui_state.expanded.remove(&layer.id);
-                            } else {
-                                ui_state.expanded.insert(layer.id);
-                            }
                         }
                         if ui
                             .button(icons::icon(icons::DOWN))
@@ -1136,20 +1203,27 @@ fn layer_row(
                                     flip_reverse: false,
                                 });
                             }
-                            let rev_label = if layer.reverse { "Rev*" } else { "Rev" };
                             if ui
-                                .selectable_label(layer.reverse, rev_label)
+                                .selectable_label(layer.reverse, icons::icon(icons::REVERSE))
                                 .on_hover_text("play this clip backwards")
                                 .clicked()
                             {
                                 layer.reverse = !layer.reverse;
                             }
                         }
-                        if ui.button("Rewind").on_hover_text("rewind").clicked() {
+                        if ui
+                            .button(icons::icon(icons::REWIND))
+                            .on_hover_text("rewind to start")
+                            .clicked()
+                        {
                             layer.time = 0.0;
                         }
-                        let icon = if layer.playing { "Pause" } else { "Play" };
-                        if ui.button(icon).on_hover_text("play / pause").clicked() {
+                        let transport = if layer.playing { icons::PAUSE } else { icons::PLAY };
+                        if ui
+                            .button(icons::icon(transport))
+                            .on_hover_text("play / pause")
+                            .clicked()
+                        {
                             layer.playing = !layer.playing;
                         }
                         ui.separator();
@@ -1160,6 +1234,27 @@ fn layer_row(
                                 .show_value(true),
                         );
                         ui.label("wgt");
+                        ui.separator();
+                        let kind = format!("[{}]", layer.driver.kind_label());
+                        let kind_resp = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(kind).color(header_color),
+                            )
+                            .frame(false)
+                            .min_size(egui::vec2(LAYER_KIND_TAG_WIDTH, ui.spacing().interact_size.y)),
+                        );
+                        if kind_resp.clicked() {
+                            if expanded {
+                                ui_state.expanded.remove(&layer.id);
+                            } else {
+                                ui_state.expanded.insert(layer.id);
+                            }
+                        }
+                        kind_resp.on_hover_text(if expanded {
+                            "collapse layer"
+                        } else {
+                            "expand layer"
+                        });
                     },
                 );
             });
@@ -1237,28 +1332,27 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
                 animation.frames.len(),
                 animation.fps
             )));
-            ui.horizontal(|ui| {
-                ui.label("speed");
-                ui.add(egui::Slider::new(&mut layer.speed, 0.0..=2.5).fixed_decimals(2));
-                ui.checkbox(&mut layer.looping, "loop");
-                ui.checkbox(&mut layer.reverse, "reverse");
-                ui.checkbox(&mut layer.ping_pong, "ping-pong")
-                    .on_hover_text("bounce at the ends instead of wrapping (seamless, ignores reverse)");
+            param_slider(ui, "speed", &mut layer.speed, 0.0..=2.5);
+            param_row(ui, "playback", |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut layer.looping, "loop");
+                    ui.checkbox(&mut layer.reverse, "reverse");
+                    ui.checkbox(&mut layer.ping_pong, "ping-pong")
+                        .on_hover_text("bounce at the ends instead of wrapping (seamless, ignores reverse)");
+                });
             });
-            ui.horizontal(|ui| {
-                ui.label("loop crossfade (s)")
+            param_row(ui, "loop crossfade (s)", |ui| {
+                ui.add(egui::Slider::new(&mut layer.loop_fade, 0.0..=1.0).fixed_decimals(2))
                     .on_hover_text("blend the loop's tail into its first frame to kill the restart twitch (0 = hard cut)");
-                ui.add(egui::Slider::new(&mut layer.loop_fade, 0.0..=1.0).fixed_decimals(2));
             });
             if let Some(dur) = layer.duration {
-                ui.horizontal(|ui| {
-                    ui.label("phase (s)");
+                param_row(ui, "phase (s)", |ui| {
                     ui.add(
                         egui::Slider::new(&mut layer.time, 0.0..=dur)
                             .fixed_decimals(2)
                             .show_value(true),
-                    );
-                    ui.small("stagger duplicates for ripple waves");
+                    )
+                    .on_hover_text("stagger duplicates for ripple waves");
                 });
             }
         }
@@ -1278,19 +1372,19 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             ));
             let mut remove: Option<String> = None;
             for (name, weight) in expressions.iter_mut() {
-                ui.horizontal(|ui| {
-                    ui.monospace(name);
-                    ui.add(egui::Slider::new(weight, 0.0..=1.0).fixed_decimals(2));
-                    if ui.button(icons::icon(icons::CLOSE)).clicked() {
-                        remove = Some(name.clone());
-                    }
+                param_row(ui, name.as_str(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Slider::new(weight, 0.0..=1.0).fixed_decimals(2));
+                        if ui.button(icons::icon(icons::CLOSE)).clicked() {
+                            remove = Some(name.clone());
+                        }
+                    });
                 });
             }
             if let Some(name) = remove {
                 expressions.remove(&name);
             }
-            ui.horizontal(|ui| {
-                ui.label("duration (s)");
+            param_row(ui, "duration (s)", |ui| {
                 let mut dur = layer.duration.unwrap_or(2.0);
                 if ui
                     .add(egui::Slider::new(&mut dur, 0.1..=12.0).fixed_decimals(2))
@@ -1298,10 +1392,13 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
                 {
                     layer.duration = Some(dur);
                 }
-                ui.label("speed");
-                ui.add(egui::Slider::new(&mut layer.speed, 0.0..=2.5).fixed_decimals(2));
-                ui.checkbox(&mut layer.looping, "loop");
-                ui.checkbox(&mut layer.reverse, "reverse");
+            });
+            param_slider(ui, "speed", &mut layer.speed, 0.0..=2.5);
+            param_row(ui, "playback", |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut layer.looping, "loop");
+                    ui.checkbox(&mut layer.reverse, "reverse");
+                });
             });
             ui.small(
                 "Preset weight follows the layer timeline (ramp or triangle pulse when looping).",
@@ -1354,12 +1451,13 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             slider(ui, "frequency (Hz)", frequency_hz, 0.05..=1.5);
             slider(ui, "curl bias (°)", curl_bias_deg, -20.0..=30.0);
             slider(ui, "thumb opposition (°)", curl_bias_thumb_deg, -10.0..=30.0);
-            ui.horizontal(|ui| {
-                ui.label("seed");
-                ui.monospace(format!("{:#x}", seed));
-                if ui.button("reshuffle").clicked() {
-                    *seed = rand::random::<u64>();
-                }
+            param_row(ui, "seed", |ui| {
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("{:#x}", seed));
+                    if ui.button("reshuffle").clicked() {
+                        *seed = rand::random::<u64>();
+                    }
+                });
             });
         }
         DriverKind::ToeFidget {
@@ -1371,12 +1469,13 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             slider(ui, "amplitude (°)", amplitude_deg, 0.0..=6.0);
             slider(ui, "frequency (Hz)", frequency_hz, 0.05..=1.5);
             slider(ui, "curl bias (°)", curl_bias_deg, -20.0..=30.0);
-            ui.horizontal(|ui| {
-                ui.label("seed");
-                ui.monospace(format!("{:#x}", seed));
-                if ui.button("reshuffle").clicked() {
-                    *seed = rand::random::<u64>();
-                }
+            param_row(ui, "seed", |ui| {
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("{:#x}", seed));
+                    if ui.button("reshuffle").clicked() {
+                        *seed = rand::random::<u64>();
+                    }
+                });
             });
         }
         DriverKind::LookAround {
@@ -1426,12 +1525,13 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             slider(ui, "knee bend (°)", knee_bend_deg, 0.0..=20.0);
             slider(ui, "hip sway (°)", hip_sway_deg, 0.0..=6.0);
             slider(ui, "ankle sway (°)", ankle_deg, 0.0..=5.0);
-            ui.horizontal(|ui| {
-                ui.label("seed");
-                ui.monospace(format!("{:#x}", seed));
-                if ui.button("reshuffle").clicked() {
-                    *seed = rand::random::<u64>();
-                }
+            param_row(ui, "seed", |ui| {
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("{:#x}", seed));
+                    if ui.button("reshuffle").clicked() {
+                        *seed = rand::random::<u64>();
+                    }
+                });
             });
         }
     }
@@ -1443,10 +1543,10 @@ fn mask_and_blend(
     bone_names: &[String],
     hierarchy: Option<&BoneHierarchy>,
 ) {
-    ui.horizontal(|ui| {
-        ui.label("blend");
+    param_row(ui, "blend", |ui| {
         egui::ComboBox::from_id_salt(("blend_mode", layer.id))
             .selected_text(layer.blend_mode.label())
+            .width(ui.available_width().max(0.0))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut layer.blend_mode, BlendMode::Override, "override");
                 ui.selectable_value(
@@ -1455,14 +1555,12 @@ fn mask_and_blend(
                     "additive (rest-relative)",
                 );
             });
-        ui.separator();
-        ui.label("speed");
-        ui.add(egui::Slider::new(&mut layer.speed, 0.0..=3.0).fixed_decimals(2));
     });
+    param_slider(ui, "speed", &mut layer.speed, 0.0..=3.0);
     bone_mask_editor(
         ui,
         egui::Id::new(("mask_include", layer.id)),
-        "include",
+        "include bones…",
         &mut layer.mask.include,
         &mut layer.mask.include_subtrees,
         bone_names,
@@ -1471,7 +1569,7 @@ fn mask_and_blend(
     bone_mask_editor(
         ui,
         egui::Id::new(("mask_exclude", layer.id)),
-        "exclude",
+        "exclude bones…",
         &mut layer.mask.exclude,
         &mut layer.mask.exclude_subtrees,
         bone_names,
@@ -1493,7 +1591,7 @@ fn mask_and_blend(
 fn bone_mask_editor(
     ui: &mut egui::Ui,
     id: egui::Id,
-    label: &str,
+    combo_hint: &str,
     selection: &mut Vec<String>,
     subtrees: &mut Vec<String>,
     all_bones: &[String],
@@ -1504,9 +1602,10 @@ fn bone_mask_editor(
         .ctx()
         .data(|d| d.get_temp::<bool>(subtree_id).unwrap_or(false));
 
+    let wrap_w = ui.available_width().max(0.0);
+    ui.set_max_width(wrap_w);
     ui.horizontal_wrapped(|ui| {
-        ui.label(format!("{label}:"));
-
+        ui.set_max_width(wrap_w);
         let mut flat_remove: Option<usize> = None;
         for (i, bone) in selection.iter().enumerate() {
             ui.scope(|ui| {
@@ -1578,7 +1677,7 @@ fn bone_mask_editor(
             .filter(|b| !blocked.contains(*b))
             .collect();
         egui::ComboBox::from_id_salt(id.with("add_combo"))
-            .selected_text("+ bone…")
+            .selected_text(combo_hint)
             .width(170.0)
             .show_ui(ui, |ui| {
                 if remaining.is_empty() {
@@ -1634,6 +1733,43 @@ fn split_csv(s: &str) -> Vec<String> {
         .collect()
 }
 
+fn param_row<R>(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        let gap = ui.spacing().item_spacing.x;
+        let widget_w = (ui.available_width() - LAYER_PARAM_LABEL_WIDTH - gap)
+            .clamp(80.0, LAYER_PARAM_WIDGET_MAX);
+        let out = ui
+            .allocate_ui_with_layout(
+                egui::vec2(widget_w, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| body(ui),
+            )
+            .inner;
+        ui.allocate_ui_with_layout(
+            egui::vec2(LAYER_PARAM_LABEL_WIDTH, ui.spacing().interact_size.y),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.label(label);
+            },
+        );
+        out
+    })
+    .inner
+}
+
+fn param_slider<Num>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Num,
+    range: std::ops::RangeInclusive<Num>,
+) where
+    Num: egui::emath::Numeric,
+{
+    param_row(ui, label, |ui| {
+        ui.add(egui::Slider::new(value, range).fixed_decimals(2));
+    });
+}
+
 fn slider<Num>(
     ui: &mut egui::Ui,
     label: &str,
@@ -1642,10 +1778,7 @@ fn slider<Num>(
 ) where
     Num: egui::emath::Numeric,
 {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::Slider::new(value, range).fixed_decimals(2));
-    });
+    param_slider(ui, label, value, range);
 }
 
 // ---------------------------------------------------------------------------

@@ -74,7 +74,7 @@ use jarvis_avatar::pose_library::{AnimationFile, PoseFile};
 
 use crate::plugins::pose_driver::{
     BoneHierarchy, IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES, apply_pose_commands,
-    local_from_normalized, normalized_from_local, sync_bone_entity_index,
+    is_vrm_humanoid_bone, local_from_normalized, normalized_from_local, sync_bone_entity_index,
 };
 
 pub struct AnimLayersPlugin;
@@ -1058,6 +1058,13 @@ pub fn advance_layer_playheads(
 pub struct GlitchEvent {
     /// [`LayerGlitchMonitor::now`] timestamp when the spike fired.
     pub at: f32,
+    /// Id of the layer that glitched (for the flash lookup + log identity).
+    pub layer_id: u64,
+    /// Layer label at the time of the spike (for the copyable log).
+    pub layer_label: String,
+    /// The layer's own playhead position (seconds into clip / since start) when
+    /// the spike fired — i.e. where on *this layer's* timeline it happened.
+    pub layer_time: f32,
     /// Peak angular velocity across the layer's bones, in degrees/second.
     pub peak_dps: f32,
     /// Bone that carried the peak (e.g. `rightLowerLeg`).
@@ -1074,6 +1081,10 @@ struct GlitchState {
     /// Exponentially-weighted mean of the per-frame peak angular velocity.
     /// Used as the "normal motion" baseline a spike must clear.
     ema_dps: f32,
+    /// Frames this layer has been observed. Until it reaches
+    /// [`LayerGlitchMonitor::WARMUP_FRAMES`] the baseline is still 0-ish, so any
+    /// motion reads as a huge ratio — we let it settle before recording spikes.
+    frames: u32,
 }
 
 /// Runtime-only diagnostic: watches each layer's sampled output frame-to-frame
@@ -1096,9 +1107,30 @@ pub struct LayerGlitchMonitor {
     /// Monotonic clock advanced by `dt` each live compose (own time base so the
     /// UI fade is independent of the stack's pausable `clock`).
     pub now: f32,
+    /// Smoothed frame delta (seconds). A frame whose `dt` is much larger than
+    /// this is a frame-pacing hitch, not a per-layer glitch — on those frames
+    /// every driver's apparent angular velocity (`angle/dt`) spikes together, so
+    /// we skip spike detection rather than blame the layers. See [`Self::note_frame`].
+    dt_ema: f32,
     states: HashMap<u64, GlitchState>,
-    /// Last spike per layer id (most recent wins). Read by the UI.
+    /// Last spike per layer id (most recent wins). Read by the UI to flash.
     pub events: HashMap<u64, GlitchEvent>,
+    /// Append-only history of spikes (newest last), capped at [`Self::LOG_CAP`].
+    /// The UI shows this as a copyable list so the user can read glitches that
+    /// flashed too fast to catch live.
+    pub log: Vec<GlitchEvent>,
+}
+
+impl LayerGlitchMonitor {
+    /// Max entries kept in [`Self::log`]; oldest are dropped past this.
+    pub const LOG_CAP: usize = 400;
+    /// A frame counts as a pacing hitch (and is skipped for detection) when its
+    /// `dt` exceeds `dt_ema × HITCH_RATIO`. Tuned to let normal 60↔120 Hz jitter
+    /// through while catching dropped/stalled frames that distort `angle/dt`.
+    const HITCH_RATIO: f32 = 1.6;
+    /// Frames a layer must be observed before its spikes are trusted (lets the
+    /// baseline EMA settle so the first real motion isn't logged as a glitch).
+    const WARMUP_FRAMES: u32 = 8;
 }
 
 impl Default for LayerGlitchMonitor {
@@ -1109,17 +1141,44 @@ impl Default for LayerGlitchMonitor {
             floor_dps: 45.0,
             flash_secs: 0.7,
             now: 0.0,
+            dt_ema: 1.0 / 60.0,
             states: HashMap::new(),
             events: HashMap::new(),
+            log: Vec::new(),
         }
     }
 }
 
 impl LayerGlitchMonitor {
+    /// Update the smoothed frame cadence and report whether this frame's `dt` is
+    /// "normal" (not a pacing hitch). Called once per frame before observing any
+    /// layer. On a hitch frame, callers should still advance `prev` but must not
+    /// record spikes — a long `dt` inflates every layer's `angle/dt` at once.
+    fn note_frame(&mut self, dt: f32) -> bool {
+        if dt <= 0.0 {
+            return false;
+        }
+        let base = if self.dt_ema > 0.0 { self.dt_ema } else { dt };
+        let ok = dt <= base * Self::HITCH_RATIO;
+        // Cap a hitch's pull on the average so one stall doesn't raise the bar.
+        let capped = dt.min(base * 2.0);
+        self.dt_ema = base * 0.9 + capped * 0.1;
+        ok
+    }
+
     /// Compare this frame's sample to the last one for `layer_id`, update the
     /// baseline, and record a [`GlitchEvent`] if the peak angular velocity is a
-    /// spike. `dt` must be > 0.
-    fn observe(&mut self, layer_id: u64, sample: &HashMap<String, Quat>, dt: f32) {
+    /// spike. `dt` must be > 0. `dt_ok` is the per-frame hitch verdict from
+    /// [`Self::note_frame`]; on a hitch frame we refresh `prev` but never log.
+    fn observe(
+        &mut self,
+        layer_id: u64,
+        layer_label: &str,
+        layer_time: f32,
+        sample: &HashMap<String, Quat>,
+        dt: f32,
+        dt_ok: bool,
+    ) {
         if dt <= 0.0 {
             return;
         }
@@ -1143,27 +1202,40 @@ impl LayerGlitchMonitor {
         }
 
         let base = st.ema_dps;
-        let is_spike = peak_dps >= floor && peak_dps >= sensitivity * (base + 1.0);
+        let warmed = st.frames >= Self::WARMUP_FRAMES;
+        // Only trust a spike on a normal-cadence frame, after warmup, when it
+        // clears both the absolute floor and the layer's own baseline.
+        let is_spike =
+            dt_ok && warmed && peak_dps >= floor && peak_dps >= sensitivity * (base + 1.0);
         if is_spike {
             if let Some(bone) = peak_bone {
-                self.events.insert(
+                let ev = GlitchEvent {
+                    at: now,
                     layer_id,
-                    GlitchEvent {
-                        at: now,
-                        peak_dps,
-                        bone: bone.to_string(),
-                        ratio: peak_dps / (base + 1.0),
-                    },
-                );
+                    layer_label: layer_label.to_string(),
+                    layer_time,
+                    peak_dps,
+                    bone: bone.to_string(),
+                    ratio: peak_dps / (base + 1.0),
+                };
+                self.events.insert(layer_id, ev.clone());
+                self.log.push(ev);
+                if self.log.len() > Self::LOG_CAP {
+                    let overflow = self.log.len() - Self::LOG_CAP;
+                    self.log.drain(0..overflow);
+                }
             }
         }
 
-        // Cap the spike's contribution so a single pop doesn't poison the
-        // baseline (otherwise the next frames' threshold would jump and we'd
-        // miss a repeating glitch).
         let st = self.states.entry(layer_id).or_default();
-        let capped = peak_dps.min(base * 3.0 + floor);
-        st.ema_dps = base * 0.9 + capped * 0.1;
+        st.frames = st.frames.saturating_add(1);
+        // Only fold normal-cadence frames into the baseline; a hitch frame's
+        // velocity is dt-distorted and would raise the bar for real glitches.
+        // Cap the contribution so a single pop doesn't poison the baseline.
+        if dt_ok {
+            let capped = peak_dps.min(base * 3.0 + floor);
+            st.ema_dps = base * 0.9 + capped * 0.1;
+        }
         st.prev.clear();
         st.prev
             .extend(sample.iter().map(|(k, v)| (k.clone(), *v)));
@@ -1188,9 +1260,13 @@ pub fn compose_layers(
     let mut accumulator: HashMap<String, Quat> = snap.rest.clone();
     let mut expressions_out: HashMap<String, f32> = HashMap::new();
 
+    // Per-frame hitch verdict, computed once: a long `dt` inflates every
+    // layer's `angle/dt` together, so on those frames we skip spike logging.
+    let mut frame_dt_ok = true;
     if let Some(mon) = glitch.as_deref_mut() {
         if mon.enabled {
             mon.now += dt;
+            frame_dt_ok = mon.note_frame(dt);
         }
     }
 
@@ -1214,7 +1290,14 @@ pub fn compose_layers(
         // fold) so it isolates the driver's own math, not blend dynamics.
         if let Some(mon) = glitch.as_deref_mut() {
             if mon.enabled && !sample.bones.is_empty() {
-                mon.observe(layer.id, &sample.bones, dt);
+                mon.observe(
+                    layer.id,
+                    &layer.label,
+                    layer.time,
+                    &sample.bones,
+                    dt,
+                    frame_dt_ok,
+                );
             }
         }
 
@@ -1822,6 +1905,12 @@ fn clip_pose_normalized(
     names.extend(b.bones.keys());
     let mut bones = HashMap::with_capacity(names.len());
     for name in names {
+        // Skip non-humanoid tracks (hair / skirt / other spring bones). Those
+        // are secondary motion owned by the spring-bone sim; a keyframed clip
+        // driving them fights physics and pops at the loop wrap.
+        if !is_vrm_humanoid_bone(name) {
+            continue;
+        }
         let qa = a
             .bones
             .get(name)
@@ -1866,6 +1955,10 @@ fn sample_clip(
         let frame = &animation.frames[0];
         let mut bones = HashMap::with_capacity(frame.bones.len());
         for (name, r) in &frame.bones {
+            // Humanoid bones only — spring bones (hair/skirt) are sim-owned.
+            if !is_vrm_humanoid_bone(name) {
+                continue;
+            }
             let [x, y, z, w] = r.rotation;
             let normalized = Quat::from_xyzw(x, y, z, w);
             bones.insert(name.clone(), convert_normalized_to_local(name, normalized, snap));

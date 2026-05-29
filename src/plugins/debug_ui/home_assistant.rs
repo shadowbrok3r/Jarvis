@@ -1,7 +1,7 @@
 //! Home Assistant connection, device registry, presence routing (Airi-style).
 
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, egui};
+use bevy_egui::egui;
 
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::home_assistant::{self, HaCameraEntity, HaDetectionSensorEntity, HaMediaEntity};
@@ -16,31 +16,22 @@ use crate::plugins::ironclaw_chat::ChatState;
 use crate::plugins::shared_runtime::SharedTokio;
 use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
 
-pub fn draw_home_assistant_window(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<Settings>,
-    mut cache: ResMut<HaDiscoveryUiCache>,
-    mut routing: ResMut<PresenceRouting>,
-    bridge: Option<Res<HaDiscoverBridge>>,
-    tokio_rt: Option<Res<SharedTokio>>,
-    traffic: Option<Res<TrafficLogSink>>,
-    chat: Option<Res<ChatState>>,
-    vision_gaze: Option<Res<HaVisionGazeRuntime>>,
-    eye_vrm: Res<VrmEyeLookatDebug>,
+/// Home Assistant panel — rendered as a tab inside the Service Hub window
+/// (see `draw_service_hub_window`).
+#[allow(clippy::too_many_arguments)]
+pub fn home_assistant_panel(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    cache: &mut HaDiscoveryUiCache,
+    routing: &mut PresenceRouting,
+    bridge: Option<&HaDiscoverBridge>,
+    tokio_rt: Option<&SharedTokio>,
+    traffic: Option<&TrafficLogSink>,
+    chat: Option<&ChatState>,
+    vision_gaze: Option<&HaVisionGazeRuntime>,
+    eye_vrm: &VrmEyeLookatDebug,
 ) {
-    if !settings.ui.show_home_assistant {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-
-    let mut open = settings.ui.show_home_assistant;
-    egui::Window::new("Home Assistant")
-        .default_width(560.0)
-        .default_height(520.0)
-        .open(&mut open)
-        .show(ctx, |ui| {
+    {
             let mut persist_ha = false;
             let scroll_h = ui.available_height().max(120.0);
             egui::ScrollArea::vertical()
@@ -94,10 +85,10 @@ pub fn draw_home_assistant_window(
                                     .add_enabled(can_go, egui::Button::new("Discover devices"))
                                     .clicked()
                                 {
-                                    if let (Some(b), Some(rt)) = (bridge.as_ref(), tokio_rt.as_ref()) {
+                                    if let (Some(b), Some(rt)) = (bridge, tokio_rt) {
                                         let tx = b.tx.clone();
                                         let snap = ha.clone();
-                                        let log = traffic.as_ref().map(|t| (*t).clone());
+                                        let log = traffic.map(|t| t.clone());
                                         cache.is_refreshing = true;
                                         cache.last_error = None;
                                         rt.spawn(async move {
@@ -598,8 +589,7 @@ pub fn draw_home_assistant_window(
                     tracing::warn!(target: "home_assistant", "save user.toml: {e}");
                 }
             }
-        });
-    settings.ui.show_home_assistant = open;
+    }
 }
 
 fn fmt_time(ms: u128) -> String {

@@ -8,10 +8,11 @@
 
 use std::collections::HashSet;
 
+use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfMaterialName;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, egui};
+use bevy_egui::egui;
 use bevy_vrm1::prelude::{MToonMaterial, Vrm};
 
 use jarvis_avatar::config::{
@@ -364,35 +365,54 @@ fn entity_under_vrm(
 
 // ---------- draw ---------------------------------------------------------------
 
-pub fn draw_graphics_advanced_window(
-    mut contexts: EguiContexts,
-    mut settings: ResMut<Settings>,
-    env_status: Option<Res<EnvironmentMapStatus>>,
-    materials: Res<Assets<MToonMaterial>>,
-    mtoon_meshes_q: Query<(
-        Entity,
-        Option<&Name>,
-        Option<&GltfMaterialName>,
-        &MeshMaterial3d<MToonMaterial>,
-    )>,
-    vrm_roots_q: Query<Entity, With<Vrm>>,
-    child_of_q: Query<&ChildOf>,
-    std_meshes_q: Query<(
-        Entity,
-        Option<&Name>,
-        Option<&GltfMaterialName>,
-        &MeshMaterial3d<StandardMaterial>,
-    )>,
-    store: Option<Res<MToonOverridesStore>>,
-    vis_store: Option<Res<MaterialVisibilityStore>>,
-    mut state: ResMut<super::DebugUiState>,
+/// Queries/resources the Graphics panel needs, bundled for the Settings workspace.
+#[derive(SystemParam)]
+pub struct GraphicsPanelParams<'w, 's> {
+    pub env_status: Option<Res<'w, EnvironmentMapStatus>>,
+    pub materials: Res<'w, Assets<MToonMaterial>>,
+    pub mtoon_meshes_q: Query<
+        'w,
+        's,
+        (
+            Entity,
+            Option<&'static Name>,
+            Option<&'static GltfMaterialName>,
+            &'static MeshMaterial3d<MToonMaterial>,
+        ),
+    >,
+    pub vrm_roots_q: Query<'w, 's, Entity, With<Vrm>>,
+    pub child_of_q: Query<'w, 's, &'static ChildOf>,
+    pub std_meshes_q: Query<
+        'w,
+        's,
+        (
+            Entity,
+            Option<&'static Name>,
+            Option<&'static GltfMaterialName>,
+            &'static MeshMaterial3d<StandardMaterial>,
+        ),
+    >,
+    pub store: Option<Res<'w, MToonOverridesStore>>,
+    pub vis_store: Option<Res<'w, MaterialVisibilityStore>>,
+}
+
+/// Graphics panel — rendered as a tab inside the Settings window.
+pub fn graphics_panel(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    state: &mut super::DebugUiState,
+    p: &mut GraphicsPanelParams,
 ) {
-    if !settings.ui.show_graphics_advanced {
-        return;
-    }
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
+    let GraphicsPanelParams {
+        env_status,
+        materials,
+        mtoon_meshes_q,
+        vrm_roots_q,
+        child_of_q,
+        std_meshes_q,
+        store,
+        vis_store,
+    } = p;
 
     let vrm_roots: HashSet<Entity> = vrm_roots_q.iter().collect();
     let mtoon_under_vrm = mtoon_meshes_q
@@ -404,56 +424,49 @@ pub fn draw_graphics_advanced_window(
         .filter(|(e, ..)| entity_under_vrm(*e, &child_of_q, &vrm_roots))
         .count();
 
-    let mut open = settings.ui.show_graphics_advanced;
-    egui::Window::new("Graphics Workspace")
-        .default_size([540.0, 620.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            let tab = &mut state.graphics_advanced.tab;
-            ui.horizontal(|ui| {
-                ui.selectable_value(tab, GraphicsWsTab::Lights, "Lights");
-                ui.selectable_value(tab, GraphicsWsTab::Post, "Post");
-                ui.selectable_value(tab, GraphicsWsTab::Materials, "Materials");
-                ui.selectable_value(tab, GraphicsWsTab::LookAt, "Look-at");
-            });
-            ui.separator();
+    let tab = &mut state.graphics_advanced.tab;
+    ui.horizontal(|ui| {
+        ui.selectable_value(tab, GraphicsWsTab::Lights, "Lights");
+        ui.selectable_value(tab, GraphicsWsTab::Post, "Post");
+        ui.selectable_value(tab, GraphicsWsTab::Materials, "Materials");
+        ui.selectable_value(tab, GraphicsWsTab::LookAt, "Look-at");
+    });
+    ui.separator();
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| match state.graphics_advanced.tab {
-                    GraphicsWsTab::Lights => {
-                        super::sections::draw_basic_graphics_inline(ui, &mut settings);
-                        ui.separator();
-                        draw_light_rig(ui, &mut settings.light_rig);
-                    }
-                    GraphicsWsTab::Post => {
-                        draw_post_process(ui, &mut settings, env_status.as_deref());
-                    }
-                    GraphicsWsTab::Materials => {
-                        draw_material_visibility(
-                            ui,
-                            &vrm_roots,
-                            &child_of_q,
-                            &mtoon_meshes_q,
-                            &std_meshes_q,
-                            vis_store.as_deref(),
-                        );
-                        ui.separator();
-                        draw_mtoon_editor(
-                            ui,
-                            &mut state.graphics_advanced,
-                            &materials,
-                            &mtoon_meshes_q,
-                            store.as_deref(),
-                            (!vrm_roots.is_empty()).then_some((std_under_vrm, mtoon_under_vrm)),
-                        );
-                    }
-                    GraphicsWsTab::LookAt => {
-                        super::sections::look_at_panel(ui, &mut settings);
-                    }
-                });
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| match state.graphics_advanced.tab {
+            GraphicsWsTab::Lights => {
+                super::sections::draw_basic_graphics_inline(ui, settings);
+                ui.separator();
+                draw_light_rig(ui, &mut settings.light_rig);
+            }
+            GraphicsWsTab::Post => {
+                draw_post_process(ui, settings, env_status.as_deref());
+            }
+            GraphicsWsTab::Materials => {
+                draw_material_visibility(
+                    ui,
+                    &vrm_roots,
+                    child_of_q,
+                    mtoon_meshes_q,
+                    std_meshes_q,
+                    vis_store.as_deref(),
+                );
+                ui.separator();
+                draw_mtoon_editor(
+                    ui,
+                    &mut state.graphics_advanced,
+                    materials,
+                    mtoon_meshes_q,
+                    store.as_deref(),
+                    (!vrm_roots.is_empty()).then_some((std_under_vrm, mtoon_under_vrm)),
+                );
+            }
+            GraphicsWsTab::LookAt => {
+                super::sections::look_at_panel(ui, settings);
+            }
         });
-    settings.ui.show_graphics_advanced = open;
 }
 
 fn draw_post_process(
@@ -992,7 +1005,7 @@ pub fn apply_mtoon_material_live_preview(
     )>,
 ) {
     let ga = &mut debug.graphics_advanced;
-    if !settings.ui.show_graphics_advanced {
+    if !settings.ui.show_settings {
         ga.mtoon_preview_baseline = None;
         return;
     }
