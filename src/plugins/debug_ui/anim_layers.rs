@@ -539,21 +539,35 @@ fn layer_sets_bar(
     };
     let names = store.sorted_names();
     ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            ui.label("Set:");
-            egui::ComboBox::from_id_salt("anim_layer_set_pick")
-                .selected_text(if ui_state.picked_set.is_empty() {
-                    "(pick a saved set)"
-                } else {
-                    ui_state.picked_set.as_str()
-                })
-                .width(220.0)
-                .show_ui(ui, |ui| {
+        ui.label("Set").on_hover_text(
+            "Pick a saved layer set below",
+        );
+        if names.is_empty() {
+            ui.label(egui::RichText::new("(no saved sets)").weak().italics());
+        } else {
+            let pick_label = if ui_state.picked_set.is_empty() {
+                "(pick a saved set)"
+            } else {
+                ui_state.picked_set.as_str()
+            };
+            ui.label(egui::RichText::new(pick_label).strong());
+            egui::ScrollArea::vertical()
+                .id_salt("anim_layer_set_pick_list")
+                .max_height(140.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.set_min_width(200.0);
+                    if ui
+                        .selectable_label(ui_state.picked_set.is_empty(), "(none)")
+                        .clicked()
+                    {
+                        ui_state.picked_set.clear();
+                    }
                     for n in &names {
                         ui.selectable_value(&mut ui_state.picked_set, n.clone(), n);
                     }
                 });
-        });
+        }
         let has_pick = !ui_state.picked_set.is_empty();
         ui.horizontal(|ui| {
             if ui

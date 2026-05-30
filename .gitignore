@@ -34,6 +34,7 @@ JarvisIOS/Sources/JarvisIOS/assets/*
 !JarvisIOS/Sources/JarvisIOS/assets/.gitkeep
 .dev
 
+config/semantic_intent_calibration
 AGENTS.md
 CLAUDE.md
 .cursor/
