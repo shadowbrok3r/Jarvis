@@ -1,0 +1,15 @@
+logical_path = "models/Implacable-fixed.vrm"
+# raise_leg direction:"forward" was INVERTED on this VRM: the default compiler
+# emits POSITIVE *UpperLeg.pitch_deg for "forward", but on Implacable-fixed positive
+# upper-leg pitch extends the thigh BACKWARD. Flip the sign so "forward" flexes the hip
+# forward. Verified 2026-05-29 by raw pose_bones probing (knee-to-chest + plié sessions).
+raise_leg_forward_pitch_sign = -1.0
+# outward abduction already correct: right roll+ / left roll- fans the legs out to the
+# sides (verified — wide second-position straddle). Keep +1.
+raise_leg_outward_roll_sign = 1.0
+# bend_knee correct: positive *LowerLeg.pitch_deg folds the shin under (knee flexion). Keep +1.
+bend_knee_pitch_sign = 1.0
+# arms_down_rest mirror roll / elbow / shoulder all read correctly. Keep +1.
+arms_down_rest_upper_arm_roll_sign = 1.0
+arms_down_rest_elbow_pitch_sign = 1.0
+arms_down_rest_shoulder_sign = 1.0

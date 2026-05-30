@@ -1001,7 +1001,7 @@ impl JarvisMcpServer {
         ok_json(&response)
     }
 
-    #[tool(description = "Semantic intent: lift one leg from the hip. REQUIRED `side` (\"left\" or \"right\") and `amount` (0..=1). Optional `direction` (\"forward\" default — hip flex via positive `pitch_deg` on the upper leg; or \"outward\" — hip abduction via mirrored `roll_deg`). Compiles to a single safe upper-leg Euler that never exceeds bounded limits. `dry_run=true` returns the would-apply map without dispatching. PREFER THIS OVER raw pose_bones for any 'raise leg' agent intent.")]
+    #[tool(description = "Semantic intent: lift one leg from the hip. REQUIRED `side` (\"left\" or \"right\") and `amount` (0..=1). Optional `direction`: \"forward\" (default) = hip flex, knee comes forward and up; \"outward\" = hip abduction, leg fans out to the side via mirrored roll. The compiled upper-leg sign comes from this VRM's calibration, so \"forward\" flexes the hip forward even on rigs where raw positive pitch extends the thigh backward. Compiles to a single bounded upper-leg Euler. `dry_run=true` returns the would-apply map without dispatching. PREFER THIS OVER raw pose_bones for any 'raise leg' agent intent.")]
     async fn raise_leg(&self, Parameters(args): Parameters<RaiseLegArgs>) -> CallToolResult {
         let dry_run = args.dry_run.unwrap_or(false);
         let cal = self.resolved_semantic_calibration();
