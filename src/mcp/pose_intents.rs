@@ -91,8 +91,11 @@ pub struct ArmsDownRestArgs {
 
 /// Compile `raise_leg` to a bounded Euler map.
 ///
-/// `forward`: positive `pitch_deg` on `*UpperLeg` (hip flexion) × calibration.
-/// `outward`: mirrored `roll_deg` × calibration.
+/// `forward`: `*UpperLeg` pitch = `INTENT_MAX_PRIMARY_DEG` × amount × `raise_leg_forward_pitch_sign`.
+///   Default sign +1 suits airi-family rigs (positive pitch = hip flexion). On rigs where
+///   positive upper-leg pitch extends the thigh BACKWARD (e.g. `Implacable-fixed.vrm`), the
+///   per-VRM calibration sets the sign to -1 so "forward" still flexes the hip forward.
+/// `outward`: side-mirrored `roll_deg` × `raise_leg_outward_roll_sign` (hip abduction).
 pub fn compile_raise_leg(
     args: &RaiseLegArgs,
     cal: &SemanticIntentCalibration,

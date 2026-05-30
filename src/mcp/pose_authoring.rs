@@ -183,7 +183,11 @@ pub fn sanitize_bone_map(
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct BoneEulerDeg {
-    /// Intrinsic-local X rotation in degrees (positive flexes "forward" for most limb bones in this rig).
+    /// Intrinsic-local X rotation in degrees. Sign is **rig- and bone-specific** — do
+    /// NOT assume "positive = forward". On the reference VRM, positive `*UpperLeg` pitch
+    /// swings the thigh BACKWARD (hip extension); positive `*LowerLeg` pitch is knee
+    /// flexion. Probe one axis first, or prefer the semantic tools (raise_leg / bend_knee),
+    /// which apply per-VRM calibrated signs so you never reason about raw sign.
     #[serde(default)]
     pub pitch_deg: Option<f32>,
     #[serde(default)]
