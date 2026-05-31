@@ -61,22 +61,24 @@ Each compiles to a tiny, bounded Euler map and goes through the same sanitize / 
 
 **Per-VRM calibration:** bind pose / bone roll in the `.vrm` changes which way “positive pitch” points. The shipped defaults match airi-style rigs; if **`raise_leg` forward** moves the thigh the wrong way on your export, open the in-app **Pose Controller → Intent Lab** tab, flip the **forward pitch** sign (or dial the slider negative), **Save for this VRM**, then retry MCP — calibration files live under `config/semantic_intent_calibration/<key>.toml` (same hex key scheme as spring presets). MCP semantic tools load those signs automatically.
 
-**Worked example — `Implacable-fixed.vrm` (this repo's avatar, semantic key `8434f92056f25fd4`).** Verified 2026-05-29 by raw `pose_bones` probing + profile captures. This rig **inverts** the default `forward` leg convention:
+**Per-VRM calibration — probing axes.** Bind-pose roll and bone orientation differ per export, so axis signs are **not portable across rigs**. Probe on each new VRM before composing any leg pose:
 
-| Raw bone + axis | Visual on this rig |
-|-----------------|--------------------|
-| `*UpperLeg.pitch_deg` **negative** | thigh swings **forward** (hip flexion) — knee toward chest |
-| `*UpperLeg.pitch_deg` **positive** | thigh swings **backward** (hip extension) — leg behind body |
-| `*LowerLeg.pitch_deg` **positive** | knee **flexion** (shin folds under) — `bend_knee` default, correct |
-| `rightUpperLeg.roll_deg` **+** / `leftUpperLeg.roll_deg` **−** | legs **abduct** (fan out to a wide straddle), feet stay grounded |
-| `rightFoot.yaw_deg` **+** / `leftFoot.yaw_deg` **−** | feet **turn out** (toes point outward) |
-| `hips.pitch_deg` **positive** | whole **torso bows forward** (strong) |
+1. Call **`set_master_enabled false`** to isolate the rig from procedural layers.
+2. Apply **`pose_bones`** with a single bone, single axis, moderate value (e.g. `leftUpperLeg roll_deg +20`).
+3. **`capture_pose_views`** — front **and** back — and note the world-space result (does the thigh fan out or cross inward?).
+4. Repeat for each axis of interest. Build a local sign table and store it in a **VRM-specific notes file**, not in this guide.
 
-- **`raise_leg forward` was inverted here** (the default compiler emits *positive* `*UpperLeg` pitch = backward on this rig). Fixed with `raise_leg_forward_pitch_sign = -1.0` in [`config/semantic_intent_calibration/8434f92056f25fd4.toml`](../config/semantic_intent_calibration/8434f92056f25fd4.toml). `bend_knee` and `arms_down_rest` read correct (signs `+1`). **Calibration loads at server start — restart the pose MCP after editing the TOML.**
-- **Turnout trap (grounded plié):** combining upper-leg `yaw_deg` (hip turnout) with `roll_deg` (abduction) in one Euler triple produces an unwanted **forward kick** (the yaw reorients the roll axis). For a grounded wide stance, get turnout from the **feet** (`*Foot.yaw_deg`), not hip yaw.
-- **Knee-on-abducted-thigh trap:** flexing the knee (`*LowerLeg.pitch_deg+`) while the thigh is abducted (rolled out) swings the shin **forward**, not straight down (roll reorients the knee hinge). Compensate with a little backward thigh pitch + a shallower bend (the `second_position_plie` foundation uses `upperLeg.pitch +12`, `lowerLeg.pitch +24`).
+**Key probe targets (most rigs):** `*UpperLeg.pitch_deg` (forward vs backward hip flex), `*UpperLeg.roll_deg` (abduction vs adduction direction), `*LowerLeg.pitch_deg` (knee flex direction), `*Foot.yaw_deg` (toe turnout direction), `hips.pitch_deg` (torso bow forward vs back).
 
-**Widen Stance:** “spread with yaw” on thighs is still raw **`pose_bones`** (easy to twist inward/outward). Prefer **`raise_leg` `direction: \"outward\"`** for abduction — it uses **`roll_deg`**, not yaw — then calibrate **outward roll** sign in Intent Lab if needed.
+**Calibration TOML:** if **`raise_leg forward`** moves the thigh the wrong way, edit `config/semantic_intent_calibration/<vrm_key>.toml` → `raise_leg_forward_pitch_sign = -1.0`, then **restart the pose MCP** (calibration loads at server start). Use the **Intent Lab** tab in-app to flip signs interactively.
+
+**Widen stance:** prefer **`raise_leg direction: “outward”`** for hip abduction — it compiles to **`roll_deg`** (not yaw) and avoids the yaw-couples-flex trap. Calibrate the outward-roll sign in Intent Lab if needed.
+
+**Turnout trap (grounded wide stance):** combining upper-leg `yaw_deg` (hip turnout) with `roll_deg` (abduction) in one Euler triple can produce an unwanted **forward kick** (yaw reorients the roll axis). For a grounded wide stance, consider getting turnout from the **feet** (`*Foot.yaw_deg`) rather than hip yaw — then verify with a side capture.
+
+**Knee-on-abducted-thigh trap:** flexing the knee (`*LowerLeg.pitch_deg`) while the thigh is abducted (rolled out) may swing the shin **forward** instead of straight down (roll reorients the knee hinge). Add hip turnout (`*UpperLeg.yaw_deg`, mirrored per side) so the knee tracks over the toes, or compensate with a small backward thigh pitch adjustment.
+
+> **⚠ `pose_bones` Euler and saved-pose / `pose_hold` / clip quaternions are the same space** — no conversion needed between them. However, which roll sign abducts vs adducts the thigh is **rig-dependent** (bind-pose roll varies per export). Always verify front **and** back after any leg-abduction pose — leg crossing and backward knees are invisible from a single front view. **Safest authoring for complex lower-body poses = no sign reasoning:** SLERP between *captured, visually-verified* poses using `tools/author_pose_clip.py`.
 
 All three return a `compiledEuler` map so you can inspect (or copy/tweak) the underlying values. Use `dry_run: true` when you want the map without applying it.
 
@@ -128,7 +130,7 @@ Mirror left/right with **opposite signs** on paired limbs where appropriate; **D
 
 - **Verification views:** at least **`left`**, **`right`**, **`back`**, **`back_left`**, **`back_right`** (`rear` = `back`). Front-only misses crossed legs and backward knees.  
 - **Knee direction:** if the knee reads backward on **`airi.vrm`**, try **flipping the sign** of **`*LowerLeg.pitch_deg`** in small steps (see also knee notes in older sessions — **profile captures decide**).  
-- **“Leg behind body”:** fix **`*UpperLeg`** aim (`pitch` / `yaw` in small steps) before only bending **`*LowerLeg`**. Note some rigs **invert** the forward/back pitch sign — see the verified worked example under *Semantic intents* above (on `Implacable-fixed.vrm`, *negative* `*UpperLeg.pitch_deg` is forward).
+- **”Leg behind body”:** fix **`*UpperLeg`** aim (`pitch` / `yaw` in small steps) before only bending **`*LowerLeg`**. Note some rigs **invert** the forward/back pitch sign — probe the axis and check the calibration TOML (see *Per-VRM calibration* above).
 
 ---
 

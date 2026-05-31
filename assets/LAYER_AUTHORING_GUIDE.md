@@ -80,7 +80,7 @@ Layer-set files store **references** to animations/poses, not embedded keyframes
 
 1. **`list_layers`** — confirm **`masterEnabled`** (use **`set_master_enabled`** if needed).
 2. Optional baseline: **`install_default_layers`** (five procedural layers; clears existing layers first).
-3. Add motion: **`generate_motion`** or pick a saved clip → **`add_layer`** with `kind: clip` + **`mask_include`** as needed.
+3. Add motion: author a clip (see [Authoring keyframed clips](#authoring-keyframed-clips-slerp-between-saved-poses) — `generate_motion` is **not** exposed in this build) or pick a saved clip → **`add_layer`** with `kind: clip` + **`mask_include`** as needed.
 4. **`capture_pose_views`** (`full_body` / `face_closeup`) after each substantive change.
 5. **`save_layer_set`** `{ name: "idle_plus_wave_v1", persist: true }`.
 
@@ -112,11 +112,34 @@ For anything beyond a single ad-hoc layer add, use **`set_layer_stack`** instead
 }
 ```
 
+### Authoring keyframed clips (SLERP between saved poses)
+
+This build does **not** expose `generate_motion` (or any keyframe tool), but `kind: clip` layers play any clip JSON dropped in `assets/animations/` (resolved by `filename`), and clip frames store the **same** quaternion-per-bone data in the **same normalized-humanoid space** that `save_current_pose` writes. So you can author genuine time-varying body motion with zero Euler/sign reasoning by **SLERP-interpolating between approved pose snapshots**.
+
+Clip schema (matches `assets/animations/*.json`):
+
+```jsonc
+{ "name": "...", "prompt": "...", "category": "...", "fps": 30,
+  "frameCount": 125, "looping": true,
+  "frames": [ { "bones": { "<bone>": { "rotation": [x, y, z, w] } }, "duration_ms": 33.33 } ] }
+```
+
+Recipe:
+
+1. Sculpt + **`save_current_pose`** each keyframe ("stop") the motion should pass through (e.g. `relaxed_neutral_stand` → `second_position_plie` → back). Poses land in `assets/poses/`.
+2. Run **`tools/author_pose_clip.py`** — it SLERPs (smoothstep-eased) between consecutive stops and writes the clip JSON. Each stop is `(pose_name, hold_seconds, transition_seconds)`; add a spec to its `CLIPS` list.
+3. Key only the **~50 normalized humanoid bones** the reference clips use (hips/spine/chest/neck/head/shoulders/arms/full finger chain/legs/feet/toes). Do **not** key hair/cloth — spring-bone physics owns those. (`upperChest` is absent from pose saves, so skip it.)
+4. Add a **`kind: clip`** layer with `filename: "<name>.json"` (override on the body, or additive + masked for partial-body motion), then `save_layer_set`.
+
+Authored examples (in `config/anim_layer_sets.json`): `Ballet — Grand Plié`, `Ballet — Développé Front`, `Ballet — Relevé en Pointe`. For ambient life, layer additive procedural drivers (breathing/blink/look_around/finger_fidget/…) on top of the clip.
+
+> **⚠ Verify every source pose from front AND back before building the clip — a sign error in one keyframe rides the entire SLERP.** `pose_bones` Euler signs and pose-file / clip quaternions are the **same space**, so whatever abducts or crosses the legs in `pose_bones` will do the same in the finished clip. Probe axis signs on your VRM before authoring (see [POSE_GUIDE.md → Per-VRM calibration](./POSE_GUIDE.md#semantic-intents----raise_leg-bend_knee-arms_down_rest)). Leg crossing, backward knees, and foot crossover are **invisible from a front-only view** — always include `back`.
+
 ### Pose-hold layer foundation (custom rest pose per VRM)
 
 The `pose_hold` driver overlays a saved pose at full weight every frame, so it's the natural way to give every VRM a sane "arms relaxed at sides" foundation under the procedural layers. Authoring loop:
 
-1. **`load_vrm`** + wait one frame, then **`reset_pose`** to start from the rig's bind.
+1. **`load_vrm`** + wait one frame. (This build has no `reset_pose`; to zero a pose, explicitly set each relevant bone's `pitch/yaw/roll` to 0 via **`pose_bones`** with `preserve_omitted_bones: true`.)
 2. **`pose_bones`** to sculpt arms-down (see [POSE_GUIDE → Arms-down rest](./POSE_GUIDE.md#arms-down-rest-quick-reference) for mirror `roll_deg` on upper arms).
 3. **`capture_pose_views`** with `front`, `left`, `front_left` to verify the silhouette (`output_dir` optional on the server).
 4. **`save_current_pose`** `{ name: "<vrm>_natural_rest", bones: ["leftShoulder","rightShoulder","leftUpperArm","rightUpperArm","leftLowerArm","rightLowerArm","leftHand","rightHand"], category: "idle" }` — only the arm chain, so the foundation doesn't freeze legs / hips when overlaid.
@@ -165,6 +188,6 @@ Section **`[anim_layers]`**: `auto_install_procedural` installs the same five pr
 - **Don't write Python scripts to chain MCP calls.** If you ever feel the urge: that's a missing batch tool. Use `set_layer_stack` for stacks, `save_current_pose` for poses, and file the next batch tool you wish existed in this guide.
 - **Pause the stack while sculpting a `pose_hold` foundation.** Procedural deltas (breathing, weight_shift, finger_fidget) ride additively on top of the live rig, so they're constantly perturbing the bones you're trying to inspect with `capture_pose_views`. Call **`set_master_enabled false`** before iterating with `pose_bones`, then re-enable it via the next `set_layer_stack` (`master_enabled: true`) or an explicit `set_master_enabled true`. Side effect to remember: with the stack off, the `auto-blink` layer stops driving the eye expressions and pupils render white in captures. That's not a pose bug — it goes away the instant the stack composes again.
 - **Match `save_current_pose` `bones` to the layer's role.** A `pose_hold` foundation that's meant to leave room for procedural drivers (e.g. arms-down rest) should snapshot **only the bones the foundation owns** (typically the upper-body chain), so legs / hips stay free for `weight_shift` and other additive layers to move. A `pose_hold` foundation that's meant to fully define a non-standing posture (sit, kneel, prone) needs **every bone you sculpted** in the snapshot — any bone you sculpted but omitted will revert to bind the moment the pose layer reapplies, snapping the posture apart. Decide upfront which role the foundation is playing and pick `bones` to match.
-- **Leg-heavy foundation poses depend on per-VRM leg-sign conventions — verify them before building the stack.** Bind-pose roll differs per rig, so "forward/back" and "abduct" can invert. On this repo's `Implacable-fixed.vrm`: *negative* `*UpperLeg.pitch_deg` is thigh-**forward** (this rig **inverts** the default, so `raise_leg forward` needed `raise_leg_forward_pitch_sign = -1.0` in `config/semantic_intent_calibration/8434f92056f25fd4.toml`); `*LowerLeg.pitch_deg+` is knee flexion; `rightUpperLeg.roll+` / `leftUpperLeg.roll−` abducts the legs; foot turnout comes from `*Foot.yaw` (combining hip yaw with abduction roll kicks the leg forward). Full table + traps live in POSE_GUIDE.md → *Semantic intents → Worked example*. Calibration TOML loads at server start, so **restart the MCP after editing it**. Probe a new rig before trusting any of these.
+- **Leg-heavy foundation poses depend on per-VRM leg-sign conventions — probe before building the stack.** Bind-pose roll differs per rig, so "forward/back" and "abduct" can invert between exports. Use the one-bone-one-axis probe method (master disabled + front/back capture) to build a sign table for each new VRM; store findings in a model-specific notes file. Edit `config/semantic_intent_calibration/<vrm_key>.toml` to correct `raise_leg` direction if needed, then **restart the MCP**. Full probe recipe in [POSE_GUIDE.md → Per-VRM calibration](./POSE_GUIDE.md#semantic-intents----raise_leg-bend_knee-arms_down_rest).
 - **Hold a multi-expression face with `animate_expressions`.** `set_expression` only takes one preset. To pin a sustained combination (e.g. `happy: 0.4` + `relaxed: 0.2` for a soft pleased look), call `animate_expressions` with two keyframes: `t=0` with the *current* weights (or zeros) and `t=1.5` with your target weights. After the last keyframe the weights **hold indefinitely** (the tool description: *"After one-shot playback, last sampled weights remain until changed"*), so you get a sustained mood without looping. The `auto-blink` layer still runs on top and momentarily fully closes the eyes — that's the intended interaction (held expression + natural blinks). To revert, fire another `animate_expressions` with `t=0` your held weights and `t=0.4` `{ neutral: 1, ...your_other_keys: 0 }`.
 - **`framing_preset: "face_closeup"` is for *standing-pose* faces only.** Sitting / kneeling / reclined / floor poses move the head outside the closeup window and you'll get a blank PNG. Use `framing_preset: "full_body"` with a square aspect (`width: 768, height: 768`) for faces in non-standing poses until a head-tracking framing preset exists.

@@ -190,8 +190,18 @@ pub struct BoneEulerDeg {
     /// which apply per-VRM calibrated signs so you never reason about raw sign.
     #[serde(default)]
     pub pitch_deg: Option<f32>,
+    /// Intrinsic-local Y rotation in degrees (often twist along the bone length).
+    /// On the reference VRM, hip turnout (external rotation) is
+    /// `leftUpperLeg` yaw **NEGATIVE** / `rightUpperLeg` yaw **POSITIVE** — knee
+    /// tracks out over the toes.
     #[serde(default)]
     pub yaw_deg: Option<f32>,
+    /// Intrinsic-local Z rotation in degrees. On the reference VRM, leg abduction
+    /// (thighs fan OUT to a wide stance) is `leftUpperLeg` roll **POSITIVE** /
+    /// `rightUpperLeg` roll **NEGATIVE**; the opposite signs ADDUCT and cross the
+    /// legs (this was the grand-plié leg-cross bug). These signs are identical for
+    /// saved-pose / `pose_hold` / clip quaternions — same rotation space. Verified
+    /// 2026-05-30 via `set_master_enabled(false)` + `pose_bones` + capture.
     #[serde(default)]
     pub roll_deg: Option<f32>,
 }
