@@ -931,6 +931,7 @@ fn advance_and_apply_layers(
 
     let mut bones_out: HashMap<String, [f32; 4]> = HashMap::new();
     let mut expressions_out: HashMap<String, f32> = HashMap::new();
+    let mut root_translation: Option<Vec3> = None;
 
     handle.with_write(|stack| {
         stack.clock += dt;
@@ -973,12 +974,44 @@ fn advance_and_apply_layers(
                 [pose_q.x, pose_q.y, pose_q.z, pose_q.w],
             );
         }
+
+        // Root motion: blend hips translation from any clip layer carrying a
+        // `root_position` track (rotation-only clips contribute nothing, so
+        // existing sets are unaffected). Weighted by each layer's gain*weight.
+        let mut root_acc = Vec3::ZERO;
+        let mut root_w = 0.0f32;
+        for layer in stack.layers.iter() {
+            if !layer.enabled {
+                continue;
+            }
+            if let DriverKind::Clip { animation } = &layer.driver {
+                let dur = animation.frames.len() as f32 / (animation.fps.max(1.0) as f32);
+                let t_eff = if layer.looping && dur > 0.0 {
+                    layer.time.rem_euclid(dur)
+                } else {
+                    layer.time
+                };
+                if let Some(p) = sample_clip_root_position(animation, t_eff) {
+                    let w = (layer.gain * layer.weight).max(0.0);
+                    root_acc += p * w;
+                    root_w += w;
+                }
+            }
+        }
+        if root_w > 1e-4 {
+            root_translation = Some(root_acc / root_w);
+        }
     });
 
-    if bones_out.is_empty() && expressions_out.is_empty() {
+    if bones_out.is_empty() && expressions_out.is_empty() && root_translation.is_none() {
         return;
     }
 
+    if let Some(t) = root_translation {
+        let mut translations: HashMap<String, [f32; 3]> = HashMap::new();
+        translations.insert("hips".to_string(), [t.x, t.y, t.z]);
+        sender.send(PoseCommand::ApplyBoneTranslations(translations));
+    }
     if !bones_out.is_empty() {
         sender.send(PoseCommand::ApplyBones {
             bones: bones_out,
@@ -1441,6 +1474,7 @@ fn slice_animation_for_expression(source: &AnimationFile, preset: &str) -> Anima
                 bones: HashMap::new(),
                 duration_ms: f.duration_ms,
                 expressions,
+                root_position: None,
             }
         })
         .collect();
@@ -1471,6 +1505,7 @@ fn slice_animation_for_bone(source: &AnimationFile, bone: &str) -> AnimationFile
                 bones,
                 duration_ms: f.duration_ms,
                 expressions: HashMap::new(),
+                root_position: f.root_position,
             }
         })
         .collect();
@@ -1497,6 +1532,7 @@ fn slice_animation_expressions(source: &AnimationFile) -> AnimationFile {
             bones: HashMap::new(),
             duration_ms: f.duration_ms,
             expressions: f.expressions.clone(),
+            root_position: None,
         })
         .collect();
     AnimationFile {
@@ -1671,6 +1707,7 @@ pub fn bake_layer_stack_to_animation(
             bones,
             duration_ms: Some((1000.0 / fps).max(1.0)),
             expressions,
+            root_position: None,
         });
         work.clock += dt;
     }
@@ -1743,6 +1780,29 @@ fn sample_layer(layer: &mut Layer, snap: &RestPoseSnapshot, dt: f32, gaze_active
         }
     }
     sample
+}
+
+/// Interpolated ROOT MOTION (hips translation delta from bind, meters) of a
+/// clip at `t` seconds. `None` when the clip carries no `root_position` track,
+/// so rotation-only clips behave exactly as before (no translation emitted).
+fn sample_clip_root_position(animation: &AnimationFile, t: f32) -> Option<Vec3> {
+    let total = animation.frames.len();
+    if total == 0 {
+        return None;
+    }
+    let fps = animation.fps.max(1.0) as f32;
+    let frame_f = (t * fps).clamp(0.0, (total - 1) as f32);
+    let idx0 = frame_f.floor() as usize;
+    let idx1 = (idx0 + 1).min(total - 1);
+    let frac = frame_f.fract();
+    let a = animation.frames[idx0].root_position.map(Vec3::from_array);
+    let b = animation.frames[idx1].root_position.map(Vec3::from_array);
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.lerp(b, frac)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
 }
 
 fn sample_driver(

@@ -312,9 +312,16 @@ private struct AvatarLayersPanelView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach($layers) { $row in
+                    // Iterate by VALUE (not `ForEach($layers)`). Element bindings
+                    // produced by `$layers` index into the array by position, so
+                    // clearing layers (Clear all) left the Toggle/Slider holding
+                    // stale index bindings → `Array._checkSubscript` out-of-bounds
+                    // → SIGTRAP. The id-keyed bindings below look up by id and
+                    // return a default when the row is gone, so a shrinking array
+                    // can never crash.
+                    ForEach(layers) { row in
                         VStack(alignment: .leading, spacing: 6) {
-                            Toggle(isOn: $row.enabled) {
+                            Toggle(isOn: enabledBinding(for: row.id)) {
                                 HStack(alignment: .firstTextBaseline) {
                                     Text(row.label)
                                         .font(.subheadline)
@@ -324,19 +331,7 @@ private struct AvatarLayersPanelView: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            .onChange(of: row.enabled) { _, on in
-                                JarvisBevySession.layersSetEnabled(layerId: row.id, enabled: on)
-                            }
-                            Slider(
-                                value: Binding(
-                                    get: { Double(row.weight) },
-                                    set: { v in
-                                        row.weight = Float(v)
-                                        JarvisBevySession.layersSetWeight(layerId: row.id, weight: row.weight)
-                                    }
-                                ),
-                                in: 0 ... 1
-                            ) {
+                            Slider(value: weightBinding(for: row.id), in: 0 ... 1) {
                                 Text("Weight")
                             }
                         }
@@ -351,6 +346,29 @@ private struct AvatarLayersPanelView: View {
         }
         .padding(.horizontal, 8)
         .onAppear { refresh() }
+    }
+
+    /// Safe Toggle binding keyed by layer id — reads/writes by id lookup so a
+    /// cleared/shrunk `layers` array can never index out of bounds (the crash).
+    private func enabledBinding(for id: UInt64) -> Binding<Bool> {
+        Binding(
+            get: { layers.first(where: { $0.id == id })?.enabled ?? false },
+            set: { on in
+                if let i = layers.firstIndex(where: { $0.id == id }) { layers[i].enabled = on }
+                JarvisBevySession.layersSetEnabled(layerId: id, enabled: on)
+            }
+        )
+    }
+
+    /// Safe Slider binding keyed by layer id (same rationale as `enabledBinding`).
+    private func weightBinding(for id: UInt64) -> Binding<Double> {
+        Binding(
+            get: { Double(layers.first(where: { $0.id == id })?.weight ?? 0) },
+            set: { v in
+                if let i = layers.firstIndex(where: { $0.id == id }) { layers[i].weight = Float(v) }
+                JarvisBevySession.layersSetWeight(layerId: id, weight: Float(v))
+            }
+        )
     }
 
     private func refresh() {

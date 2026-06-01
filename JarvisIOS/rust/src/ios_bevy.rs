@@ -400,7 +400,7 @@ fn spawn_ios_viewport(
     orbit.target_focus = focus;
     orbit.target_radius = 3.35;
     orbit.radius = Some(3.35);
-    orbit.zoom_lower_limit = 0.35;
+    orbit.zoom_lower_limit = 0.15;
     orbit.zoom_upper_limit = Some(96.0);
     orbit.touch_enabled = true;
     orbit.touch_controls = TouchControls::OneFingerOrbit;
@@ -417,7 +417,7 @@ fn spawn_ios_viewport(
         msaa_for_samples(graphics.msaa_samples),
         Projection::Perspective(PerspectiveProjection {
             fov: FRAC_PI_4,
-            near: 0.08,
+            near: 0.001,
             far: 200.0,
             ..default()
         }),
@@ -690,6 +690,15 @@ pub(crate) fn ios_apply_json_anim_request(world: &mut World, path: String, loop_
     let old_stopped = world
         .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
         .supersede_stopped_idle_snapshot();
+    // Restore the outgoing clip's posed bones to rest BEFORE the new clip takes
+    // over — otherwise pose #1's leftover bone rotations leak into pose #2 (the
+    // "first animation interferes with the second / need clear overrides" bug).
+    let old_touched = world
+        .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
+        .supersede_touched_snapshot();
+    if !old_touched.is_empty() {
+        crate::ios_anim_json::reset_bones_to_rest_on_world(world, &old_touched);
+    }
     let mut clip = crate::ios_anim_json::try_build_clip(&path, world, Some(loop_forever));
     if !old_stopped.is_empty() {
         crate::ios_anim_json::resume_idle_vrmas_on_world(world, &old_stopped);
@@ -846,6 +855,10 @@ pub fn ios_set_idle_animation_enabled(world: &mut World, enabled: bool) {
         world
             .resource_mut::<IosIdlePlaybackState>()
             .paused_entities = stopped.clone();
+        // Stopping the idle VRMA leaves bones frozen at its last sampled frame —
+        // restore them to rest so disabling idle actually returns to a neutral
+        // stance instead of "still playing" (layers, if on, recompose next frame).
+        crate::ios_anim_layers::reset_bind_bones_to_rest_world(world);
         if let Some(root) = world.resource::<IosAvatarRootEntity>().0 {
             bevy_vrm1::prelude::reset_spring_velocities_recursive_world(world, root);
         }
@@ -1547,6 +1560,11 @@ impl IosEmbeddedRenderer {
         // Without an explicit reset the hair can keep swinging long after
         // every layer is disabled — that was the user-visible symptom.
         if was && !enabled {
+            // Restore the bones the layers were driving to rest (the master-off
+            // early-return in `ios_advance_anim_layers` otherwise leaves the last
+            // composed pose frozen = "layers still playing when disabled"), then
+            // settle the springs.
+            crate::ios_anim_layers::reset_bind_bones_to_rest_world(self.app.world_mut());
             crate::ios_device_motion::ios_reset_springs_after_device_motion_off(self.app.world_mut());
         }
     }
@@ -1599,6 +1617,9 @@ impl IosEmbeddedRenderer {
         // reset spring velocities so the hair doesn't keep oscillating
         // from energy injected by the (now-cleared) procedural layers.
         self.invalidate_layer_pose_snapshot();
+        // Return the bones the layers were composing back to rest so clearing
+        // doesn't leave the last composed pose stuck, then settle the springs.
+        crate::ios_anim_layers::reset_bind_bones_to_rest_world(self.app.world_mut());
         crate::ios_device_motion::ios_reset_springs_after_device_motion_off(self.app.world_mut());
     }
 

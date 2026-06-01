@@ -997,6 +997,7 @@ fn render_tab_body(
             pc,
             sender,
             indexed,
+            snapshot,
             rig_params,
         ),
         PoseControllerTab::IntentLab => {
@@ -1083,6 +1084,23 @@ impl std::ops::Deref for KimodoClientRes {
 
 // ---------- Top transport toolbar ----------------------------------------------
 
+/// Reset every bone to bind pose, clear slider cache, and record undo.
+pub(super) fn reset_all_bones(
+    state: &mut PoseControllerUiState,
+    sender: Option<&PoseCommandSender>,
+    snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
+    undo: Option<&UndoHistory>,
+) {
+    if let (Some(h), Some(snap)) = (undo, snapshot) {
+        h.record(snap, &state.bone_euler, "reset all bones");
+    }
+    state.bone_euler.clear();
+    if let Some(s) = sender {
+        s.send(PoseCommand::ResetPose);
+    }
+    state.status = Some("reset rig to bind pose".into());
+}
+
 /// Inline transport buttons (Reset / Stop native / Stop idle / Resume idle /
 /// auto-stop checkbox). Adds widgets directly into the parent layout —
 /// expected to be called from the menu bar so these stay reachable
@@ -1140,17 +1158,11 @@ pub(super) fn transport_toolbar(
     }
     ui.separator();
     if ui
-        .button("⟲")
+        .button(icons::icon(icons::REFRESH))
         .on_hover_text("Reset pose + expressions (reset_pose MCP)")
         .clicked()
     {
-        if let Some(s) = sender {
-            if let (Some(h), Some(snap)) = (undo, snapshot) {
-                h.record(snap, &state.bone_euler, "reset pose");
-            }
-            s.send(PoseCommand::ResetPose);
-            state.status = Some("reset pose queued".into());
-        }
+        reset_all_bones(state, sender, snapshot, undo);
     }
     ui.separator();
     ui.checkbox(&mut pose_settings.auto_stop_idle_vrma, "auto-stop idle")
@@ -1179,6 +1191,13 @@ pub(super) fn playback_indicator(ui: &mut egui::Ui, active_anim: &ActiveNativeAn
 
 // ---------- Library (poses) tab -----------------------------------------------
 
+/// Fixed width for pose list rows (edit + apply button); avoids full-panel stretch.
+const POSE_LIBRARY_WIDTH: f32 = 280.0;
+
+fn pose_library_width(ui: &egui::Ui) -> f32 {
+    POSE_LIBRARY_WIDTH.min(ui.available_width().max(120.0))
+}
+
 fn library_tab(
     ui: &mut egui::Ui,
     state: &mut PoseControllerUiState,
@@ -1188,18 +1207,27 @@ fn library_tab(
     undo: Option<&UndoHistory>,
 ) {
     let categories: Vec<String> = collect_pose_categories(library);
+    let content_w = pose_library_width(ui);
+    ui.set_max_width(content_w);
 
     ui.horizontal(|ui| {
-        ui.label("Filter");
-        ui.text_edit_singleline(&mut state.search);
+        ui.add(
+            egui::TextEdit::singleline(&mut state.search)
+                .hint_text("filter…")
+                .desired_width(92.0),
+        );
         category_combobox(
             ui,
             "pose_filter_cat",
             &categories,
             &mut state.category_filter,
-            "Category",
+            "",
         );
-        if ui.button("Refresh").clicked() {
+        if ui
+            .button(icons::icon(icons::REFRESH))
+            .on_hover_text("Reload pose list from disk")
+            .clicked()
+        {
             library.mark_dirty();
         }
     });
@@ -1288,6 +1316,7 @@ fn library_tab(
         .max_height(ui.available_height() / 1.1)
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.set_max_width(content_w);
             if grouped.is_empty() {
                 ui.label(egui::RichText::new("no poses match").weak());
                 return;
@@ -1298,6 +1327,7 @@ fn library_tab(
                     .id_salt(format!("pose-cat-section-{category}"))
                     .default_open(true)
                     .show(ui, |ui| {
+                        ui.set_max_width(content_w);
                         for pose in poses {
                             pose_row(
                                 ui, state, library, sender, &categories, pose, snapshot, undo,
@@ -1335,11 +1365,15 @@ fn category_combobox(
     current: &mut String,
     label: &str,
 ) {
-    ui.label(label);
+    if !label.is_empty() {
+        ui.label(label);
+    }
+    let width = if label.is_empty() { 96.0 } else { 140.0 };
+    let any_text = if label.is_empty() { "any" } else { "(any)" };
     egui::ComboBox::from_id_salt(id_salt)
-        .width(140.0)
+        .width(width)
         .selected_text(if current.trim().is_empty() {
-            "(any)".into()
+            any_text.into()
         } else {
             current.clone()
         })
@@ -1372,28 +1406,20 @@ fn pose_row(
         return;
     }
 
-    // Compact, full-row clickable: the pose name is a selectable label that
-    // fills the row width (minus the trailing edit button) and applies the pose
-    // on click. Hover styling comes from the selectable, so the row reads as
-    // interactive. The edit button is rendered separately so it stays clickable.
     let mut apply = false;
-    let row_h = ui.spacing().interact_size.y;
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+    ui.horizontal(|ui| {
         if ui
-            .button(icons::icon(icons::EDIT))
+            .small_button(icons::icon(icons::EDIT))
             .on_hover_text("Edit (rename, change category, delete)")
             .clicked()
         {
             state.editing_pose = Some(pose.name.clone());
         }
-        let resp = jarvis_avatar::egui_widgets::full_width_selectable_row(
-            ui,
-            false,
-            egui::RichText::new(&pose.name).strong(),
-            row_h,
-        )
-        .on_hover_text("Apply this pose");
-        if resp.clicked() {
+        if ui
+            .button(egui::RichText::new(&pose.name).strong())
+            .on_hover_text("Apply this pose")
+            .clicked()
+        {
             apply = true;
         }
     });
@@ -1438,6 +1464,7 @@ fn pose_edit_row(
     let frame = egui::Frame::group(ui.style())
         .fill(egui::Color32::from_rgba_unmultiplied(80, 100, 160, 36));
     frame.show(ui, |ui| {
+        ui.set_max_width(pose_library_width(ui));
         ui.horizontal(|ui| {
             ui.label("name");
             let buf = state
@@ -2051,6 +2078,7 @@ fn ai_gen_panel(
                         Some(state.gen_save_name.trim().to_string())
                     },
                     timeout: std::time::Duration::from_secs(180),
+                    ..Default::default()
                 };
                 let client = (*k).clone();
                 state.status = Some("generate queued".into());
@@ -2144,15 +2172,15 @@ fn expressions_panel(
     snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
     pose_settings: &jarvis_avatar::config::PoseControllerSettings,
 ) {
-    ui.label(egui::RichText::new("VRM expression presets").strong());
-    ui.small(format!(
-        "Idle VRMA can overwrite morphs unless `auto-stop idle` is on in the toolbar (currently {}).",
-        if pose_settings.auto_stop_idle_vrma {
-            "on"
-        } else {
-            "off"
-        }
-    ));
+    ui.label(egui::RichText::new("VRM expression presets").strong())
+        .on_hover_text(format!(
+            "Idle VRMA can overwrite morphs unless auto-stop idle is on in the toolbar (currently {}).",
+            if pose_settings.auto_stop_idle_vrma {
+                "on"
+            } else {
+                "off"
+            }
+        ));
 
     let presets: Vec<String> = snapshot
         .map(|h| h.0.read().expression_presets.clone())
@@ -2206,7 +2234,12 @@ fn expressions_panel(
 
     ui.add_space(4.0);
     ui.label(format!("{} preset(s).", presets.len()));
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+    let scroll_h = ui.available_height().max(48.0);
+    egui::ScrollArea::vertical()
+        .id_salt("pose_vrm_expression_presets")
+        .max_height(scroll_h)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
         for name in &presets {
             let w = state
                 .expression_sliders
@@ -2276,6 +2309,9 @@ fn bones_with_expressions_tab(
                     egui::vec2(right_w, half),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
+                        let clip = ui.max_rect();
+                        ui.set_clip_rect(clip);
+                        ui.set_max_size(egui::vec2(right_w, half));
                         expressions_panel(
                             ui,
                             state,
@@ -2290,8 +2326,14 @@ fn bones_with_expressions_tab(
                     egui::vec2(right_w, half),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
+                        let clip = ui.max_rect();
+                        ui.set_clip_rect(clip);
+                        ui.set_max_size(egui::vec2(right_w, half));
                         ui.label(egui::RichText::new("Spring bone physics").strong());
+                        let scroll_h = ui.available_height().max(48.0);
                         egui::ScrollArea::vertical()
+                            .id_salt("pose_spring_bone_physics")
+                            .max_height(scroll_h)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 super::rig_editor::spring_panels(
@@ -2333,18 +2375,11 @@ fn bones_panel(
 
     ui.horizontal(|ui| {
         if ui
-            .button("Reset all")
-            .on_hover_text("Reset every bone back to bind (rest) — same as the toolbar reset.")
+            .button(icons::menu_item(icons::REFRESH, "Reset all"))
+            .on_hover_text("Reset every bone back to bind (rest) pose.")
             .clicked()
         {
-            if let (Some(h), Some(snap)) = (undo, snapshot) {
-                h.record(snap, &state.bone_euler, "reset all bones");
-            }
-            state.bone_euler.clear();
-            if let Some(s) = sender {
-                s.send(PoseCommand::ResetPose);
-            }
-            state.status = Some("reset rig to bind pose".into());
+            reset_all_bones(state, sender, snapshot, undo);
         }
         if ui
             .button(format!("{} Snapshot {} sliders", icons::CAMERA, icons::ARROW_RIGHT))

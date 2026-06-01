@@ -32,6 +32,7 @@ pub mod native_anim_player;
 pub mod pose_capture;
 pub mod pose_driver;
 pub mod pose_library_assets;
+pub mod pose_review;
 pub mod rig_editor;
 pub mod service_status;
 pub mod shared_runtime;

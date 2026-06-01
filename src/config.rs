@@ -773,7 +773,7 @@ fn default_pose_dock_side() -> String {
 }
 
 fn default_pose_dock_width() -> f32 {
-    520.0
+    340.0
 }
 
 fn default_pose_dock_bottom_height() -> f32 {
@@ -879,7 +879,7 @@ pub struct CameraSettings {
     pub pan_smoothness: f32,
     /// Perspective near-clip distance (meters). Anything closer than this to the
     /// camera gets clipped. Default 0.1 in Bevy is too aggressive for a VRM at
-    /// arm's length — drop to ~0.01 to keep her face intact when zoomed in.
+    /// arm's length — use ~0.001; runtime also scales down with zoom radius.
     #[serde(default = "default_near_clip")]
     pub near_clip: f32,
     /// Perspective far-clip distance (meters).
@@ -906,7 +906,7 @@ pub struct CameraSettings {
 }
 
 fn default_near_clip() -> f32 {
-    0.01
+    0.001
 }
 fn default_far_clip() -> f32 {
     1000.0

@@ -34,6 +34,11 @@ pub(crate) struct ActiveJsonClip {
     vrm_entity: Entity,
     /// Idle VRMA entities we [`StopVrma`] so JSON can own bone transforms; replay on clip end.
     pub(crate) stopped_idle_vrma: Vec<Entity>,
+    /// Bone entities this clip actually writes (union of all frame bone keys).
+    /// Restored to their `RestTransform` rotation when the clip finishes or is
+    /// superseded so a clip's pose never persists as a stuck "override" into the
+    /// next clip / idle (the bug that forced a manual "clear overrides").
+    pub(crate) touched_bones: Vec<Entity>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +86,28 @@ impl IosJsonAnimPlayback {
             .as_ref()
             .map(|c| c.stopped_idle_vrma.clone())
             .unwrap_or_default()
+    }
+
+    /// Bones the currently-active clip has been driving — restore these to rest
+    /// before a superseding clip starts so its pose doesn't leak through.
+    pub(crate) fn supersede_touched_snapshot(&self) -> Vec<Entity> {
+        self.inner
+            .as_ref()
+            .map(|c| c.touched_bones.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Restore a set of bone entities to their `RestTransform` rotation. Used to
+/// clear a finished/superseded clip's pose so it never persists as an override.
+pub(crate) fn reset_bones_to_rest_on_world(world: &mut World, bones: &[Entity]) {
+    for &ent in bones {
+        let Some(rest) = world.get::<RestTransform>(ent).map(|r| r.0.rotation) else {
+            continue;
+        };
+        if let Some(mut tf) = world.get_mut::<Transform>(ent) {
+            tf.rotation = rest;
+        }
     }
 }
 
@@ -168,6 +195,18 @@ pub(crate) fn try_build_clip(
         .iter(world)
         .next()?;
     let bone_lower_to_entity = build_bone_name_map(world, avatar_root);
+    // Bones this clip writes → entities, so we can restore them to rest when it
+    // ends / is superseded (no persistent overrides).
+    let mut touched_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for f in &animation.frames {
+        for k in f.bones.keys() {
+            touched_keys.insert(k.to_ascii_lowercase());
+        }
+    }
+    let touched_bones: Vec<Entity> = touched_keys
+        .iter()
+        .filter_map(|k| bone_lower_to_entity.get(k).copied())
+        .collect();
     let fps = if animation.fps > 0.0 {
         animation.fps as f32
     } else {
@@ -198,6 +237,7 @@ pub(crate) fn try_build_clip(
         bone_lower_to_entity,
         vrm_entity,
         stopped_idle_vrma: Vec::new(),
+        touched_bones,
     })
 }
 
@@ -421,7 +461,16 @@ fn ios_json_anim_tick(
         });
         crate::jarvis_ios_line!("[JarvisIOS] json anim: finished {}", clip.animation.name);
         let stopped = clip.stopped_idle_vrma.clone();
+        let touched = clip.touched_bones.clone();
         playback.stop();
+        // Restore the clip's bones to rest so the pose doesn't persist as a
+        // stuck override after the hold; idle VRMA / layers then re-compose
+        // from rest. (Previously only expressions were cleared.)
+        for &ent in &touched {
+            if let Ok((mut tf, Some(rest), _)) = transforms.get_mut(ent) {
+                tf.rotation = rest.0.rotation;
+            }
+        }
         resume_idle_vrmas(&mut commands, &stopped);
     }
 }

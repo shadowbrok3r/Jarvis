@@ -6,6 +6,22 @@ use rmcp::schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// Deserialize a value that may arrive either as the structured object/enum OR
+/// as a JSON **string** containing it. Works around MCP clients that stringify
+/// params whose JSON-Schema lacks an explicit `"type"` (tagged enums / free
+/// objects) — e.g. `add_layer`'s `driver`.
+fn de_string_or_struct<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = Value::deserialize(deserializer)?;
+    match v {
+        Value::String(s) => serde_json::from_str(&s).map_err(serde::de::Error::custom),
+        other => serde_json::from_value(other).map_err(serde::de::Error::custom),
+    }
+}
+
 use jarvis_avatar::pose_library::PoseLibrary;
 
 use crate::plugins::anim_layer_sets::LayerSetsStore;
@@ -134,6 +150,9 @@ pub struct AddLayerArgs {
     pub slug: String,
     #[serde(default)]
     pub label: Option<String>,
+    /// Accepts the driver object directly, or a JSON string of it (some MCP
+    /// clients stringify untyped/tagged-enum params).
+    #[serde(deserialize_with = "de_string_or_struct")]
     pub driver: LayerDriverSpec,
     #[serde(default)]
     pub weight: Option<f32>,

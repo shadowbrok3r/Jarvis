@@ -68,6 +68,7 @@ pub fn rig_tab(
     pc: &mut super::pose_controller::PoseControllerUiState,
     sender: Option<&PoseCommandSender>,
     indexed: Option<&IndexedBones>,
+    snapshot: Option<&BoneSnapshotHandle>,
     rig_params: &mut RigTabSystemParam,
 ) {
     // Disjoint field borrows so the closure captured by `ScrollArea` can also
@@ -169,7 +170,7 @@ pub fn rig_tab(
     });
 
     ui.separator();
-    mirror_panel(ui, pc, sender, mirror);
+    mirror_panel(ui, pc, sender, mirror, rig, snapshot);
 
     ui.collapsing("Axis ring opacity & precision", |ui| {
         ui.small(
@@ -289,6 +290,8 @@ fn mirror_panel(
     pc: &mut super::pose_controller::PoseControllerUiState,
     sender: Option<&PoseCommandSender>,
     mirror: &mut MirrorState,
+    rig: &RigEditorState,
+    snapshot: Option<&BoneSnapshotHandle>,
 ) {
     ui.horizontal(|ui| {
         ui.toggle_value(&mut mirror.realtime, "Realtime mirror")
@@ -314,8 +317,12 @@ fn mirror_panel(
         // Per-bone mirror — operates on whichever bone the rig editor's
         // selected_bone resolves to (synced with bone list, viewport pick).
         let label = match (pc.bone_euler.is_empty(), pc.bone_search.is_empty()) {
-            (true, _) => "Mirror selected → partner".into(),
-            (false, _) => format!("Mirror {} entries → partner", pc.bone_euler.len()),
+            (true, _) => format!("Mirror selected {} partner", icons::ARROW_RIGHT),
+            (false, _) => format!(
+                "Mirror {} entries {} partner",
+                pc.bone_euler.len(),
+                icons::ARROW_RIGHT
+            ),
         };
         let mirror_one = ui
             .button("Mirror current selection")
@@ -325,14 +332,20 @@ fn mirror_panel(
             )
             .clicked();
         if mirror_one {
-            mirror_one_bone(pc, sender, mirror);
+            mirror_one_bone(
+                pc,
+                sender,
+                mirror,
+                rig.selected_bone.as_deref(),
+                snapshot,
+            );
         }
         let _ = label;
     });
 
     egui::ComboBox::from_id_salt("rig_mirror_chain_pick")
         .width(220.0)
-        .selected_text(format!("Mirror chain {}", icons::ARROW_RIGHT))
+        .selected_text(icons::menu_item(icons::MIRROR, "Mirror chain"))
         .show_ui(ui, |ui| {
             for chain in [
                 MirrorChain::LeftArm,
@@ -345,55 +358,53 @@ fn mirror_panel(
                 MirrorChain::RightSide,
                 MirrorChain::AllPaired,
             ] {
-                if ui.button(chain.label()).clicked() {
-                    mirror_chain_action(pc, sender, chain);
+                if ui.button(chain.menu_label()).clicked() {
+                    mirror_chain_action(pc, sender, chain, snapshot);
                     pc.mirror_chain_status = Some(format!("Mirrored chain: {}", chain.label()));
                 }
             }
         });
 }
 
-/// Mirror the rig editor's currently selected bone (or, if none, the first
-/// non-zero bone in `bone_euler`) onto its partner. Honors the existing
-/// `bone_euler` cache so the slider mirror stays consistent.
+/// Mirror the rig editor's selected bone (or the first edited bone) onto its
+/// partner, reading the source rotation from the live bone snapshot.
 pub(super) fn mirror_one_bone(
     pc: &mut super::pose_controller::PoseControllerUiState,
     sender: Option<&PoseCommandSender>,
     mirror: &mut MirrorState,
+    selected_bone: Option<&str>,
+    snapshot: Option<&BoneSnapshotHandle>,
 ) {
-    let selected = pc
-        .bone_euler
-        .iter()
-        .find(|(_, v)| v.iter().any(|d| d.abs() > 1.0e-3))
-        .map(|(k, _)| k.clone());
-    let Some(bone) = selected else {
-        pc.status = Some("mirror: no edited bone to mirror".into());
+    let bone = selected_bone
+        .map(str::to_string)
+        .or_else(|| {
+            pc.bone_euler
+                .iter()
+                .find(|(_, v)| v.iter().any(|d| d.abs() > 1.0e-3))
+                .map(|(k, _)| k.clone())
+        });
+    let Some(bone) = bone else {
+        pc.status = Some("mirror: select a bone or edit one first".into());
         return;
     };
-    let deg = pc.bone_euler.get(&bone).copied().unwrap_or([0.0, 0.0, 0.0]);
-    // Convert primary deg → quat (uses the same DEF-toe yaw cosmetic the bone
-    // write path applies), then mirror, then re-decompose to Euler so the
-    // partner's slider buffer also updates.
-    let q = bone_euler_to_quat(&bone, deg);
-    let Some((partner, mirrored_q_arr)) = MirrorState::one_shot_partner(
-        &bone,
-        [q.x, q.y, q.z, q.w],
-    ) else {
+    let Some(primary_q) = bone_rotation_quat(&bone, snapshot, &pc.bone_euler) else {
+        pc.status = Some(format!("mirror: no rotation for '{bone}'"));
+        return;
+    };
+    let Some((partner, mirrored_q_arr)) =
+        MirrorState::one_shot_partner(&bone, primary_q)
+    else {
         pc.status = Some(format!("mirror: '{bone}' has no partner"));
         return;
     };
-    let mirrored_q = Quat::from_xyzw(
-        mirrored_q_arr[0],
-        mirrored_q_arr[1],
-        mirrored_q_arr[2],
-        mirrored_q_arr[3],
-    );
-    let (ex, ey, ez) = mirrored_q.to_euler(EulerRot::XYZ);
-    let mirrored_deg = [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()];
+    let mirrored_deg = quat_arr_to_euler_deg(mirrored_q_arr);
     pc.bone_euler.insert(partner.clone(), mirrored_deg);
     if let Some(s) = sender {
         super::pose_controller::send_apply_bones_euler_deg(s, &partner, mirrored_deg);
-        pc.status = Some(format!("mirror: {bone} → {partner}"));
+        pc.status = Some(format!(
+            "mirror: {bone} {} {partner}",
+            icons::ARROW_RIGHT
+        ));
     }
     let _ = mirror;
 }
@@ -402,37 +413,27 @@ pub(super) fn mirror_chain_action(
     pc: &mut super::pose_controller::PoseControllerUiState,
     sender: Option<&PoseCommandSender>,
     chain: MirrorChain,
+    snapshot: Option<&BoneSnapshotHandle>,
 ) {
     let bones = chain_bones(chain);
     let mut updates: HashMap<String, [f32; 4]> = HashMap::new();
     let mut status_count = 0usize;
     for src_bone in bones {
-        let Some(deg) = pc.bone_euler.get(src_bone).copied() else {
+        let Some(primary_q) = bone_rotation_quat(src_bone, snapshot, &pc.bone_euler) else {
             continue;
         };
-        let q = bone_euler_to_quat(src_bone, deg);
-        let Some((partner, mirrored)) = MirrorState::one_shot_partner(
-            src_bone,
-            [q.x, q.y, q.z, q.w],
-        ) else {
-            // Center-line bones (hips, spine, …) under `chain_bones` — apply
-            // the mirrored quaternion to themselves so a chain mirror is
-            // idempotent.
+        let q = Quat::from_xyzw(primary_q[0], primary_q[1], primary_q[2], primary_q[3]);
+        let Some((partner, mirrored)) = MirrorState::one_shot_partner(src_bone, primary_q) else {
             if matches!(resolve_pair(src_bone), super::super::mirror::MirrorPair::Same(_)) {
                 let m = mirror_quat(q);
                 updates.insert(src_bone.to_string(), [m.x, m.y, m.z, m.w]);
+                pc.bone_euler
+                    .insert(src_bone.to_string(), quat_arr_to_euler_deg([m.x, m.y, m.z, m.w]));
                 status_count += 1;
             }
             continue;
         };
-        // Update slider buffer for the partner so list/sliders match the new
-        // pose.
-        let mirrored_q = Quat::from_xyzw(mirrored[0], mirrored[1], mirrored[2], mirrored[3]);
-        let (ex, ey, ez) = mirrored_q.to_euler(EulerRot::XYZ);
-        pc.bone_euler.insert(
-            partner.clone(),
-            [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()],
-        );
+        pc.bone_euler.insert(partner.clone(), quat_arr_to_euler_deg(mirrored));
         updates.insert(partner, mirrored);
         status_count += 1;
     }
@@ -466,6 +467,30 @@ fn bone_euler_to_quat(bone: &str, deg: [f32; 3]) -> Quat {
         (deg[1] + yaw_extra).to_radians(),
         deg[2].to_radians(),
     )
+}
+
+fn quat_arr_to_euler_deg(q: [f32; 4]) -> [f32; 3] {
+    let q = Quat::from_xyzw(q[0], q[1], q[2], q[3]);
+    let (ex, ey, ez) = q.to_euler(EulerRot::XYZ);
+    [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()]
+}
+
+/// Live snapshot first; slider cache only when the bone is missing from snapshot.
+fn bone_rotation_quat(
+    bone: &str,
+    snapshot: Option<&BoneSnapshotHandle>,
+    bone_euler: &HashMap<String, [f32; 3]>,
+) -> Option<[f32; 4]> {
+    if let Some(snap_handle) = snapshot {
+        let snap = snap_handle.0.read();
+        if let Some(entry) = snap.bones.get(bone) {
+            return Some(entry.rotation);
+        }
+    }
+    bone_euler.get(bone).map(|deg| {
+        let q = bone_euler_to_quat(bone, *deg);
+        [q.x, q.y, q.z, q.w]
+    })
 }
 
 fn srgb_to_egui(c: Color) -> egui::Color32 {

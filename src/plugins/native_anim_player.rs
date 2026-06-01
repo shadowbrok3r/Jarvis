@@ -21,12 +21,20 @@ use parking_lot::RwLock;
 use jarvis_avatar::pose_library::{AnimationFile, AnimationFrame};
 
 use crate::plugins::anim_layers::smoothstep;
-use crate::plugins::pose_driver::{PoseCommand, PoseCommandSender};
+use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommand, PoseCommandSender};
 
 /// Seconds of crossfade across a looping clip's end → start seam. The last
 /// `LOOP_FADE_SECS` of the loop are blended toward frame 0 so the wrap is
 /// continuous instead of hard-snapping (the "glitch reset" on loop restart).
 const LOOP_FADE_SECS: f32 = 0.35;
+
+/// Seconds to ease from the rig's CURRENT pose into a clip's first frame.
+/// Applied only on the first frame after `start()` — which covers both the
+/// entry from idle AND a back-to-back handoff (each new clip re-`start()`s, so
+/// the rig blends from the previous clip's end pose instead of teleporting).
+/// Without this, a stand→kneel clip ending in a kneel snaps the whole skeleton
+/// back to standing in one frame (the 9000°/s leg spikes in the glitch log).
+const ENTRY_BLEND_SECS: f32 = 0.22;
 
 pub struct NativeAnimPlayerPlugin;
 
@@ -64,6 +72,11 @@ struct ActiveClip {
     elapsed: f32,
     holding_elapsed: f32,
     frame_duration_secs: f32,
+    /// Rig pose (ApplyBones-space quats) captured at clip start, used to ease
+    /// from the current pose into the clip over `ENTRY_BLEND_SECS` instead of
+    /// teleporting. `None` until captured on the first tick; cleared once the
+    /// entry window elapses.
+    entry_from: Option<HashMap<String, [f32; 4]>>,
 }
 
 impl ActiveNativeAnimation {
@@ -99,6 +112,7 @@ impl ActiveNativeAnimation {
             elapsed: 0.0,
             holding_elapsed: 0.0,
             frame_duration_secs: (1.0 / fps).max(1.0 / 240.0),
+            entry_from: None,
         });
         self.last_applied_frame = None;
     }
@@ -130,6 +144,7 @@ fn tick_active_animation(
     time: Res<Time>,
     mut active: ResMut<ActiveNativeAnimation>,
     sender: Option<Res<PoseCommandSender>>,
+    snapshot: Option<Res<BoneSnapshotHandle>>,
 ) {
     let Some(sender) = sender else {
         return;
@@ -146,6 +161,28 @@ fn tick_active_animation(
     }
 
     clip.elapsed += time.delta_secs();
+    // Entry ease-in: for the first ENTRY_BLEND_SECS of a clip (fresh play OR a
+    // back-to-back handoff — `start()` resets `elapsed` to 0), capture the rig's
+    // current pose and slerp from it into the clip so the skeleton doesn't
+    // teleport (the 9000°/s clip-boundary spikes in the glitch log). The blend
+    // is baked into the emitted pose, so playback stays instant-applied and
+    // independent of the global `blend_transitions_enabled` flag.
+    let in_entry_window = clip.elapsed <= ENTRY_BLEND_SECS;
+    if in_entry_window && clip.entry_from.is_none() {
+        let captured = snapshot
+            .as_ref()
+            .map(|h| {
+                h.0.read()
+                    .bones
+                    .iter()
+                    .map(|(name, e)| (name.clone(), e.rotation))
+                    .collect::<HashMap<String, [f32; 4]>>()
+            })
+            .unwrap_or_default();
+        clip.entry_from = Some(captured);
+    } else if !in_entry_window {
+        clip.entry_from = None;
+    }
     let total_frames = clip.animation.frames.len();
     let fps = 1.0 / clip.frame_duration_secs;
     // Loop period: frame i sits at t = i / fps, so the wrap back to frame 0
@@ -161,7 +198,20 @@ fn tick_active_animation(
     };
 
     let loop_fade = if clip.looping { LOOP_FADE_SECS } else { 0.0 };
-    let (bones, expressions) = sampled_clip_pose(&clip.animation, t, fps, loop_period, loop_fade);
+    let (mut bones, expressions) = sampled_clip_pose(&clip.animation, t, fps, loop_period, loop_fade);
+    if in_entry_window {
+        if let Some(from) = clip.entry_from.as_ref() {
+            let w = smoothstep((clip.elapsed / ENTRY_BLEND_SECS).clamp(0.0, 1.0));
+            for (name, q) in bones.iter_mut() {
+                if let Some(f) = from.get(name) {
+                    let a = Quat::from_xyzw(f[0], f[1], f[2], f[3]);
+                    let b = Quat::from_xyzw(q[0], q[1], q[2], q[3]);
+                    let blended = a.slerp(b, w);
+                    *q = [blended.x, blended.y, blended.z, blended.w];
+                }
+            }
+        }
+    }
     push_pose(sender.as_ref(), bones, expressions);
 
     let nearest = ((t * fps).round() as usize).min(total_frames - 1);

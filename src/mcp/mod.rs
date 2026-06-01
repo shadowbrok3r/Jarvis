@@ -38,7 +38,7 @@ use crossbeam_channel::RecvTimeoutError;
 use jarvis_avatar::a2f::{A2fClient, A2fConfig};
 use jarvis_avatar::model_catalog::{list_vrm_models, resolve_vrm_load_argument};
 use jarvis_avatar::paths::expand_home;
-use jarvis_avatar::pose_library::{slugify, BoneRotation, PoseFile, PoseLibrary};
+use jarvis_avatar::pose_library::{slugify, BoneRotation, PoseFile, PoseGraph, PoseLibrary};
 
 use crate::kimodo::{GenerateRequest, KimodoClient};
 use crate::plugins::channel_server::HubBroadcast;
@@ -92,6 +92,8 @@ pub struct JarvisMcpServer {
     pub semantic_model_path: Arc<RwLock<String>>,
     pub semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
     pub intent_calibration_wizard: Arc<RwLock<IntentCalibrationWizardSession>>,
+    /// Human-in-the-loop pose approval gate (shared with the egui window).
+    pub pose_review: crate::plugins::pose_review::PoseReviewHandle,
     tool_router: ToolRouter<Self>,
 }
 
@@ -120,6 +122,7 @@ impl JarvisMcpServer {
         semantic_model_path: Arc<RwLock<String>>,
         semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
         intent_calibration_wizard: Arc<RwLock<IntentCalibrationWizardSession>>,
+        pose_review: crate::plugins::pose_review::PoseReviewHandle,
     ) -> Self {
         Self::with_kimodo(
             pose_tx,
@@ -138,6 +141,7 @@ impl JarvisMcpServer {
             semantic_model_path,
             semantic_calibration,
             intent_calibration_wizard,
+            pose_review,
         )
     }
 
@@ -162,6 +166,7 @@ impl JarvisMcpServer {
         semantic_model_path: Arc<RwLock<String>>,
         semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
         intent_calibration_wizard: Arc<RwLock<IntentCalibrationWizardSession>>,
+        pose_review: crate::plugins::pose_review::PoseReviewHandle,
     ) -> Self {
         Self {
             pose_tx,
@@ -180,6 +185,7 @@ impl JarvisMcpServer {
             semantic_model_path,
             semantic_calibration,
             intent_calibration_wizard,
+            pose_review,
             tool_router: Self::tool_router(),
         }
     }
@@ -188,6 +194,88 @@ impl JarvisMcpServer {
         let path = self.semantic_model_path.read().unwrap();
         let key = crate::plugins::vrm_preset_key(&path);
         self.semantic_calibration.read().unwrap().get(&key)
+    }
+
+    /// Poll the review handle for `id` for one short chunk (~20s) so a single
+    /// MCP request never approaches the client's request timeout. Returns the
+    /// verdict if the operator answered within the chunk, else `None`.
+    async fn wait_review_chunk(
+        &self,
+        id: u64,
+    ) -> Option<crate::plugins::pose_review::PoseReviewResult> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Some(r) = {
+                let mut st = self.pose_review.0.lock().unwrap();
+                st.take_result(id)
+            } {
+                return Some(r);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Apply the operator's verdict: when approved + overwrite, snapshot the
+    /// live rig over the reviewed pose name, then build the result JSON.
+    fn finish_review_json(
+        &self,
+        result: crate::plugins::pose_review::PoseReviewResult,
+    ) -> CallToolResult {
+        let mut overwritten = false;
+        let mut overwrite_error: Option<String> = None;
+        if result.approved && result.overwrite {
+            let snap = self.snapshot.0.read().clone();
+            if snap.bones.is_empty() {
+                overwrite_error = Some("no bones indexed — nothing to overwrite".into());
+            } else {
+                let bones: HashMap<String, BoneRotation> = snap
+                    .bones
+                    .iter()
+                    .map(|(name, entry)| {
+                        (
+                            name.clone(),
+                            BoneRotation {
+                                rotation: entry.rotation,
+                            },
+                        )
+                    })
+                    .collect();
+                let existing = self.library.find_pose(&result.pose_name).ok().flatten();
+                let pose = PoseFile {
+                    name: result.pose_name.clone(),
+                    description: existing
+                        .as_ref()
+                        .map(|p| p.description.clone())
+                        .unwrap_or_default(),
+                    category: existing
+                        .as_ref()
+                        .map(|p| p.category.clone())
+                        .unwrap_or_else(|| "general".into()),
+                    bones,
+                    expressions: snap.expressions.clone(),
+                    transition_duration: existing
+                        .as_ref()
+                        .map(|p| p.transition_duration)
+                        .unwrap_or(0.4),
+                };
+                match self.library.save_pose(&pose) {
+                    Ok(_) => overwritten = true,
+                    Err(e) => overwrite_error = Some(format!("{e}")),
+                }
+            }
+        }
+        ok_json(&json!({
+            "status": "answered",
+            "poseName": result.pose_name,
+            "approved": result.approved,
+            "feedback": result.feedback,
+            "overwriteRequested": result.overwrite,
+            "overwritten": overwritten,
+            "overwriteError": overwrite_error,
+        }))
     }
 }
 
@@ -342,6 +430,27 @@ pub struct UpdatePoseCategoryArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TagPoseArgs {
+    /// Pose name to tag (the key in the pose graph).
+    pub name: String,
+    /// Position/content tags. Non-empty replaces
+    /// the pose's tags; empty leaves them unchanged. (Typed array — passes through.)
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Hip height in meters: **>0 sets it; 0 leaves unchanged.** stand≈0.9,
+    /// kneel/squat≈0.5, lying≈0.2. Typed (not Option) to survive MCP stringify.
+    #[serde(default)]
+    pub root_y: f32,
+    /// Blessed for autonomous use. Applied on every call (default true — pass
+    /// false to un-bless). Typed bool, passes through.
+    #[serde(default = "default_true")]
+    pub autonomous: bool,
+    /// Poses this one can transition to naturally. Non-empty replaces; empty leaves.
+    #[serde(default)]
+    pub next_poses: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct GenerateMotionArgs {
     /// Text description of the motion.
     pub prompt: String,
@@ -357,10 +466,105 @@ pub struct GenerateMotionArgs {
     /// If set, Kimodo will save the generated animation under this name.
     #[serde(default)]
     pub save_name: Option<String>,
+    /// Phase A: path to a Kimodo `constraints.json` (EE / fullbody / root2d
+    /// keyframes). Empty = text-only. Plain string (typed) to avoid the
+    /// untyped-Option stringification quirk.
+    #[serde(default)]
+    pub constraints_path: String,
+    /// Phase B: attach Kimodo's root trajectory as per-frame `rootPosition`
+    /// (root motion). Plain bool (typed) for the same reason.
+    #[serde(default)]
+    pub allow_root_motion: bool,
     /// Optional timeout override for this request (seconds). If omitted,
     /// `[mcp].kimodo_timeout_sec` is used.
     #[serde(default)]
     pub timeout_sec: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReviewPoseArgs {
+    /// Pose name (or generated-clip name) being reviewed — shown in the popup.
+    pub pose_name: String,
+    /// The VISUAL GOAL — describe what the pose should look like in plain,
+    /// concrete body terms so the operator can sculpt the rig to match if it's
+    /// off. Cover the whole body: legs/knees, hips, torso lean, arms/hands,
+    /// head/gaze (e.g. "Kneeling upright: shins flat on the floor, knees folded
+    /// under her hips, thighs vertical, torso hinged ~45° forward, arms hanging
+    /// down resting near her thighs, head up looking forward."). Rendered
+    /// prominently in its own panel — DON'T put operational notes here.
+    #[serde(default)]
+    pub intent: String,
+    /// Operational note only (e.g. "layer stack disabled so the pose shows").
+    /// Rendered small + separate from the intent. Keep visual description out.
+    #[serde(default)]
+    pub note: String,
+    /// Apply this library pose to the avatar before asking (default true) so
+    /// the operator reviews exactly what's on screen. Set false when you've
+    /// already sculpted the live rig (e.g. via pose_bones) and want it judged
+    /// as-is.
+    #[serde(default = "default_true")]
+    pub apply: bool,
+    /// Deprecated: waiting is now chunked, so review_pose returns a pending
+    /// token quickly instead of blocking. Use await_pose_review to keep waiting.
+    #[serde(default)]
+    pub timeout_sec: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AwaitPoseReviewArgs {
+    /// Reserved for future per-call tuning; no fields required. Just call it
+    /// again whenever the previous review_pose / await_pose_review returned
+    /// status:"pending".
+    #[serde(default)]
+    pub review_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PoseKeyframeArg {
+    /// Library pose name (use `list_poses`). Retargeted VRM→SOMA77 server-side.
+    pub pose: String,
+    /// Frame index in the generated clip where the body should pass through
+    /// this pose. Put the most important keyframe at/near the LAST frame —
+    /// Kimodo tends to drift after the final constrained frame.
+    pub frame: u32,
+    /// Approximate hip height (m) at this keyframe: standing ≈ 0.90, kneeling
+    /// / folded lower (≈ 0.45–0.60). Drives the constraint's root FK + sink.
+    #[serde(default)]
+    pub root_y: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KeyframePoseMotionArgs {
+    /// Text description of the motion (Kimodo blends this with the keyframes).
+    pub prompt: String,
+    /// Library poses + frame indices the body must pass through. At least one.
+    pub keyframes: Vec<PoseKeyframeArg>,
+    /// Duration in seconds. **0 = use config default (3.0s).** Shorter clips
+    /// (e.g. 2.0) make the motion fill more of the duration instead of holding
+    /// the end pose. Typed (not Option) so it survives MCP-client stringify.
+    #[serde(default)]
+    pub duration: f32,
+    /// Denoising steps. **0 = config default (100).**
+    #[serde(default)]
+    pub steps: u32,
+    /// Stream frames in real time (default false — keyframed clips are saved).
+    #[serde(default)]
+    pub stream: bool,
+    /// Save the result under this name.
+    #[serde(default)]
+    pub save_name: Option<String>,
+    /// Classifier-free guidance text weight. **0 = default 2.0.**
+    #[serde(default)]
+    pub text_weight: f32,
+    /// Classifier-free guidance constraint weight (pull toward poses). **0 = default 3.0.**
+    #[serde(default)]
+    pub constraint_weight: f32,
+    /// Attach Kimodo's root trajectory as per-frame `rootPosition` (default true).
+    #[serde(default = "default_true")]
+    pub allow_root_motion: bool,
+    /// Timeout override (seconds). **0 = config default.**
+    #[serde(default)]
+    pub timeout_sec: u64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -453,6 +657,40 @@ pub struct CapturePoseViewsArgs {
     /// When embedding, downscale each PNG so its longest side is at most this many pixels before base64. Default 768 keeps a 5-view payload well under typical MCP message limits while preserving silhouette detail. Set to 0 to embed the raw capture without resizing.
     #[serde(default = "default_embed_max_dim")]
     pub max_embed_dimension: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CaptureAnimationMontageArgs {
+    /// Saved animation filename from `list_generated_animations` (the `.json`
+    /// is optional — added if missing).
+    pub filename: String,
+    /// Single camera view for every tile (`front`, `left`, `right`, `back`,
+    /// diagonals). Default `left` — best for reading a descent / forward motion.
+    #[serde(default)]
+    pub view: Option<String>,
+    /// How many evenly-spaced frames to sample across the whole clip.
+    /// **0 = default 12.** Typed so it survives MCP-client stringify.
+    #[serde(default)]
+    pub frame_count: u32,
+    /// Tiles per row in the montage grid. **0 = default 4.**
+    #[serde(default)]
+    pub columns: u32,
+    /// Also write an animated GIF of the sampled frames to disk (for the human;
+    /// the agent only sees the montage grid). Default true.
+    #[serde(default = "default_true")]
+    pub also_gif: bool,
+    /// GIF playback frames-per-second (the sampled frames). **0 = default 8.**
+    #[serde(default)]
+    pub gif_fps: u32,
+    /// `full_body` (default) or `face_closeup`.
+    #[serde(default)]
+    pub framing_preset: Option<String>,
+    /// Per-tile render size before compositing. **0 = default 384.** Min 96, max 1024.
+    #[serde(default)]
+    pub tile_size: u32,
+    /// Directory for the montage PNG + GIF. Default `pose_captures`.
+    #[serde(default = "default_capture_output_dir")]
+    pub output_dir: String,
 }
 
 fn parse_capture_view_slug(raw: &str) -> Result<CaptureView, String> {
@@ -559,6 +797,65 @@ fn embed_png_as_content(path: &Path, max_dim: u32) -> Result<Content, String> {
         B64.encode(&out)
     };
     Ok(Content::image(encoded, "image/png"))
+}
+
+/// Composite a sequence of PNG frame paths into one labeled grid montage PNG.
+/// Each tile is resized to `tile` px (longest side) on a checkerless transparent
+/// cell. Returns the montage's own PNG bytes.
+fn build_montage_png(paths: &[PathBuf], columns: u32, tile: u32) -> Result<Vec<u8>, String> {
+    use image::{imageops, GenericImage, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    if paths.is_empty() {
+        return Err("no frames to composite".into());
+    }
+    let cols = columns.max(1);
+    let rows = ((paths.len() as u32) + cols - 1) / cols;
+    let cell = tile.max(32);
+    let mut canvas: RgbaImage = RgbaImage::from_pixel(cols * cell, rows * cell, Rgba([0, 0, 0, 0]));
+    for (i, p) in paths.iter().enumerate() {
+        let bytes = std::fs::read(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+        let img = image::load_from_memory(&bytes)
+            .map_err(|e| format!("decode {}: {e}", p.display()))?
+            .resize(cell, cell, imageops::FilterType::Lanczos3)
+            .to_rgba8();
+        let col = (i as u32) % cols;
+        let row = (i as u32) / cols;
+        // center the (possibly non-square) resized tile in its cell
+        let ox = col * cell + (cell - img.width()) / 2;
+        let oy = row * cell + (cell - img.height()) / 2;
+        canvas
+            .copy_from(&img, ox, oy)
+            .map_err(|e| format!("composite tile {i}: {e}"))?;
+    }
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(canvas)
+        .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| format!("encode montage: {e}"))?;
+    Ok(out)
+}
+
+/// Encode a sequence of PNG frame paths into an animated GIF written to `dest`.
+fn write_animation_gif(paths: &[PathBuf], dest: &Path, fps: u32) -> Result<(), String> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use image::{imageops, Delay, Frame};
+
+    let file = std::fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let mut enc = GifEncoder::new(std::io::BufWriter::new(file));
+    enc.set_repeat(Repeat::Infinite)
+        .map_err(|e| format!("gif repeat: {e}"))?;
+    let delay = Delay::from_numer_denom_ms(1000, fps.max(1));
+    for p in paths {
+        let bytes = std::fs::read(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+        let img = image::load_from_memory(&bytes)
+            .map_err(|e| format!("decode {}: {e}", p.display()))?
+            // GIF has no alpha blending; flatten onto the 256-color path at a modest size
+            .resize(480, 480, imageops::FilterType::Lanczos3)
+            .to_rgba8();
+        enc.encode_frame(Frame::from_parts(img, 0, 0, delay))
+            .map_err(|e| format!("gif frame: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Recommend the minimum set of capture views an agent should render after
@@ -1348,6 +1645,92 @@ impl JarvisMcpServer {
         }))
     }
 
+    #[tool(description = "HUMAN-IN-THE-LOOP GATE. Before using any pose in a workflow (layering, keyframing Kimodo, saving as canonical), call this to ask the operator 'is this pose good?' via a popup in the Jarvis UI. ALWAYS pass a rich `intent` (the full-body VISUAL goal) — it's shown in its own prominent panel so the operator can sculpt the rig to match what you mean if it's off. By default it applies the named library pose first (set apply=false to judge a live rig you just sculpted). Returns quickly: status:'answered' with approved:true/false (+feedback when false), or status:'pending' with a reviewId — then call await_pose_review repeatedly until answered (chunked waiting avoids the MCP client timeout). On approved:false, tweak (pose_bones/adjust_bone) and review again, looping until approved. The operator can also fix the pose THEMSELVES to match your intent and tick 'overwrite as canonical' → the live rig is saved over pose_name (overwritten:true). NOTE: idle is driven by the anim layer stack; call set_master_enabled(false) before reviewing static poses or the idle clip hides them.")]
+    async fn review_pose(&self, Parameters(args): Parameters<ReviewPoseArgs>) -> CallToolResult {
+        // Optionally show the named pose on the avatar so the operator judges it.
+        if args.apply {
+            match self.library.find_pose(&args.pose_name) {
+                Ok(Some(pose)) => {
+                    let bones: HashMap<String, [f32; 4]> = pose
+                        .bones
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.rotation))
+                        .collect();
+                    self.pose_tx.send(PoseCommand::ApplyBones {
+                        bones,
+                        preserve_omitted_bones: true,
+                        blend_weight: None,
+                        transition_seconds: Some(pose.transition_duration),
+                    });
+                    if !pose.expressions.is_empty() {
+                        self.pose_tx.send(PoseCommand::ApplyExpression {
+                            weights: pose.expressions.clone(),
+                            cancel_expression_animation: true,
+                        });
+                    }
+                }
+                Ok(None) => {
+                    return err_text(format!(
+                        "pose \"{}\" not found — use list_poses, or pass apply=false to review the live rig",
+                        args.pose_name
+                    ));
+                }
+                Err(e) => return err_text(format!("lookup failed: {e}")),
+            }
+        }
+
+        // Open the review and wait one short chunk (well under the MCP client
+        // request timeout). If the operator hasn't answered, return a pending
+        // token — the agent calls await_pose_review to keep waiting.
+        let id = {
+            let mut st = self.pose_review.0.lock().unwrap();
+            st.open(args.pose_name.clone(), args.intent.clone(), args.note.clone())
+        };
+        match self.wait_review_chunk(id).await {
+            Some(result) => self.finish_review_json(result),
+            None => ok_json(&json!({
+                "status": "pending",
+                "reviewId": id,
+                "poseName": args.pose_name,
+                "message": "popup is up in the Jarvis UI; operator hasn't answered yet. Call await_pose_review (repeatedly if needed) until it returns approved/feedback.",
+            })),
+        }
+    }
+
+    #[tool(description = "Poll the open pose review (from review_pose) for the operator's answer. Returns approved:true / approved:false+feedback once they click Yes/No in the Jarvis UI, or status:pending if they still haven't answered (call again), or status:idle if no review is open. Keeps each request short so it never hits the MCP client timeout. Loop calling this until you get an approved field.")]
+    async fn await_pose_review(
+        &self,
+        Parameters(args): Parameters<AwaitPoseReviewArgs>,
+    ) -> CallToolResult {
+        let _ = args; // reserved for future per-call tuning
+        // Take an already-answered result first (operator answered between polls).
+        if let Some(result) = {
+            let mut st = self.pose_review.0.lock().unwrap();
+            st.take_any_result()
+        } {
+            return self.finish_review_json(result);
+        }
+        let pending = {
+            let st = self.pose_review.0.lock().unwrap();
+            st.pending()
+        };
+        let Some(pending) = pending else {
+            return ok_json(&json!({
+                "status": "idle",
+                "message": "no pose review is open — call review_pose first",
+            }));
+        };
+        match self.wait_review_chunk(pending.id).await {
+            Some(result) => self.finish_review_json(result),
+            None => ok_json(&json!({
+                "status": "pending",
+                "reviewId": pending.id,
+                "poseName": pending.pose_name,
+                "message": "still waiting on the operator; call await_pose_review again",
+            })),
+        }
+    }
+
     #[tool(description = "Tiny per-axis tweak: adds delta_x/delta_y/delta_z to the bone's current pose quaternion components, then renormalizes (NOT Euler degrees). Use very small steps (often ±0.02–0.05 on one axis) for micro-corrections after pose_bones or Kimodo playback.")]
     async fn adjust_bone(&self, Parameters(args): Parameters<AdjustBoneArgs>) -> CallToolResult {
         let snap = self.snapshot.0.read().clone();
@@ -1416,6 +1799,47 @@ impl JarvisMcpServer {
         }
     }
 
+    #[tool(description = "AUTONOMY METADATA. Record a pose's tags, hip height (root_y), autonomous-use flag, and natural transition targets in the central pose graph (config/pose_graph.json). The transition-graph baker and the heartbeat pose-director read this. `root_y` (>0 sets it; 0 leaves unchanged) means callers/baker stop guessing hip height (stand≈0.9, kneel≈0.5, lying≈0.2). `tags`/`next_poses` (non-empty replaces; empty leaves). `autonomous` is applied every call (defaults true — pass false to un-bless). Tag every clean, reviewed pose you want her to move through autonomously.")]
+    async fn tag_pose(&self, Parameters(args): Parameters<TagPoseArgs>) -> CallToolResult {
+        let path = PathBuf::from("config/pose_graph.json");
+        let mut graph = PoseGraph::load(&path).unwrap_or_default();
+        let tags = (!args.tags.is_empty()).then(|| args.tags.clone());
+        let root_y = (args.root_y > 0.0).then_some(args.root_y);
+        let next = (!args.next_poses.is_empty()).then(|| args.next_poses.clone());
+        graph.upsert(&args.name, tags, root_y, Some(args.autonomous), next);
+        if let Err(e) = graph.save(&path) {
+            return err_text(format!("save pose graph: {e}"));
+        }
+        let meta = graph.poses.get(&args.name).cloned().unwrap_or_default();
+        ok_json(&json!({
+            "pose": args.name,
+            "meta": meta,
+            "graphPath": path.display().to_string(),
+            "totalTagged": graph.poses.len(),
+        }))
+    }
+
+    #[tool(description = "Read the autonomy pose graph (config/pose_graph.json): every tagged pose with its tags / root_y / autonomous flag / next_poses edges. The baker uses this to know which transitions to pre-generate; the director uses it to pick the next pose. Returns the full graph plus the list of autonomous pose names.")]
+    async fn get_pose_graph(&self) -> CallToolResult {
+        let path = PathBuf::from("config/pose_graph.json");
+        let graph = match PoseGraph::load(&path) {
+            Ok(g) => g,
+            Err(e) => return err_text(format!("load pose graph: {e}")),
+        };
+        let mut autonomous: Vec<String> = graph
+            .poses
+            .iter()
+            .filter(|(_, m)| m.autonomous)
+            .map(|(n, _)| n.clone())
+            .collect();
+        autonomous.sort();
+        ok_json(&json!({
+            "poses": graph.poses,
+            "autonomousPoses": autonomous,
+            "count": graph.poses.len(),
+        }))
+    }
+
     #[tool(description = "Full-body motion clip from a text prompt via Kimodo (hub peer must be online). Use clear phase-separated prompts for floor work (sit, extend legs, return to stand). Optional save_name writes JSON under pose_library.animations_dir — check librarySaveVerified in the response; if librarySaveMissing appears, align Kimodo JARVIS_ANIMATIONS_DIR with config (see docs/MCP_POSE_ANIMATION_GUIDE.md).")]
     async fn generate_motion(
         &self,
@@ -1432,6 +1856,10 @@ impl JarvisMcpServer {
             stream: args.stream.unwrap_or(true),
             save_name: args.save_name,
             timeout: std::time::Duration::from_secs(timeout_sec),
+            constraints: (!args.constraints_path.trim().is_empty())
+                .then(|| serde_json::Value::String(args.constraints_path.trim().to_string())),
+            allow_root_motion: args.allow_root_motion,
+            ..Default::default()
         };
         match self.kimodo.generate_motion(req).await {
             Ok(outcome) => {
@@ -1459,6 +1887,93 @@ impl JarvisMcpServer {
                                 json!("expected JSON not in jarvis-avatar [pose_library].animations_dir; set JARVIS_ANIMATIONS_DIR in kimodo-motion-service to the same path"),
                             );
                         }
+                    }
+                }
+                match serde_json::to_string_pretty(&v) {
+                    Ok(s) => ok_text(s),
+                    Err(e) => err_text(format!("serialize failure: {e}")),
+                }
+            }
+            Err(e) => err_text(format!("kimodo: {e}")),
+        }
+    }
+
+    #[tool(description = "PHASE C: keyframe Kimodo with OUR library poses. Give a prompt + a list of { pose, frame, root_y } and the motion service retargets each VRM pose into a SOMA77 fullbody constraint so the diffused motion passes THROUGH your poses at those frames (with root + foot cleanup). Far more reliable than text alone for transitions. Tips: review each pose with review_pose first; put the key destination pose at/near the LAST frame; set root_y per keyframe (stand≈0.90, kneel/fold≈0.50). Requires the Kimodo hub peer online. save_name writes JSON to the animations dir (check librarySaveVerified).")]
+    async fn keyframe_pose_motion(
+        &self,
+        Parameters(args): Parameters<KeyframePoseMotionArgs>,
+    ) -> CallToolResult {
+        if args.keyframes.is_empty() {
+            return err_text("provide at least one keyframe { pose, frame, root_y }".to_string());
+        }
+        // Validate poses exist + default root_y, build the poseKeyframes JSON.
+        let mut kf_json = Vec::with_capacity(args.keyframes.len());
+        for kf in &args.keyframes {
+            match self.library.find_pose(&kf.pose) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return err_text(format!(
+                        "keyframe pose \"{}\" not found — use list_poses",
+                        kf.pose
+                    ));
+                }
+                Err(e) => return err_text(format!("lookup failed for \"{}\": {e}", kf.pose)),
+            }
+            kf_json.push(json!({
+                // Frame 0 hard-crashes the Kimodo fullbody loader — clamp to >=1.
+                "pose": kf.pose,
+                "frame": kf.frame.max(1),
+                "root_y": kf.root_y.unwrap_or(0.90),
+            }));
+        }
+
+        // 0-sentinels mean "use the config/preset default" (typed params can't
+        // be Option without re-introducing the stringify quirk).
+        let timeout_sec = (if args.timeout_sec == 0 {
+            self.kimodo_defaults.timeout_sec
+        } else {
+            args.timeout_sec
+        })
+        .clamp(10, 3600);
+        let cfg = Some((
+            if args.text_weight == 0.0 { 2.0 } else { args.text_weight },
+            if args.constraint_weight == 0.0 { 3.0 } else { args.constraint_weight },
+        ));
+        let req = GenerateRequest {
+            prompt: args.prompt,
+            duration: if args.duration == 0.0 {
+                self.kimodo_defaults.duration_sec
+            } else {
+                args.duration.clamp(0.5, 20.0)
+            },
+            steps: if args.steps == 0 { self.kimodo_defaults.steps } else { args.steps },
+            stream: args.stream,
+            save_name: args.save_name,
+            timeout: std::time::Duration::from_secs(timeout_sec),
+            cfg,
+            allow_root_motion: args.allow_root_motion,
+            pose_keyframes: Some(Value::Array(kf_json)),
+            ..Default::default()
+        };
+        match self.kimodo.generate_motion(req).await {
+            Ok(outcome) => {
+                let mut v = match serde_json::to_value(&outcome) {
+                    Ok(val) => val,
+                    Err(e) => return err_text(format!("serialize failure: {e}")),
+                };
+                if let (Some(name), "done" | "ready") =
+                    (outcome.save_name.as_ref(), outcome.final_status.as_str())
+                {
+                    if let Some(obj) = v.as_object_mut() {
+                        let expected = self
+                            .library
+                            .animations_dir
+                            .join(format!("{}.json", slugify(name)));
+                        obj.insert(
+                            "expectedLibraryPath".to_string(),
+                            json!(expected.display().to_string()),
+                        );
+                        obj.insert("librarySaveVerified".to_string(), json!(expected.exists()));
                     }
                 }
                 match serde_json::to_string_pretty(&v) {
@@ -1868,6 +2383,181 @@ impl JarvisMcpServer {
         CallToolResult::success(blocks)
     }
 
+    #[tool(description = "PREVIEW A WHOLE ANIMATION AS ONE IMAGE. Steps a saved clip through N evenly-spaced frames (suppressing the layer stack so each frame shows cleanly), renders each from one camera view, and composites them into a single MONTAGE GRID PNG returned inline — so the agent can judge the full motion arc at a glance instead of guessing from one live frame. Also writes an animated GIF to disk for the human (the agent only reliably sees the static montage). Use after generate_motion / keyframe_pose_motion to review motion quality. Pick a side `view` for descents / forward motion. Restores the prior master-enabled state when done.")]
+    async fn capture_animation_montage(
+        &self,
+        Parameters(args): Parameters<CaptureAnimationMontageArgs>,
+    ) -> CallToolResult {
+        let filename = {
+            let f = args.filename.trim();
+            if f.is_empty() {
+                return err_text("filename is required".to_string());
+            }
+            if f.ends_with(".json") { f.to_string() } else { format!("{f}.json") }
+        };
+        let anim = match self.library.load_animation(&filename) {
+            Ok(a) => a,
+            Err(e) => return err_text(format!("load {filename}: {e}")),
+        };
+        let total = anim.frames.len();
+        if total == 0 {
+            return err_text(format!("{filename} has no frames"));
+        }
+        let view_slug = args.view.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("left");
+        let view = match parse_capture_view_slug(view_slug) {
+            Ok(v) => v,
+            Err(e) => return err_text(e),
+        };
+        let framing = match args.framing_preset.as_deref().map(str::trim) {
+            None | Some("") | Some("full_body") => Some(CaptureFramingPreset::FullBody),
+            Some("face_closeup") => Some(CaptureFramingPreset::FaceCloseup),
+            Some(x) => return err_text(format!("invalid framing_preset {x:?}")),
+        };
+        let k = ((if args.frame_count == 0 { 12 } else { args.frame_count }).clamp(2, 36) as usize)
+            .min(total);
+        let columns = (if args.columns == 0 { 4 } else { args.columns }).clamp(1, 8);
+        let tile = (if args.tile_size == 0 { 384 } else { args.tile_size }).clamp(96, 1024);
+        let also_gif = args.also_gif;
+        let gif_fps = (if args.gif_fps == 0 { 8 } else { args.gif_fps }).clamp(1, 30);
+        let output_dir = expand_home(Path::new(args.output_dir.trim()));
+        let stem = filename.trim_end_matches(".json").to_string();
+
+        // Evenly-spaced sample indices across the whole clip (inclusive of last).
+        let indices: Vec<usize> = (0..k)
+            .map(|i| if k == 1 { 0 } else { i * (total - 1) / (k - 1) })
+            .collect();
+
+        // Suppress the layer stack so our per-frame ApplyBones isn't overwritten.
+        let prev_master = self
+            .layer_stack
+            .with_write(|s| {
+                let p = s.master_enabled;
+                s.master_enabled = false;
+                p
+            });
+
+        let mut paths: Vec<PathBuf> = Vec::with_capacity(k);
+        let mut step_err: Option<String> = None;
+        for (n, &idx) in indices.iter().enumerate() {
+            let frame = &anim.frames[idx];
+            let bones: HashMap<String, [f32; 4]> = frame
+                .bones
+                .iter()
+                .map(|(b, r)| (b.clone(), r.rotation))
+                .collect();
+            self.pose_tx.send(PoseCommand::ApplyBones {
+                bones,
+                preserve_omitted_bones: true,
+                blend_weight: None,
+                transition_seconds: Some(0.0),
+            });
+            let root = frame.root_position.unwrap_or([0.0, 0.0, 0.0]);
+            let mut tmap = HashMap::new();
+            tmap.insert("hips".to_string(), root);
+            self.pose_tx.send(PoseCommand::ApplyBoneTranslations(tmap));
+            // let the pose land before screenshotting
+            tokio::time::sleep(Duration::from_millis(110)).await;
+
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let req = CaptureRequest {
+                output_dir: output_dir.clone(),
+                capture_id: format!("{stem}_montage_f{n:02}"),
+                width: tile,
+                height: tile,
+                views: vec![view.clone()],
+                framing_preset: framing,
+                camera_overrides: None,
+                response_tx: tx,
+            };
+            if self.capture_tx.0.send(req).is_err() {
+                step_err = Some("capture channel closed".into());
+                break;
+            }
+            let res = tokio::task::spawn_blocking(move || {
+                rx.recv_timeout(Duration::from_secs(20))
+            })
+            .await;
+            match res {
+                Ok(Ok(result)) => {
+                    if let Some(img) = result.images.first() {
+                        paths.push(PathBuf::from(&img.path));
+                    } else {
+                        step_err = Some(format!("frame {idx}: capture returned no image"));
+                        break;
+                    }
+                }
+                Ok(Err(_)) => {
+                    step_err = Some(format!("frame {idx}: capture timed out"));
+                    break;
+                }
+                Err(e) => {
+                    step_err = Some(format!("frame {idx}: join {e}"));
+                    break;
+                }
+            }
+        }
+
+        // Always restore the prior master state.
+        self.layer_stack.with_write(|s| s.master_enabled = prev_master);
+
+        if let Some(e) = step_err {
+            return err_text(format!("montage aborted: {e}"));
+        }
+        if paths.is_empty() {
+            return err_text("no frames captured".to_string());
+        }
+
+        // Composite the montage + optional GIF off the async runtime.
+        let paths_for_blocking = paths.clone();
+        let out_dir = output_dir.clone();
+        let stem_b = stem.clone();
+        let build = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, PathBuf, Option<PathBuf>, Option<String>), String> {
+            let montage = build_montage_png(&paths_for_blocking, columns, tile)?;
+            let montage_path = out_dir.join(format!("{stem_b}_montage.png"));
+            std::fs::write(&montage_path, &montage)
+                .map_err(|e| format!("write montage: {e}"))?;
+            let (gif_path, gif_err) = if also_gif {
+                let gp = out_dir.join(format!("{stem_b}.gif"));
+                match write_animation_gif(&paths_for_blocking, &gp, gif_fps) {
+                    Ok(()) => (Some(gp), None),
+                    Err(e) => (None, Some(e)),
+                }
+            } else {
+                (None, None)
+            };
+            Ok((montage, montage_path, gif_path, gif_err))
+        })
+        .await;
+
+        let (montage_bytes, montage_path, gif_path, gif_err) = match build {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return err_text(e),
+            Err(e) => return err_text(format!("composite task join: {e}")),
+        };
+
+        let summary = json!({
+            "animation": filename,
+            "sourceFrames": total,
+            "sampledFrames": paths.len(),
+            "frameIndices": indices,
+            "view": view_slug,
+            "columns": columns,
+            "montagePath": montage_path.display().to_string(),
+            "gifPath": gif_path.as_ref().map(|p| p.display().to_string()),
+            "gifError": gif_err,
+            "note": "Montage grid reads left-to-right, top-to-bottom (start → end). GIF is for the human.",
+        });
+        let mut blocks = vec![Content::text(
+            serde_json::to_string_pretty(&summary).unwrap_or_default(),
+        )];
+        {
+            use base64::engine::general_purpose::STANDARD as B64;
+            use base64::Engine as _;
+            blocks.push(Content::image(B64.encode(&montage_bytes), "image/png"));
+        }
+        CallToolResult::success(blocks)
+    }
+
     #[tool(description = "Check NVIDIA Audio2Face-3D Docker health and current client configuration.")]
     async fn a2f_status(&self) -> CallToolResult {
         let health = self.a2f.health().await;
@@ -2063,7 +2753,7 @@ SAFETY: \
 (b) Hybrid policy hard-fails catastrophic requests (multiple bones at near-axis limits) and severe single-axis (≥80°) angles unless allow_large_angles=true. strict=true escalates near-limit warns to fails. \
 (c) After ANY leg/arm edit, capture_pose_views with at least left, right, and back — front-only hides knee direction, elbow inversion, and foot crossover. The capture tool returns a viewCoverageWarning when you pass a front-only view set. \
 (d) Use small degree steps and read the response warnings; iterate. \
-(e) Author bones first, then morphs/expressions — avoid maxing many NSFW morphs while pushing extreme bone angles. \
+(e) Author bones first, then morphs/expressions — avoid maxing many morphs while pushing extreme bone angles. \
 Reference docs: get_pose_guide (Euler traps + arms-down rest recipe) and get_layer_authoring_guide (layer stack). \
 Workflow: reset_pose or apply_pose → semantic intent (raise_leg/bend_knee/arms_down_rest/make_fist) → capture_pose_views (left, right, back) → list_expressions → set_expression → capture_pose_views (face_closeup). list_models / load_vrm for hot-swap.",
             )

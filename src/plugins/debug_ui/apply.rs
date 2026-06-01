@@ -23,7 +23,8 @@ pub fn apply_camera_settings(
 ) {
     let cam = &settings.camera;
     for mut orbit in &mut orbit_q {
-        orbit.zoom_lower_limit = cam.min_radius;
+        // Zoom limits are applied every frame in `orbit_camera::sync_dynamic_camera_clip`
+        // (extent + skeleton shell); do not overwrite with raw `min_radius` here.
         orbit.zoom_upper_limit = Some(cam.max_radius);
         orbit.orbit_sensitivity = cam.orbit_sensitivity;
         orbit.pan_sensitivity = cam.pan_sensitivity;

@@ -211,18 +211,8 @@ pub struct ExpandResult {
 /// demand by the caller.
 pub fn chain_bones(chain: MirrorChain) -> Vec<&'static str> {
     match chain {
-        MirrorChain::LeftArm => vec![
-            "leftShoulder",
-            "leftUpperArm",
-            "leftLowerArm",
-            "leftHand",
-        ],
-        MirrorChain::RightArm => vec![
-            "rightShoulder",
-            "rightUpperArm",
-            "rightLowerArm",
-            "rightHand",
-        ],
+        MirrorChain::LeftArm => left_arm_chain(),
+        MirrorChain::RightArm => right_arm_chain(),
         MirrorChain::LeftLeg => vec![
             "leftUpperLeg",
             "leftLowerLeg",
@@ -258,6 +248,28 @@ pub fn chain_bones(chain: MirrorChain) -> Vec<&'static str> {
             .filter(|n| n.starts_with("left"))
             .collect(),
     }
+}
+
+fn left_arm_chain() -> Vec<&'static str> {
+    let mut v = vec![
+        "leftShoulder",
+        "leftUpperArm",
+        "leftLowerArm",
+        "leftHand",
+    ];
+    v.extend(left_hand_fingers());
+    v
+}
+
+fn right_arm_chain() -> Vec<&'static str> {
+    let mut v = vec![
+        "rightShoulder",
+        "rightUpperArm",
+        "rightLowerArm",
+        "rightHand",
+    ];
+    v.extend(right_hand_fingers());
+    v
 }
 
 fn left_hand_fingers() -> Vec<&'static str> {
@@ -309,17 +321,22 @@ pub enum MirrorChain {
 }
 
 impl MirrorChain {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
+        self.menu_label()
+    }
+
+    pub fn menu_label(self) -> String {
+        let arrow = jarvis_avatar::icons::ARROW_RIGHT;
         match self {
-            MirrorChain::LeftArm => "Left arm → Right",
-            MirrorChain::RightArm => "Right arm → Left",
-            MirrorChain::LeftLeg => "Left leg → Right",
-            MirrorChain::RightLeg => "Right leg → Left",
-            MirrorChain::LeftHand => "Left hand → Right",
-            MirrorChain::RightHand => "Right hand → Left",
-            MirrorChain::LeftSide => "Left side → Right",
-            MirrorChain::RightSide => "Right side → Left",
-            MirrorChain::AllPaired => "All paired (L → R)",
+            MirrorChain::LeftArm => format!("Left arm {arrow} Right"),
+            MirrorChain::RightArm => format!("Right arm {arrow} Left"),
+            MirrorChain::LeftLeg => format!("Left leg {arrow} Right"),
+            MirrorChain::RightLeg => format!("Right leg {arrow} Left"),
+            MirrorChain::LeftHand => format!("Left hand {arrow} Right"),
+            MirrorChain::RightHand => format!("Right hand {arrow} Left"),
+            MirrorChain::LeftSide => format!("Left side {arrow} Right"),
+            MirrorChain::RightSide => format!("Right side {arrow} Left"),
+            MirrorChain::AllPaired => format!("All paired (L {arrow} R)"),
         }
     }
 }

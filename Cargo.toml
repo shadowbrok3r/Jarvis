@@ -41,7 +41,8 @@ urlencoding = "2"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
 # Decode assistant inline images in the gateway chat window (PNG/JPEG/WebP).
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# `gif` adds animation-montage GIF export (capture_animation_montage MCP tool).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 
 # WAV sanity-check before handing Kokoro payloads to bevy_audio — bevy_audio
 # 0.18 `.unwrap()`s rodio's decode, so we pre-validate or the whole app panics

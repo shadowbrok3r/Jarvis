@@ -461,23 +461,21 @@ fn ios_advance_anim_layers(
         let Some(&ent) = map.lower_to_entity.get(&bone_name) else {
             continue;
         };
-        let Ok((mut tf, rest, rest_world)) = transforms.get_mut(ent) else {
+        let Ok((mut tf, _rest, _rest_world)) = transforms.get_mut(ent) else {
             continue;
         };
-        let final_q = match (rest, rest_world) {
-            (Some(rt), Some(rgt)) => {
-                let rest_local = rt.0.rotation;
-                let rw = rgt.0.rotation();
-                local_from_normalized(rest_local, rw, q_raw)
-            }
-            _ => q_raw,
-        };
-        if final_q.x.is_finite()
-            && final_q.y.is_finite()
-            && final_q.z.is_finite()
-            && final_q.w.is_finite()
-        {
-            tf.rotation = final_q.normalize();
+        // `q_raw` is the composed **local** rotation (the accumulator was seeded
+        // with `snap.rest` = each bone's RestTransform.rotation, then folded with
+        // local-space driver deltas). It is already in raw-rig local space, so we
+        // write it straight to the Transform. The old code passed it through
+        // `local_from_normalized` — but that converts NORMALIZED→local, so feeding
+        // an already-local quat double-applied `rest_local`, which compounded into
+        // the upside-down hip flip (and the oscillating weight-shift rocked the
+        // whole rig, whipping every spring bone = the "wind"). Desktop's net
+        // behaviour is identical to writing `q_raw`: it emits `normalized_from_local`
+        // then re-applies `local_from_normalized` in the pose driver, which cancels.
+        if q_raw.x.is_finite() && q_raw.y.is_finite() && q_raw.z.is_finite() && q_raw.w.is_finite() {
+            tf.rotation = q_raw.normalize();
         }
     }
 
@@ -488,11 +486,6 @@ fn ios_advance_anim_layers(
             .collect();
         commands.trigger(SetExpressions::from_iter(vrm_e, weights));
     }
-}
-
-#[inline]
-fn local_from_normalized(rest_local: Quat, rest_world: Quat, pose_q: Quat) -> Quat {
-    rest_local * rest_world.inverse() * pose_q * rest_world
 }
 
 fn quat_close(a: Quat, b: Quat, eps: f32) -> bool {
@@ -687,6 +680,23 @@ fn hash_phase(seed: u64, idx: u64) -> f32 {
     x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
     x ^= x >> 31;
     ((x as f32) / (u64::MAX as f32)) * std::f32::consts::TAU
+}
+
+/// Reset every VRM bind bone (those carrying `RestTransform`) back to its rest
+/// local rotation — the in-engine equivalent of the manual "clear overrides"
+/// (which currently round-trips a full profile reload). Called when the user
+/// disables the layer master / idle or clears layers, so a stale composed /
+/// idle pose does not stay frozen on bones the next driver doesn't touch.
+pub fn reset_bind_bones_to_rest_world(world: &mut World) {
+    let mut q = world.query::<(&mut Transform, &RestTransform)>();
+    let mut n = 0usize;
+    for (mut tf, rest) in q.iter_mut(world) {
+        tf.rotation = rest.0.rotation;
+        n += 1;
+    }
+    if n > 0 {
+        crate::jarvis_ios_line!("[JarvisIOS] layers: reset {n} bind bones to rest");
+    }
 }
 
 /// JSON snapshot for Swift UI: `{ "masterEnabled": bool, "layers": [{ "id", "label", "kind", "enabled", "weight" }] }`

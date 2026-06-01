@@ -108,8 +108,8 @@ window_height = 900
 # Used until the VRM root is found (see focus_follow_vrm).
 focus = [0.0, 1.0, 0.0]
 initial_radius = 3.0
-# Allow very close zoom (was 0.35 — felt “stuck” far from small / offset models).
-min_radius = 0.05
+# Closest orbit radius (m). Too small lets the camera sit inside the mesh shell.
+min_radius = 0.12
 max_radius = 150.0
 orbit_sensitivity = 1.0
 pan_sensitivity = 1.0
@@ -123,9 +123,8 @@ orbit_smoothness = 0.0
 zoom_smoothness = 0.0
 pan_smoothness = 0.0
 # Near/far clip + FOV for the main Camera3d's perspective projection.
-# near_clip was 0.1 which clipped the VRM's face at close zoom; 0.01 keeps her
-# eyes intact down to a couple cm.
-near_clip = 0.01
+# Runtime also lowers near with zoom radius; this is the smallest allowed value.
+near_clip = 0.001
 far_clip = 1000.0
 fov_y_radians = 0.7853982
 # After a pan, snap orbit focus back to the VRM the moment the user grabs the

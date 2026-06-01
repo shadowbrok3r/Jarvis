@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use serde_json::Value;
 
 use crate::plugins::channel_server::WsIncomingMessage;
-use crate::plugins::pose_driver::{PoseCommand, PoseCommandSender};
+use crate::plugins::pose_driver::{PoseBoneApplyTelemetry, PoseCommand, PoseCommandSender};
 
 pub struct HubPoseApplyPlugin;
 
@@ -26,12 +26,25 @@ impl Plugin for HubPoseApplyPlugin {
 fn bridge_hub_envelopes_into_pose_commands(
     mut inbox: MessageReader<WsIncomingMessage>,
     sender: Option<Res<PoseCommandSender>>,
+    mut bone_telem: Option<ResMut<PoseBoneApplyTelemetry>>,
 ) {
     let Some(sender) = sender else {
         return;
     };
     for WsIncomingMessage { envelope } in inbox.read() {
         match envelope.message_type.as_str() {
+            "kimodo:status" => {
+                let status = envelope
+                    .data
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if status == "done" || status == "error" {
+                    if let Some(ref mut telem) = bone_telem {
+                        telem.flush_stream_summary("kimodo");
+                    }
+                }
+            }
             "vrm:apply-pose" => {
                 let preserve = envelope
                     .data

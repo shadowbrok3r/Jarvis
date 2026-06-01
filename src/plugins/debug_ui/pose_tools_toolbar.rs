@@ -26,10 +26,12 @@ use jarvis_avatar::config::Settings;
 use jarvis_avatar::icons;
 
 use crate::plugins::mirror::{MirrorChain, MirrorState};
-use crate::plugins::pose_driver::PoseCommandSender;
+use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommandSender};
 use crate::plugins::rig_editor::{RigEditAxis, RigEditorState};
 
-use super::pose_controller::{PoseControllerTab, PoseControllerUiState};
+use crate::plugins::undo_history::UndoHistory;
+
+use super::pose_controller::{reset_all_bones, PoseControllerTab, PoseControllerUiState};
 use super::rig_editor::{mirror_chain_action, mirror_one_bone};
 
 /// Render the Pose Tools controls inline in the top menu bar — edit-mode
@@ -41,10 +43,13 @@ pub fn pose_tools_menu(
     mirror: &mut MirrorState,
     pc: &mut PoseControllerUiState,
     sender: Option<&PoseCommandSender>,
+    snapshot: Option<&BoneSnapshotHandle>,
+    undo: Option<&UndoHistory>,
 ) {
     edit_mode_section(ui, rig);
     axis_section(ui, rig);
-    mirror_section(ui, pc, mirror, sender);
+    mirror_section(ui, pc, mirror, rig, sender, snapshot);
+    reset_section(ui, pc, sender, snapshot, undo);
     panel_visibility_section(ui, settings, pc);
 }
 
@@ -93,23 +98,31 @@ fn mirror_section(
     ui: &mut egui::Ui,
     pc: &mut PoseControllerUiState,
     mirror: &mut MirrorState,
+    rig: &RigEditorState,
     sender: Option<&PoseCommandSender>,
+    snapshot: Option<&BoneSnapshotHandle>,
 ) {
-    ui.menu_button(icons::menu_label("Mirror"), |ui| {
+    ui.menu_button(icons::menu_item(icons::MIRROR, "Mirror"), |ui| {
         ui.toggle_value(&mut mirror.realtime, "Realtime mirror")
             .on_hover_text(
                 "When on, every bone-list slider drag and rig-handle rotation \
                  also writes the mirrored value to the partner bone.",
             );
         if ui
-            .button("Mirror selected")
+            .button(icons::menu_item(icons::MIRROR, "Mirror selected"))
             .on_hover_text(
                 "Snapshot the currently selected bone's rotation and apply the \
                  mirrored value to the partner.",
             )
             .clicked()
         {
-            mirror_one_bone(pc, sender, mirror);
+            mirror_one_bone(
+                pc,
+                sender,
+                mirror,
+                rig.selected_bone.as_deref(),
+                snapshot,
+            );
             ui.close();
         }
         ui.separator();
@@ -125,13 +138,29 @@ fn mirror_section(
             MirrorChain::RightSide,
             MirrorChain::AllPaired,
         ] {
-            if ui.button(chain.label()).clicked() {
-                mirror_chain_action(pc, sender, chain);
+            if ui.button(chain.menu_label()).clicked() {
+                mirror_chain_action(pc, sender, chain, snapshot);
                 pc.mirror_chain_status = Some(format!("Mirrored chain: {}", chain.label()));
                 ui.close();
             }
         }
     });
+}
+
+fn reset_section(
+    ui: &mut egui::Ui,
+    pc: &mut PoseControllerUiState,
+    sender: Option<&PoseCommandSender>,
+    snapshot: Option<&BoneSnapshotHandle>,
+    undo: Option<&UndoHistory>,
+) {
+    if ui
+        .button(icons::menu_item(icons::REFRESH, "Reset all"))
+        .on_hover_text("Reset every bone back to bind (rest) pose and clear slider cache.")
+        .clicked()
+    {
+        reset_all_bones(pc, sender, snapshot, undo);
+    }
 }
 
 /// Per-panel show/hide row. Each tab gets a small toggle button — clicking

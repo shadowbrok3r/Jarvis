@@ -69,6 +69,13 @@ pub struct AnimationFrame {
     /// (see `POSE_GUIDE.md` — include explicit `0.0` to turn a morph off).
     #[serde(default)]
     pub expressions: HashMap<String, f32>,
+    /// Optional ROOT MOTION: local translation delta of the root (`hips`) from
+    /// the bind/rest pose, in meters, for this keyframe. `None` on the
+    /// overwhelmingly common rotation-only clips. Applied by `anim_layers` to
+    /// the hips `Transform.translation` (rest + delta) so a clip can actually
+    /// lower / shift the body instead of only pivoting around the fixed hip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_position: Option<[f32; 3]>,
 }
 
 /// On-disk animation layout (same JSON the Kimodo Python service emits).
@@ -106,6 +113,78 @@ pub struct AnimationMeta {
     pub hold_duration: f32,
     pub fps: f64,
     pub frame_count: usize,
+}
+
+/// Per-pose autonomy metadata (tags, hip height, transition edges). Stored in
+/// a central sidecar graph file rather than in each `PoseFile` so existing pose
+/// JSON is untouched. Drives the autonomous "pose director" + transition baker.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PoseMeta {
+    /// Freeform tags: position family + content 
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Approximate hip height (m) for this pose — used as the keyframe `root_y`
+    /// so callers / the baker stop guessing (stand ≈ 0.9, kneel ≈ 0.5, lying ≈ 0.2).
+    #[serde(default)]
+    pub root_y: Option<f32>,
+    /// Blessed for autonomous use by the heartbeat director.
+    #[serde(default)]
+    pub autonomous: bool,
+    /// Poses this one can transition *to* naturally (directed edges). Empty =
+    /// the baker/director may use tag-compatibility instead.
+    #[serde(default)]
+    pub next_poses: Vec<String>,
+}
+
+/// Central pose-autonomy graph (`config/pose_graph.json`). Maps pose name →
+/// [`PoseMeta`]. Edges live on each node's `next_poses`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PoseGraph {
+    #[serde(default)]
+    pub poses: HashMap<String, PoseMeta>,
+}
+
+impl PoseGraph {
+    /// Load the graph, returning an empty graph when the file is absent.
+    pub fn load(path: &Path) -> Result<Self, LibraryError> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
+    }
+
+    /// Persist (pretty) to disk, creating the parent directory if needed.
+    pub fn save(&self, path: &Path) -> Result<(), LibraryError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    /// Upsert one pose's metadata, merging only the provided fields.
+    pub fn upsert(
+        &mut self,
+        name: &str,
+        tags: Option<Vec<String>>,
+        root_y: Option<f32>,
+        autonomous: Option<bool>,
+        next_poses: Option<Vec<String>>,
+    ) {
+        let m = self.poses.entry(name.to_string()).or_default();
+        if let Some(t) = tags {
+            m.tags = t;
+        }
+        if root_y.is_some() {
+            m.root_y = root_y;
+        }
+        if let Some(a) = autonomous {
+            m.autonomous = a;
+        }
+        if let Some(n) = next_poses {
+            m.next_poses = n;
+        }
+    }
 }
 
 /// File-backed library rooted at two configurable directories.

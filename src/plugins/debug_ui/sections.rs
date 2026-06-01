@@ -467,10 +467,22 @@ pub fn camera_panel(ui: &mut egui::Ui, settings: &mut Settings, state: &mut Debu
                 egui::Slider::new(&mut cam.min_radius, 0.001..=5.0)
                     .logarithmic(true)
                     .text("min_radius (zoom in)"),
+            )
+            .on_hover_text(
+                "Requested closest orbit distance. Runtime enforces a larger floor from skeleton size, avatar uniform_scale, and minimum camera-to-bone distance — very small values still clip (backfaces) when inside the mesh.",
             );
             ui.add(
                 egui::Slider::new(&mut cam.max_radius, 1.0..=500.0).text("max_radius (zoom out)"),
             );
+            ui.add(
+                egui::Slider::new(&mut cam.near_clip, 0.0001..=0.05)
+                    .logarithmic(true)
+                    .text("near_clip (max)"),
+            )
+            .on_hover_text(
+                "Cap for the near clip plane (m). Each frame uses the smaller of this and ~12% of camera-to-bone distance (or 2% of orbit radius). Does not fix clipping when the camera is inside the mesh — raise min_radius / use focus on the face.",
+            );
+            ui.add(egui::Slider::new(&mut cam.far_clip, 10.0..=5000.0).text("far_clip"));
 
             ui.separator();
             ui.add(

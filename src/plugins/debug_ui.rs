@@ -321,6 +321,8 @@ fn draw_menu_bar(
                     &mut mirror,
                     &mut state.pose_controller,
                     sender.as_deref(),
+                    snapshot.as_deref(),
+                    Some(&*undo),
                 );
                 ui.add_space(ui.available_width() / 4.);
 

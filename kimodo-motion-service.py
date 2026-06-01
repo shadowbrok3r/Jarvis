@@ -13,6 +13,7 @@ when auth is disabled.
 
 import asyncio
 import json
+import math
 import sys
 import time
 import uuid
@@ -33,7 +34,6 @@ except ModuleNotFoundError:  # Python < 3.11
     tomllib = None  # type: ignore[assignment, misc]
 
 WS_URL = os.environ.get("JARVIS_WS_URL", "ws://localhost:6121/ws")
-AUTH_TOKEN = os.environ.get("IRONCLAW_TOKEN", "")
 
 # Directory containing this script = jarvis-avatar repo root (used to find config/*.toml).
 _KIMODO_REPO_ROOT = Path(__file__).resolve().parent
@@ -65,6 +65,86 @@ def _read_animations_dir_from_toml_nolib(p: Path) -> Optional[str]:
     except OSError:
         pass
     return None
+
+
+def _read_ironclaw_auth_token_from_toml_nolib(p: Path) -> Optional[str]:
+    try:
+        in_iron = False
+        for line in p.read_text(encoding="utf-8").splitlines():
+            body = line.split("#", 1)[0].strip()
+            if body == "[ironclaw]":
+                in_iron = True
+                continue
+            if in_iron and body.startswith("["):
+                in_iron = False
+            if in_iron and body.startswith("auth_token"):
+                parts = body.split("=", 1)
+                if len(parts) < 2:
+                    continue
+                val = parts[1].strip().strip('"').strip("'")
+                if val:
+                    return val
+    except OSError:
+        pass
+    return None
+
+
+def _read_ironclaw_auth_token_from_toml() -> Optional[str]:
+    for name in ("user.toml", "default.toml"):
+        p = _KIMODO_REPO_ROOT / "config" / name
+        if not p.is_file():
+            continue
+        if tomllib is not None:
+            try:
+                data = tomllib.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            iron = data.get("ironclaw")
+            if not isinstance(iron, dict):
+                continue
+            val = (iron.get("auth_token") or "").strip()
+            if val:
+                return val
+        else:
+            val = _read_ironclaw_auth_token_from_toml_nolib(p)
+            if val:
+                return val
+    return None
+
+
+def _load_repo_dotenv() -> None:
+    """Populate os.environ from repo `.env` when keys are not already set."""
+    path = _KIMODO_REPO_ROOT / ".env"
+    if not path.is_file():
+        return
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            body = line.split("#", 1)[0].strip()
+            if not body or "=" not in body:
+                continue
+            key, _, val = body.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+    except OSError:
+        pass
+
+
+def _resolve_hub_auth_token() -> tuple[str, str]:
+    """Same precedence as jarvis-avatar: env overrides, then config/*.toml."""
+    for key in ("IRONCLAW_TOKEN", "JARVIS__IRONCLAW__AUTH_TOKEN"):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            return val, key
+    toml_val = _read_ironclaw_auth_token_from_toml()
+    if toml_val:
+        return toml_val, "config/user.toml or config/default.toml"
+    return "", "none"
+
+
+_load_repo_dotenv()
+AUTH_TOKEN, _AUTH_TOKEN_SOURCE = _resolve_hub_auth_token()
 
 
 def _read_animations_dir_from_toml() -> Optional[str]:
@@ -112,9 +192,49 @@ def _resolve_animations_dir() -> Path:
     ).resolve()
 
 
+def _resolve_poses_dir() -> Path:
+    """Where saved VRM poses (assets/poses/*.json) live — for Phase C pose
+    keyframing. Precedence: JARVIS_POSES_DIR, then [pose_library].poses_dir in
+    config, then ./assets/poses next to this service file."""
+    env = (os.environ.get("JARVIS_POSES_DIR") or "").strip()
+    if env:
+        cand = _absolute_like_jarvis_avatar(env)
+        if cand.is_dir():
+            return cand
+    if tomllib is not None:
+        for name in ("user.toml", "default.toml"):
+            p = _KIMODO_REPO_ROOT / "config" / name
+            if not p.is_file():
+                continue
+            try:
+                pl = tomllib.loads(p.read_text(encoding="utf-8")).get("pose_library")
+            except Exception:
+                continue
+            if isinstance(pl, dict):
+                val = (pl.get("poses_dir") or "").strip()
+                if val:
+                    cand = _absolute_like_jarvis_avatar(val)
+                    if cand.is_dir():
+                        return cand
+    return (_KIMODO_REPO_ROOT / "assets" / "poses").resolve()
+
+
 ANIMATIONS_DIR = _resolve_animations_dir()
+POSES_DIR = _resolve_poses_dir()
 if not (os.environ.get("KIMODO_QUIET") or "").strip():
     print(f"[kimodo-motion-service] ANIMATIONS_DIR={ANIMATIONS_DIR}", file=sys.stderr)
+    print(f"[kimodo-motion-service] POSES_DIR={POSES_DIR}", file=sys.stderr)
+    if AUTH_TOKEN:
+        print(
+            f"[kimodo-motion-service] Hub auth token loaded ({_AUTH_TOKEN_SOURCE})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[kimodo-motion-service] Hub auth token empty — OK only if "
+            "[ironclaw].auth_token is empty in jarvis-avatar config",
+            file=sys.stderr,
+        )
 
 # Module name MUST contain the substring "kimodo" so jarvis-avatar's Services
 # panel classifies us as the Kimodo peer (service_status.rs:338).
@@ -211,6 +331,10 @@ SOMA77_INDEX_TO_VRM = []
 for bone_name in SOMA77_BONE_ORDER:
     SOMA77_INDEX_TO_VRM.append(SOMA77_TO_VRM.get(bone_name))
 
+SOMA77_MAPPED_VRM_NAMES = sorted(
+    {n for n in SOMA77_INDEX_TO_VRM if n}
+)
+
 
 def rotation_matrix_to_quaternion(mat: np.ndarray) -> tuple:
     """Convert a 3x3 rotation matrix to quaternion [x, y, z, w]."""
@@ -275,6 +399,64 @@ def convert_motion(local_rot_mats: np.ndarray) -> list:
     return frames
 
 
+# ----- Phase C: VRM pose -> SOMA77 fullbody constraint ----------------------
+
+def _quat_to_rotvec(q) -> list:
+    """[x,y,z,w] -> axis-angle 3-vec (so(3) / exp-map). Inverse of the verified
+    SOMA->VRM forward map needs no axis remap (transfers directly)."""
+    x, y, z, w = q
+    w = max(-1.0, min(1.0, float(w)))
+    angle = 2.0 * math.acos(w)
+    s = math.sqrt(max(0.0, 1.0 - w * w))
+    if s < 1e-6 or angle < 1e-6:
+        return [0.0, 0.0, 0.0]
+    return [x / s * angle, y / s * angle, z / s * angle]
+
+
+def _pose_local_joints_rot(pose_name: str) -> list:
+    """Load assets/poses/<name>.json and emit 77 axis-angle joint rotations
+    (zeros for SOMA joints with no mapped VRM bone in the pose)."""
+    path = POSES_DIR / f"{pose_name}.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"pose '{pose_name}' not found at {path}")
+    bones = json.loads(path.read_text()).get("bones", {})
+    out = []
+    for vrm in SOMA77_INDEX_TO_VRM:
+        if vrm and vrm in bones and "rotation" in bones[vrm]:
+            out.append(_quat_to_rotvec(bones[vrm]["rotation"]))
+        else:
+            out.append([0.0, 0.0, 0.0])
+    return out
+
+
+def build_fullbody_from_pose_keyframes(pose_keyframes: list) -> list:
+    """pose_keyframes: [{pose, frame, root_y}, ...] -> [fullbody constraint dict].
+
+    Sorted by frame. root_y = approx hip height (m) at each keyframe (standing
+    ~0.9, kneeling/folded lower); XZ pinned to 0 (in place). Required by the
+    constraint loader's FK.
+
+    Frame 0 HARD-CRASHES the Kimodo fullbody loader/model (CUDA fault that kills
+    the service), so every index is clamped to >= 1; identical indices are nudged
+    apart so the loader gets strictly increasing frames."""
+    kfs = sorted(pose_keyframes, key=lambda k: int(k["frame"]))
+    seen = set()
+    clean = []
+    for k in kfs:
+        fi = max(1, int(k["frame"]))
+        while fi in seen:
+            fi += 1
+        seen.add(fi)
+        clean.append((fi, k))
+    return [{
+        "type": "fullbody",
+        "frame_indices": [fi for fi, _ in clean],
+        "local_joints_rot": [_pose_local_joints_rot(k["pose"]) for _, k in clean],
+        "root_positions": [[0.0, float(k.get("root_y", 0.9)), 0.0] for _, k in clean],
+        "smooth_root_2d": [[0.0, 0.0] for _ in clean],
+    }]
+
+
 # ─── WebSocket messaging ─────────────────────────────────────────────────────
 
 def make_message(msg_type: str, data: dict) -> str:
@@ -304,6 +486,10 @@ def load_kimodo():
     model = load_model("kimodo-soma-rp", device="cuda" if torch.cuda.is_available() else "cpu")
     model_name = "kimodo-soma-rp"
     log(f"Model loaded. FPS={model.fps}, device={'cuda' if torch.cuda.is_available() else 'cpu'}")
+    log(
+        f"SOMA77→VRM: {len(SOMA77_MAPPED_VRM_NAMES)} unique humanoid names "
+        f"from {len(SOMA77_BONE_ORDER)} SOMA joints (ends/eyes unmapped by design)"
+    )
 
 
 def log(msg: str):
@@ -313,39 +499,110 @@ def log(msg: str):
 
 # ─── Generation ──────────────────────────────────────────────────────────────
 
-def generate_motion(prompt: str, duration: float, steps: int = 100) -> tuple:
-    """Generate motion and return (vrm_frames, fps)."""
+def _clamp_frames(d: float) -> int:
+    return max(30, min(int(d * model.fps), 600))
+
+
+def _extract_root_deltas(output, n_frames: int):
+    """SOMA root_positions (Y-up meters, canonical) -> per-frame VRM hips delta
+    from frame 0, as [x,y,z] lists. Axis pass-through (tune signs visually if a
+    walk drifts the wrong way). Returns None if absent."""
+    rp = output.get("root_positions") if hasattr(output, "get") else None
+    if rp is None:
+        return None
+    if isinstance(rp, torch.Tensor):
+        rp = rp.cpu().numpy()
+    rp = np.asarray(rp)
+    while rp.ndim > 2:           # drop batch / sample dims
+        rp = rp[0]
+    if rp.ndim != 2 or rp.shape[0] < 1:
+        return None
+    r0 = rp[0].copy()
+    out = []
+    for t in range(min(n_frames, rp.shape[0])):
+        d = rp[t] - r0
+        out.append([float(d[0]), float(d[1]), float(d[2])])
+    while len(out) < n_frames:    # pad hold
+        out.append(out[-1] if out else [0.0, 0.0, 0.0])
+    return out
+
+
+def generate_motion(prompt: str, duration: float, steps: int = 100,
+                    prompts=None, durations=None, constraints=None,
+                    cfg=None, seed=None, allow_root_motion=False) -> tuple:
+    """Generate motion and return (vrm_frames, fps, root_deltas|None).
+
+    Phase A/B extras (all optional, backward compatible):
+      prompts+durations  -> multi-segment (multi_prompt) generation
+      constraints        -> path to constraints.json OR inline list (EE/fullbody/root2d)
+      cfg                -> {text_weight, constraint_weight} -> cfg_type="separated"
+      seed               -> reproducible
+      allow_root_motion  -> attach Kimodo root trajectory as per-frame rootPosition
+    """
     if model is None:
         raise RuntimeError("Model not loaded")
 
-    num_frames = int(duration * model.fps)
-    num_frames = max(30, min(num_frames, 600))
+    texts = [p + "." for p in (prompts if prompts else [prompt])]
+    durs = durations if durations else [duration]
+    num_frames = [_clamp_frames(d) for d in durs]
 
-    log(f"Generating: prompt='{prompt}', frames={num_frames}, steps={steps}")
+    # constraints: accept a path or an inline list (dumped to a temp file)
+    constraint_lst = []
+    if constraints:
+        from kimodo.constraints import load_constraints_lst
+        cpath = constraints
+        tmp = None
+        if not isinstance(constraints, str):
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+            json.dump(constraints, tmp); tmp.close()
+            cpath = tmp.name
+        constraint_lst = load_constraints_lst(cpath, model.skeleton)
+        log(f"Loaded {len(constraint_lst)} constraint set(s) from {cpath}")
+
+    cfg_kwargs = {}
+    if cfg:
+        cfg_kwargs = {"cfg_type": "separated",
+                      "cfg_weight": [float(cfg.get("text_weight", 2.0)),
+                                     float(cfg.get("constraint_weight", 2.0))]}
+
+    if seed is not None:
+        try:
+            from kimodo.tools import seed_everything
+            seed_everything(int(seed))
+        except Exception as e:
+            log(f"seed_everything unavailable ({e}); using torch.manual_seed")
+            torch.manual_seed(int(seed))
+
+    log(f"Generating: texts={texts}, frames={num_frames}, steps={steps}, "
+        f"constraints={len(constraint_lst)}, cfg={cfg_kwargs.get('cfg_weight')}, root={allow_root_motion}")
     t0 = time.time()
 
     output = model(
-        [prompt + "."],
-        [num_frames],
+        texts,
+        num_frames,
+        constraint_lst=constraint_lst,
         num_denoising_steps=steps,
         num_samples=1,
         multi_prompt=True,
         post_processing=True,
         return_numpy=True,
+        **cfg_kwargs,
     )
 
-    elapsed = time.time() - t0
-    log(f"Generation done in {elapsed:.1f}s")
+    log(f"Generation done in {time.time() - t0:.1f}s")
 
     local_rot_mats = output["local_rot_mats"]
     if local_rot_mats.ndim == 5:
         local_rot_mats = local_rot_mats[0]  # Remove batch dim
-
     if isinstance(local_rot_mats, torch.Tensor):
         local_rot_mats = local_rot_mats.cpu().numpy()
 
     vrm_frames = convert_motion(local_rot_mats)
-    return vrm_frames, float(model.fps)
+    root_deltas = _extract_root_deltas(output, len(vrm_frames)) if allow_root_motion else None
+    if root_deltas:
+        log(f"Root motion: {len(root_deltas)} frames, end delta {root_deltas[-1]}")
+    return vrm_frames, float(model.fps), root_deltas
 
 
 def _slugify_animation_stem(name: str) -> str:
@@ -360,21 +617,25 @@ def _slugify_animation_stem(name: str) -> str:
     return s or "unnamed"
 
 
-def save_animation(name: str, prompt: str, fps: float, vrm_frames: list):
-    """Save generated animation to disk."""
+def save_animation(name: str, prompt: str, fps: float, vrm_frames: list, root_deltas=None):
+    """Save generated animation to disk (with optional rootPosition root motion)."""
     ANIMATIONS_DIR.mkdir(parents=True, exist_ok=True)
     filename = _slugify_animation_stem(name) + ".json"
     frame_duration_ms = 1000.0 / fps
+
+    frames_out = []
+    for i, frame in enumerate(vrm_frames):
+        f = {"bones": frame, "duration_ms": frame_duration_ms}
+        if root_deltas and i < len(root_deltas):
+            f["rootPosition"] = root_deltas[i]
+        frames_out.append(f)
 
     animation_data = {
         "name": name,
         "prompt": prompt,
         "fps": fps,
         "frameCount": len(vrm_frames),
-        "frames": [
-            {"bones": frame, "duration_ms": frame_duration_ms}
-            for frame in vrm_frames
-        ],
+        "frames": frames_out,
     }
 
     path = ANIMATIONS_DIR / filename
@@ -504,6 +765,18 @@ async def ws_main():
             await asyncio.sleep(3)
         except Exception as e:
             log(f"Unexpected error: {e}, reconnecting in 5s...")
+            err = str(e)
+            if "invalid_token" in err:
+                if AUTH_TOKEN:
+                    log(
+                        "Auth hint: token must match jarvis-avatar "
+                        "[ironclaw].auth_token (IRONCLAW_TOKEN env overrides config)"
+                    )
+                else:
+                    log(
+                        "Auth hint: set IRONCLAW_TOKEN or [ironclaw].auth_token in "
+                        "config/user.toml to match the running jarvis-avatar hub"
+                    )
             await asyncio.sleep(5)
 
 
@@ -515,7 +788,29 @@ async def handle_generate(ws, msg):
     steps = data.get("steps", 100)
     stream = data.get("stream", True)
     save_name = data.get("saveName")
+    # Phase A/B extras (all optional)
+    prompts = data.get("prompts")            # multi-segment
+    durations = data.get("durations")
+    constraints = data.get("constraints") or data.get("constraintsPath")
+    cfg = data.get("cfg")                     # {text_weight, constraint_weight}
+    seed = data.get("seed")
+    allow_root_motion = bool(data.get("allowRootMotion", False))
+    # Phase C: pose keyframes -> fullbody constraint (retarget VRM poses here,
+    # where the SOMA77 map lives). Overrides `constraints` when present.
+    pose_keyframes = data.get("poseKeyframes")
     request_id = msg.get("metadata", {}).get("event", {}).get("id", str(uuid.uuid4()))
+    if pose_keyframes:
+        try:
+            constraints = build_fullbody_from_pose_keyframes(pose_keyframes)
+            frame_idx = constraints[0]["frame_indices"]
+            print(f"[kimodo-motion-service] poseKeyframes -> fullbody at frames {frame_idx}",
+                  file=sys.stderr)
+        except Exception as e:
+            await ws.send(make_message("kimodo:status", {
+                "requestId": request_id, "status": "error",
+                "message": f"poseKeyframes build failed: {e}",
+            }))
+            return
 
     try:
         await ws.send(make_message("kimodo:status", {
@@ -524,14 +819,17 @@ async def handle_generate(ws, msg):
             "message": f"Generating motion for: {prompt} ({duration}s, {steps} steps)...",
         }))
 
-        vrm_frames, fps = await asyncio.get_event_loop().run_in_executor(
-            None, generate_motion, prompt, duration, steps
-        )
+        def _run():
+            return generate_motion(prompt, duration, steps, prompts=prompts,
+                                   durations=durations, constraints=constraints,
+                                   cfg=cfg, seed=seed, allow_root_motion=allow_root_motion)
+
+        vrm_frames, fps, root_deltas = await asyncio.get_event_loop().run_in_executor(None, _run)
 
         save_path = None
         if save_name:
             save_path = await asyncio.get_event_loop().run_in_executor(
-                None, save_animation, save_name, prompt, fps, vrm_frames
+                None, save_animation, save_name, prompt, fps, vrm_frames, root_deltas
             )
 
         ready_data = {
@@ -574,6 +872,12 @@ async def stream_frames(
     transition_duration = frame_interval * 1.1  # Slightly longer than interval for overlap smoothing
 
     log(f"Streaming {len(vrm_frames)} frames at {fps} FPS...")
+    if vrm_frames:
+        log(
+            f"First frame: {len(vrm_frames[0])} non-identity VRM bones "
+            f"(SOMA77 maps {len(SOMA77_MAPPED_VRM_NAMES)} unique VRM names; "
+            f"jarvis logs matched/unused at stream end)"
+        )
     await ws.send(make_message("kimodo:status", {
         "requestId": request_id,
         "status": "streaming",

@@ -51,6 +51,7 @@ pub const DOWN: &str = p::ARROW_DOWN;
 pub const ARROW_RIGHT: &str = p::ARROW_RIGHT;
 pub const REFRESH: &str = p::ARROW_CLOCKWISE;
 pub const REVERSE: &str = p::ARROW_COUNTER_CLOCKWISE;
+pub const MIRROR: &str = p::FLIP_HORIZONTAL;
 pub const INFINITY: &str = p::INFINITY;
 pub const SUBTREE: &str = p::ARROW_ELBOW_DOWN_RIGHT;
 pub const HOME: &str = p::HOUSE;

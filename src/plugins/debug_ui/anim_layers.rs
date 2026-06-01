@@ -122,6 +122,7 @@ const ALL_CHOICES: &[AddDriverChoice] = &[
 
 /// Fixed-height footer toolbar inside the Animation Layers panel.
 const ADD_BAR_HEIGHT: f32 = 34.0;
+const STATUS_STRIP_HEIGHT: f32 = 22.0;
 /// Layer name field — fixed so transport / reorder buttons stay on one row.
 const LAYER_LABEL_WIDTH: f32 = 120.0;
 /// Kind tag column — fits `[expression-hold]` so labels align across rows.
@@ -189,7 +190,7 @@ pub fn draw_anim_layers_window(
             );
             master_filter_row(ui, &mut state.anim_layers, stack);
             ui.separator();
-            egui::TopBottomPanel::bottom("anim_layers_inner_toolbar")
+            egui::TopBottomPanel::bottom("anim_layers_add_bar")
                 .exact_height(ADD_BAR_HEIGHT)
                 .show_inside(ui, |ui| {
                     let presets = expression_presets(params.snapshot.as_deref());
@@ -201,6 +202,29 @@ pub fn draw_anim_layers_window(
                         &presets,
                     );
                 });
+            let store_err = params.layer_sets.as_deref().and_then(|store| {
+                store.inner.read().last_error.clone()
+            });
+            let has_status_strip = state.anim_layers.status.is_some() || store_err.is_some();
+            if has_status_strip {
+                egui::TopBottomPanel::bottom("anim_layers_status_strip")
+                    .exact_height(STATUS_STRIP_HEIGHT)
+                    .show_inside(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if let Some(msg) = &state.anim_layers.status {
+                                ui.colored_label(theme::success(ui), msg);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if let Some(err) = &store_err {
+                                        ui.colored_label(theme::error(ui), err);
+                                    }
+                                },
+                            );
+                        });
+                    });
+            }
             layer_list(
                 ui,
                 &mut state.anim_layers,
@@ -209,16 +233,6 @@ pub fn draw_anim_layers_window(
                 params.hierarchy.as_deref(),
                 glitch.as_deref(),
             );
-            if let Some(msg) = &state.anim_layers.status {
-                ui.add_space(4.0);
-                ui.colored_label(theme::success(ui), msg);
-            }
-            if let Some(store) = params.layer_sets.as_deref() {
-                let guard = store.inner.read();
-                if let Some(err) = &guard.last_error {
-                    ui.colored_label(theme::error(ui), err);
-                }
-            }
         });
     };
 

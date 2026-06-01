@@ -43,6 +43,7 @@ use crate::plugins::intent_calibration::{
 };
 use crate::plugins::pose_capture::CaptureCommandSender;
 use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommandSender, PoseDriverPlugin};
+use crate::plugins::pose_review::PoseReviewHandle;
 use crate::plugins::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
 
 /// Plugin that boots the MCP server alongside the rest of the app.
@@ -70,6 +71,7 @@ fn start_mcp_server(
     traffic: Option<Res<TrafficLogSink>>,
     layer_stack: Option<Res<LayerStackHandle>>,
     layer_sets: Option<Res<LayerSetsStore>>,
+    pose_review: Option<Res<PoseReviewHandle>>,
 ) {
     if !settings.mcp.enabled {
         info!("mcp: disabled in config, not starting");
@@ -132,6 +134,9 @@ fn start_mcp_server(
     let traffic = traffic.map(|t| (*t).clone());
     let layer_stack_val = layer_stack.clone();
     let layer_sets_val = layer_sets.clone();
+    let pose_review_val = pose_review
+        .map(|r| (*r).clone())
+        .unwrap_or_default();
 
     let semantic_model_path = intent_model_path
         .map(|r| r.0.clone())
@@ -179,6 +184,7 @@ fn start_mcp_server(
                 semantic_model_path,
                 semantic_calibration,
                 intent_calibration_wizard,
+                pose_review_val,
             );
             rt.block_on(async move {
                 let mut tasks = Vec::new();

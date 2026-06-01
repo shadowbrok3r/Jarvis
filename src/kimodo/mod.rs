@@ -71,6 +71,23 @@ pub struct GenerateRequest {
     /// generation can easily take 20-60s on a mid-range GPU so the default is
     /// deliberately generous.
     pub timeout: Duration,
+    /// Phase A/B (Kimodo constraints + root motion) — all optional, forwarded
+    /// to the motion service. `constraints` is a path string OR an inline
+    /// constraints list (EE / fullbody / root2d). `prompts`+`durations` drive
+    /// multi-segment generation. `cfg` = (text_weight, constraint_weight).
+    pub constraints: Option<Value>,
+    pub prompts: Option<Vec<String>>,
+    pub durations: Option<Vec<f32>>,
+    pub cfg: Option<(f32, f32)>,
+    pub seed: Option<u64>,
+    /// Attach Kimodo's root trajectory as per-frame `rootPosition` (root motion).
+    pub allow_root_motion: bool,
+    /// Phase C: pose-keyframe constraint. A JSON array of
+    /// `{ "pose": <library pose name>, "frame": <int>, "root_y": <m> }`. The
+    /// motion service retargets each VRM pose into a SOMA77 `fullbody`
+    /// constraint at the given frames so Kimodo diffuses motion that passes
+    /// through our poses. Mutually exclusive with `constraints` (this wins).
+    pub pose_keyframes: Option<Value>,
 }
 
 impl Default for GenerateRequest {
@@ -82,6 +99,13 @@ impl Default for GenerateRequest {
             stream: true,
             save_name: None,
             timeout: Duration::from_secs(180),
+            constraints: None,
+            prompts: None,
+            durations: None,
+            cfg: None,
+            seed: None,
+            allow_root_motion: false,
+            pose_keyframes: None,
         }
     }
 }
@@ -136,6 +160,13 @@ impl KimodoClient {
             "steps": request.steps,
             "stream": request.stream,
             "saveName": request.save_name,
+            "prompts": request.prompts,
+            "durations": request.durations,
+            "constraints": request.constraints,
+            "cfg": request.cfg.map(|(t, c)| json!({"text_weight": t, "constraint_weight": c})),
+            "seed": request.seed,
+            "allowRootMotion": request.allow_root_motion,
+            "poseKeyframes": request.pose_keyframes,
         });
         self.hub
             .send_with_event_id("kimodo:generate", payload, request_id.clone());
@@ -378,6 +409,7 @@ fn parse_apply_pose_frame(env: &EnvelopeBody) -> Option<AnimationFrame> {
         bones,
         duration_ms: None,
         expressions,
+        root_position: None,
     })
 }
 

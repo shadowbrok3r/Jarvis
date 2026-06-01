@@ -17,6 +17,10 @@ artifacts/
 /docs/
 .directory
 
+assets/models/*.vrma
+assets/POSE_GUIDE.md
+assets/LAYER_AUTHORING_GUIDE.md
+
 # JarvisIOS: device staticlib output and local Rust build (generated Swift/Headers are committed under Sources/)
 JarvisIOS/.DS_Store
 JarvisIOS/.build

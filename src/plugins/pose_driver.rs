@@ -134,6 +134,7 @@ impl Plugin for PoseDriverPlugin {
             .init_resource::<BoneEntityIndex>()
             .init_resource::<IndexedBones>()
             .init_resource::<BoneHierarchy>()
+            .init_resource::<PoseBoneApplyTelemetry>()
             .init_resource::<ActiveTransitions>()
             .init_resource::<ExpressionAnimationPlayback>()
             // Order: right after `AnimationSystems` (so VRMA sampling doesn't
@@ -210,6 +211,11 @@ pub enum PoseCommand {
         /// means instant.
         transition_seconds: Option<f32>,
     },
+    /// ROOT MOTION: set a bone's local `Transform.translation` to its bind/rest
+    /// translation **plus** the given delta (meters). Emitted by `anim_layers`
+    /// for the root (`hips`) so a clip can lower / shift the body, not just
+    /// pivot it. Bones not in the map keep their current translation.
+    ApplyBoneTranslations(HashMap<String, [f32; 3]>),
     /// Partial expression update (`vrm:apply-expression`).
     ///
     /// When `cancel_expression_animation` is true (MCP / hub / explicit UI apply),
@@ -301,6 +307,101 @@ pub struct IndexedBones {
     /// refresh so read-only consumers don't need to import a new type
     /// every time we add a bone.
     pub entities: HashMap<String, Entity>,
+}
+
+/// Aggregates per-frame bone match stats during Kimodo/hub pose streams so logs
+/// are not flooded at 10–30 Hz. [`flush_pose_bone_stream_summary`] emits one line.
+#[derive(Resource)]
+pub struct PoseBoneApplyTelemetry {
+    stream_frames: u32,
+    max_kimodo_wrote: usize,
+    min_matched: usize,
+    last_avatar_humanoid: usize,
+    last_canonical_on_rig: usize,
+    last_unused_on_avatar: usize,
+    missing_union: HashSet<String>,
+    missing_warned: bool,
+}
+
+impl PoseBoneApplyTelemetry {
+    const UNSET_MIN: usize = usize::MAX;
+
+    fn reset_stream(&mut self) {
+        *self = Self::default();
+        self.min_matched = Self::UNSET_MIN;
+    }
+
+    /// One INFO line after a streaming session (`kimodo:status` done/error).
+    pub fn flush_stream_summary(&mut self, source: &str) {
+        if self.stream_frames == 0 {
+            return;
+        }
+        let min_matched = if self.min_matched == Self::UNSET_MIN {
+            0
+        } else {
+            self.min_matched
+        };
+        let mut missing: Vec<String> = self.missing_union.iter().cloned().collect();
+        missing.sort();
+        info!(
+            target: "pose_driver",
+            "{source} bone summary: frames={} kimodo_wrote_max={} matched_min={} \
+             avatar_humanoid={} canonical_on_rig={}/{} unused_on_avatar_last={} \
+             unknown_to_rig={missing:?}",
+            self.stream_frames,
+            self.max_kimodo_wrote,
+            min_matched,
+            self.last_avatar_humanoid,
+            self.last_canonical_on_rig,
+            VRM_BONE_NAMES.len(),
+            self.last_unused_on_avatar,
+        );
+        self.reset_stream();
+    }
+
+    fn record_stream_frame(
+        &mut self,
+        requested: usize,
+        matched: usize,
+        avatar_humanoid: usize,
+        canonical_on_rig: usize,
+        unused_on_avatar: usize,
+        missing: &[String],
+    ) -> bool {
+        self.stream_frames += 1;
+        self.max_kimodo_wrote = self.max_kimodo_wrote.max(requested);
+        if self.stream_frames == 1 || matched < self.min_matched {
+            self.min_matched = matched;
+        }
+        self.last_avatar_humanoid = avatar_humanoid;
+        self.last_canonical_on_rig = canonical_on_rig;
+        self.last_unused_on_avatar = unused_on_avatar;
+        for m in missing {
+            self.missing_union.insert(m.clone());
+        }
+        requested != matched && !self.missing_warned
+    }
+
+    fn mark_missing_warned(&mut self) {
+        self.missing_warned = true;
+    }
+}
+
+impl Default for PoseBoneApplyTelemetry {
+    fn default() -> Self {
+        // NOTE: do NOT use `..Default::default()` here — this *is* the Default
+        // impl, so it would recurse infinitely (stack overflow at startup).
+        Self {
+            stream_frames: 0,
+            max_kimodo_wrote: 0,
+            min_matched: Self::UNSET_MIN,
+            last_avatar_humanoid: 0,
+            last_canonical_on_rig: 0,
+            last_unused_on_avatar: 0,
+            missing_union: HashSet::new(),
+            missing_warned: false,
+        }
+    }
 }
 
 impl IndexedBones {
@@ -1272,21 +1373,63 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                     .keys()
                     .filter(|n| bone_map.contains_key(n.as_str()))
                     .count();
-                if requested != matched {
-                    let missing: Vec<&str> = bones
-                        .keys()
-                        .filter(|n| !bone_map.contains_key(n.as_str()))
-                        .map(String::as_str)
-                        .collect();
-                    warn!(
+                let avatar_humanoid = bone_map.len();
+                let canonical_on_rig = VRM_BONE_NAMES
+                    .iter()
+                    .filter(|n| bone_map.contains_key(**n))
+                    .count();
+                let unused_on_avatar = bone_map
+                    .keys()
+                    .filter(|n| !bones.contains_key(n.as_str()))
+                    .count();
+                let missing: Vec<String> = bones
+                    .keys()
+                    .filter(|n| !bone_map.contains_key(n.as_str()))
+                    .cloned()
+                    .collect();
+                let likely_stream = transition > 0.0 && requested >= 8;
+                let mut stream_warn = false;
+                if let Some(mut telem) = world.get_resource_mut::<PoseBoneApplyTelemetry>() {
+                    if likely_stream {
+                        stream_warn =
+                            telem.record_stream_frame(
+                                requested,
+                                matched,
+                                avatar_humanoid,
+                                canonical_on_rig,
+                                unused_on_avatar,
+                                &missing,
+                            );
+                    }
+                }
+                if likely_stream {
+                    if stream_warn {
+                        warn!(
+                            target: "pose_driver",
+                            "ApplyBones stream: kimodo_wrote={requested} matched={matched} \
+                             avatar_humanoid={avatar_humanoid} unused_on_avatar={unused_on_avatar} \
+                             unknown_to_rig={missing:?} (further frames summarized at stream end)",
+                        );
+                        if let Some(mut telem) = world.get_resource_mut::<PoseBoneApplyTelemetry>()
+                        {
+                            telem.mark_missing_warned();
+                        }
+                    }
+                } else if requested != matched {
+                    debug!(
                         target: "pose_driver",
-                        "ApplyBones: requested={requested} matched={matched} missing={:?}",
-                        missing,
+                        "ApplyBones: kimodo_wrote={requested} matched={matched} \
+                         avatar_humanoid={avatar_humanoid} canonical_on_rig={canonical_on_rig}/{} \
+                         unused_on_avatar={unused_on_avatar} unknown_to_rig={missing:?}",
+                        VRM_BONE_NAMES.len(),
                     );
                 } else {
                     debug!(
                         target: "pose_driver",
-                        "ApplyBones: requested={requested} matched={matched} blend_path={blend_path}",
+                        "ApplyBones: kimodo_wrote={requested} matched={matched} \
+                         avatar_humanoid={avatar_humanoid} canonical_on_rig={canonical_on_rig}/{} \
+                         unused_on_avatar={unused_on_avatar} blend_path={blend_path}",
+                        VRM_BONE_NAMES.len(),
                     );
                 }
                 if blend_path {
@@ -1353,6 +1496,23 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                         target: "pose_driver",
                         "ApplyBones (instant): wrote {written} bone rotations"
                     );
+                }
+            }
+            PoseCommand::ApplyBoneTranslations(translations) => {
+                if !index_ready {
+                    continue;
+                }
+                for (name, delta) in translations {
+                    let Some(&e) = bone_map.get(&name) else {
+                        continue;
+                    };
+                    let rest_t = world
+                        .get::<RestTransform>(e)
+                        .map(|rt| rt.0.translation)
+                        .unwrap_or(Vec3::ZERO);
+                    if let Some(mut tf) = world.get_mut::<Transform>(e) {
+                        tf.translation = rest_t + Vec3::from_array(delta);
+                    }
                 }
             }
             PoseCommand::ApplyExpression {

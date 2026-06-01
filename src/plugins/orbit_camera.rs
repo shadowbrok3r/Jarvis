@@ -39,6 +39,15 @@ use crate::plugins::rig_editor::RigEditorState;
 /// enough to catch torso / face hits without snapping to a far-away limb
 /// when the click landed in empty space.
 const CLICK_PIVOT_BONE_RADIUS_M: f32 = 0.35;
+/// Min orbit radius as a fraction of skeleton extent (root → farthest bone).
+const ZOOM_FLOOR_EXTENT_FRAC: f32 = 0.15;
+/// Min camera distance to any indexed bone (m at `uniform_scale` 1.0).
+const SHELL_BASE_M: f32 = 0.09;
+/// Perspective near plane as a fraction of orbit radius (scales in when zoomed in).
+const NEAR_CLIP_RADIUS_FRAC: f32 = 0.02;
+/// Near plane when bone-shell distance is known (tighter than radius-based guess).
+const NEAR_CLIP_NEAREST_FRAC: f32 = 0.12;
+const NEAR_CLIP_ABSOLUTE_MIN: f32 = 5e-5;
 
 pub struct OrbitCameraPlugin;
 
@@ -61,6 +70,10 @@ impl Plugin for OrbitCameraPlugin {
                     apply_projection_settings,
                 )
                     .chain(),
+            )
+            .add_systems(
+                PostUpdate,
+                sync_dynamic_camera_clip.after(PanOrbitCameraSystemSet),
             )
             // List-click in the Bones tab (in edit mode) is the only producer
             // of `pending_focus_camera_to_bone` — viewport mesh picks
@@ -345,8 +358,8 @@ fn spawn_orbit_camera(mut commands: Commands, settings: Res<Settings>) {
     }
 }
 
-/// Keeps the camera's perspective near/far/FOV in sync with `Settings::camera`
-/// so the Camera debug UI can tune them live.
+/// Keeps perspective far/FOV in sync with `Settings::camera`. Near clip is
+/// driven every frame by [`sync_dynamic_camera_clip`].
 fn apply_projection_settings(
     settings: Res<Settings>,
     mut cam_q: Query<&mut Projection, With<Camera3d>>,
@@ -357,16 +370,122 @@ fn apply_projection_settings(
     let c = &settings.camera;
     for mut proj in &mut cam_q {
         if let Projection::Perspective(ref mut p) = *proj {
-            let near = c.near_clip.max(1e-4);
-            let far = c.far_clip.max(near + 1.0);
+            let far = c.far_clip.max(c.near_clip + 1.0);
             let fov = c.fov_y_radians.clamp(0.1, std::f32::consts::PI - 0.1);
-            if (p.near - near).abs() > f32::EPSILON
-                || (p.far - far).abs() > f32::EPSILON
-                || (p.fov - fov).abs() > f32::EPSILON
-            {
-                p.near = near;
+            if (p.far - far).abs() > f32::EPSILON || (p.fov - fov).abs() > f32::EPSILON {
                 p.far = far;
                 p.fov = fov;
+            }
+        }
+    }
+}
+
+fn character_extent_from_bones(
+    root: Vec3,
+    indexed: Option<&IndexedBones>,
+    gtf_q: &Query<&GlobalTransform>,
+) -> Option<f32> {
+    let indexed = indexed?;
+    if indexed.entities.is_empty() {
+        return None;
+    }
+    let mut max_d = 0.25f32;
+    for (_, entity) in &indexed.entities {
+        let Ok(gtf) = gtf_q.get(*entity) else {
+            continue;
+        };
+        let p = gtf.translation();
+        if p.is_finite() {
+            max_d = max_d.max((p - root).length());
+        }
+    }
+    Some(max_d)
+}
+
+fn nearest_bone_distance(
+    cam_pos: Vec3,
+    indexed: Option<&IndexedBones>,
+    gtf_q: &Query<&GlobalTransform>,
+) -> Option<f32> {
+    let indexed = indexed?;
+    let mut nearest = f32::MAX;
+    for (_, entity) in &indexed.entities {
+        let Ok(gtf) = gtf_q.get(*entity) else {
+            continue;
+        };
+        let p = gtf.translation();
+        if p.is_finite() {
+            nearest = nearest.min(cam_pos.distance(p));
+        }
+    }
+    (nearest.is_finite() && nearest < f32::MAX).then_some(nearest)
+}
+
+/// Scale near clip with zoom, keep orbit outside the mesh shell, honor avatar scale.
+fn sync_dynamic_camera_clip(
+    settings: Res<Settings>,
+    indexed: Option<Res<IndexedBones>>,
+    vrm_q: Query<(&GlobalTransform, &Transform), With<Vrm>>,
+    gtf_q: Query<&GlobalTransform>,
+    cam_gt_q: Query<&GlobalTransform, With<Camera3d>>,
+    mut orbit_q: Query<&mut PanOrbitCamera, With<Camera3d>>,
+    mut proj_q: Query<&mut Projection, With<Camera3d>>,
+) {
+    let cam = &settings.camera;
+    let Ok((vrm_gtf, vrm_tf)) = vrm_q.single() else {
+        return;
+    };
+    let uniform_scale = vrm_tf.scale.x.max(0.001);
+    let shell = SHELL_BASE_M * uniform_scale;
+
+    let extent = character_extent_from_bones(vrm_gtf.translation(), indexed.as_deref(), &gtf_q);
+    let zoom_floor = extent
+        .map(|e| cam.min_radius.max(e * ZOOM_FLOOR_EXTENT_FRAC).max(shell * 0.5))
+        .unwrap_or(cam.min_radius.max(shell * 0.5));
+
+    let cam_pos = cam_gt_q.single().ok().map(|gtf| gtf.translation());
+    let nearest_bone = cam_pos.and_then(|p| nearest_bone_distance(p, indexed.as_deref(), &gtf_q));
+
+    for mut orbit in &mut orbit_q {
+        orbit.zoom_lower_limit = zoom_floor;
+        orbit.zoom_upper_limit = Some(cam.max_radius.max(zoom_floor + 0.01));
+
+        let mut radius = orbit
+            .radius
+            .unwrap_or(orbit.target_radius)
+            .max(zoom_floor);
+
+        if let Some(nearest) = nearest_bone {
+            if nearest < shell {
+                let push = shell / nearest.max(1e-4);
+                radius = (radius * push).max(zoom_floor);
+                orbit.target_radius = radius;
+                orbit.radius = Some(radius);
+                orbit.force_update = true;
+            }
+        } else if orbit.target_radius < zoom_floor {
+            orbit.target_radius = zoom_floor;
+            orbit.radius = Some(zoom_floor);
+            radius = zoom_floor;
+        } else if orbit.radius.map(|r| r < zoom_floor).unwrap_or(false) {
+            orbit.radius = Some(zoom_floor);
+            radius = zoom_floor;
+        }
+
+        let dynamic_near = nearest_bone
+            .map(|d| (d * NEAR_CLIP_NEAREST_FRAC).min(cam.near_clip))
+            .unwrap_or_else(|| (radius * NEAR_CLIP_RADIUS_FRAC).min(cam.near_clip))
+            .max(NEAR_CLIP_ABSOLUTE_MIN);
+
+        for mut proj in &mut proj_q {
+            if let Projection::Perspective(ref mut p) = *proj {
+                let far = cam.far_clip.max(dynamic_near + 1.0);
+                if (p.near - dynamic_near).abs() > f32::EPSILON {
+                    p.near = dynamic_near;
+                }
+                if (p.far - far).abs() > f32::EPSILON {
+                    p.far = far;
+                }
             }
         }
     }

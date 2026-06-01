@@ -117,6 +117,7 @@ fn main() {
             plugins::pose_driver::PoseDriverPlugin,
             plugins::pose_capture::PoseCapturePlugin,
             plugins::intent_calibration::IntentCalibrationPlugin,
+            plugins::pose_review::PoseReviewPlugin,
             mcp::plugin::McpPlugin,
         ))
         .add_plugins((

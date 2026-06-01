@@ -255,6 +255,7 @@ fn vrma_import_capture(
         bones,
         duration_ms: Some((1000.0 / job.sample_fps as f64).max(1.0)),
         expressions: HashMap::new(),
+        root_position: None,
     });
 
     job.next_time += job.sample_dt;
