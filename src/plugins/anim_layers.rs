@@ -1785,7 +1785,7 @@ fn sample_layer(layer: &mut Layer, snap: &RestPoseSnapshot, dt: f32, gaze_active
 /// Interpolated ROOT MOTION (hips translation delta from bind, meters) of a
 /// clip at `t` seconds. `None` when the clip carries no `root_position` track,
 /// so rotation-only clips behave exactly as before (no translation emitted).
-fn sample_clip_root_position(animation: &AnimationFile, t: f32) -> Option<Vec3> {
+pub(crate) fn sample_clip_root_position(animation: &AnimationFile, t: f32) -> Option<Vec3> {
     let total = animation.frames.len();
     if total == 0 {
         return None;

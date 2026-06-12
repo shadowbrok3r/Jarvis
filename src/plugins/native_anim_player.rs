@@ -214,6 +214,14 @@ fn tick_active_animation(
     }
     push_pose(sender.as_ref(), bones, expressions);
 
+    // Root motion: clips carrying a `root_position` track (e.g. the squat's hip
+    // drop) emit a hips translation delta. The anti-slide lock runs *before*
+    // `apply_pose_commands`, so this deliberate delta survives; rotation-only
+    // clips emit nothing and stay locked to bind.
+    if let Some(root) = crate::plugins::anim_layers::sample_clip_root_position(&clip.animation, t) {
+        push_root_translation(sender.as_ref(), root);
+    }
+
     let nearest = ((t * fps).round() as usize).min(total_frames - 1);
     active.last_applied_frame = Some(nearest);
 
@@ -333,6 +341,12 @@ fn push_pose(
             cancel_expression_animation: false,
         });
     }
+}
+
+fn push_root_translation(sender: &PoseCommandSender, root: Vec3) {
+    let mut translations = HashMap::with_capacity(1);
+    translations.insert("hips".to_string(), [root.x, root.y, root.z]);
+    sender.send(PoseCommand::ApplyBoneTranslations(translations));
 }
 
 fn push_frame(sender: &PoseCommandSender, frame: &AnimationFrame) {

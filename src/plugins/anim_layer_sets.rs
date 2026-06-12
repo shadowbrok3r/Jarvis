@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use jarvis_avatar::config::Settings;
 use jarvis_avatar::paths::expand_home;
-use jarvis_avatar::pose_library::{PoseLibrary, slugify};
+use jarvis_avatar::pose_library::{AnimationMeta, PoseLibrary, slugify};
 
 use super::anim_layers::{BlendMode, BoneMask, DriverKind, Layer, LayerStack};
 
@@ -208,9 +208,15 @@ impl LayerSet {
     pub fn hydrate_into_stack(&self, stack: &mut LayerStack, library: &PoseLibrary) -> usize {
         stack.layers.clear();
         stack.master_enabled = self.master_enabled;
+        // Scan the animations dir ONCE up front. Clip layers that don't resolve
+        // by filename fall back to a name lookup; doing that per-layer used to
+        // re-list + re-parse the whole animations dir for every layer, so a
+        // big per-bone set (50+ clip layers, e.g. a full-body VRMA import whose
+        // in-memory slices were never on disk) froze the app for many seconds.
+        let anims = library.list_animations().unwrap_or_default();
         let mut count = 0;
         for bp in &self.layers {
-            match bp.to_layer(library) {
+            match bp.to_layer(library, &anims) {
                 Ok(layer) => {
                     stack.add_layer(layer);
                     count += 1;
@@ -295,8 +301,8 @@ impl LayerBlueprint {
         }
     }
 
-    pub fn to_layer(&self, library: &PoseLibrary) -> Result<Layer, String> {
-        let driver = self.driver.to_driver(library)?;
+    pub fn to_layer(&self, library: &PoseLibrary, anims: &[AnimationMeta]) -> Result<Layer, String> {
+        let driver = self.driver.to_driver(library, anims)?;
         let duration = driver.duration_hint();
         let blend_mode = match self.blend_mode {
             BlendModeBp::Override => BlendMode::Override,
@@ -512,15 +518,16 @@ impl DriverBlueprint {
         }
     }
 
-    fn to_driver(&self, library: &PoseLibrary) -> Result<DriverKind, String> {
+    fn to_driver(&self, library: &PoseLibrary, anims: &[AnimationMeta]) -> Result<DriverKind, String> {
         Ok(match self {
             Self::Clip { filename } => {
                 // Layers always serialise by clip filename (e.g. "wave.json"),
                 // but older files could have stored the clip's display name.
-                // Try both before giving up.
+                // Try both before giving up. The name fallback uses the
+                // pre-scanned `anims` list (no per-layer dir re-scan).
                 let animation = library
                     .load_animation(filename)
-                    .or_else(|_| find_animation_by_name(library, filename))
+                    .or_else(|_| find_animation_by_name(library, anims, filename))
                     .map_err(|e| format!("load_animation({filename}): {e}"))?;
                 DriverKind::Clip {
                     animation: Box::new(animation),
@@ -664,10 +671,10 @@ impl DriverBlueprint {
 
 fn find_animation_by_name(
     library: &PoseLibrary,
+    anims: &[AnimationMeta],
     needle: &str,
 ) -> Result<jarvis_avatar::pose_library::AnimationFile, jarvis_avatar::pose_library::LibraryError> {
-    let metas = library.list_animations()?;
-    let hit = metas
+    let hit = anims
         .iter()
         .find(|m| m.name == needle || m.filename == needle)
         .ok_or_else(|| jarvis_avatar::pose_library::LibraryError::NotFound(needle.to_string()))?;

@@ -109,7 +109,7 @@ pub(crate) fn play_idle_when_vrma_loaded(trigger: On<LoadedVrma>, mut commands: 
 /// `0` here was wrong — it destroys the rig’s rest local offset and fights retargeting. We only
 /// replace components with `bevy_vrm1::RestTransform` so we strip animated **delta** on that
 /// axis, not the model’s natural hips offset.
-fn lock_hips_root_motion(
+pub(crate) fn lock_hips_root_motion(
     settings: Res<Settings>,
     mut hips_q: Query<(&mut Transform, &RestTransform), With<Hips>>,
 ) {

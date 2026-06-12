@@ -56,6 +56,46 @@ pub async fn fetch_kokoro_speech(
         .map_err(|e| format!("read bytes: {e}"))
 }
 
+/// Begin a **streamed** Kokoro PCM response. Returns the open [`reqwest::Response`]
+/// so the caller can pull `s16le` mono bytes incrementally via
+/// [`reqwest::Response::chunk`] and emit playback sub-clips as audio arrives —
+/// the lowest-latency path (first audio starts ~one chunk into synthesis).
+///
+/// Always sends `response_format: "pcm"` + `stream: true`; PCM is the only
+/// format that survives chunked transfer intact (WAV's header length fields and
+/// Kokoro's chunk concatenation make streamed WAV ill-formed). Wrap each
+/// buffered slice with [`pcm_s16le_mono_to_wav_bytes`] for `bevy_audio`.
+pub async fn start_kokoro_pcm_stream(
+    client: &Client,
+    base_url: &str,
+    voice: &str,
+    text: &str,
+) -> Result<reqwest::Response, String> {
+    let endpoint = format!("{}/v1/audio/speech", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": "kokoro",
+        "voice": voice,
+        "input": text,
+        "response_format": "pcm",
+        "stream": true,
+    });
+    let resp = client
+        .post(&endpoint)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("post {endpoint}: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "kokoro {status}: {}",
+            txt.chars().take(200).collect::<String>()
+        ));
+    }
+    Ok(resp)
+}
+
 /// Shorthand: WAV, non-streaming (Bevy / rodio path).
 pub async fn fetch_kokoro_wav(
     client: &Client,

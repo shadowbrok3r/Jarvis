@@ -56,6 +56,13 @@ pub struct KimodoGenerateOutcome {
     /// If Kimodo included `savedPath` on the final status (on-disk VRM JSON).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_path: Option<String>,
+    /// Raw frame objects (`{bones, duration_ms?, rootPosition?}`) from a
+    /// non-streaming `kimodo:generate:result`. Kept in-process so the MCP layer
+    /// can persist the clip to the LOCAL animations dir even when the Kimodo
+    /// service runs on a different host (no shared filesystem needed). Never
+    /// serialized into tool output (it would bloat the response with every frame).
+    #[serde(skip)]
+    pub frames: Option<Vec<Value>>,
 }
 
 /// Tunables for a single generate request.
@@ -181,6 +188,7 @@ impl KimodoClient {
         let mut frame_count: Option<u32> = None;
         let mut fps: Option<f32> = None;
         let mut saved_path: Option<String> = None;
+        let mut frames_out: Option<Vec<Value>> = None;
 
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -287,28 +295,16 @@ impl KimodoClient {
                                 frame_count,
                                 fps,
                                 saved_path: saved_path.clone(),
+                                frames: frames_out.take(),
                             });
                         }
                         "ready" if !request.stream => {
-                            if let Some(streaming) = self.streaming.as_ref() {
-                                streaming.end();
-                            }
-                            // Non-streaming path is terminal at "ready"; the
-                            // result envelope (`kimodo:generate:result`) follows
-                            // but we don't need it to return a summary.
-                            return Ok(KimodoGenerateOutcome {
-                                request_id,
-                                prompt: request.prompt,
-                                duration: request.duration,
-                                steps: request.steps,
-                                streamed: request.stream,
-                                save_name: request.save_name,
-                                final_status: "ready".to_string(),
-                                final_message: last_message,
-                                frame_count,
-                                fps,
-                                saved_path: saved_path.clone(),
-                            });
+                            // Non-streaming generation reports "ready" and then
+                            // sends the `kimodo:generate:result` envelope carrying
+                            // the actual frames. Keep waiting for it so the MCP
+                            // layer can persist the clip locally even when Kimodo
+                            // runs on another host. (We used to return here and
+                            // drop the frames.)
                         }
                         _ => {
                             // "generating" / "streaming" / other progress markers — keep waiting.
@@ -318,6 +314,12 @@ impl KimodoClient {
                 "kimodo:generate:result" if !request.stream => {
                     if let Some(streaming) = self.streaming.as_ref() {
                         streaming.end();
+                    }
+                    if let Some(arr) = env.data.get("frames").and_then(Value::as_array) {
+                        if frame_count.is_none() {
+                            frame_count = Some(arr.len() as u32);
+                        }
+                        frames_out = Some(arr.clone());
                     }
                     if frame_count.is_none() {
                         if let Some(fc) = env.data.get("frameCount").and_then(Value::as_u64) {
@@ -341,6 +343,7 @@ impl KimodoClient {
                         frame_count,
                         fps,
                         saved_path: saved_path.clone(),
+                        frames: frames_out.take(),
                     });
                 }
                 _ => {}

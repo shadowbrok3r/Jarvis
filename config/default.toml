@@ -79,6 +79,12 @@ response_format = "pcm"
 # Must be false for reliable one-shot WAV/PCM (Kokoro defaults stream=true otherwise).
 stream = false
 pcm_sample_rate = 24000
+# Split replies into sentence chunks for incremental TTS: the first sentence plays while the rest synthesize (lower time-to-first-audio). Set false to send each reply as one request.
+chunk_tts = true
+# Stream Kokoro PCM and play sub-clips as audio arrives (lowest latency). Requires response_format = "pcm"; with A2F lip-sync on, runs A2F per sub-chunk (slightly less context). Off by default.
+stream_playback = false
+# Target seconds of audio per streamed sub-clip when stream_playback = true. Smaller = faster first audio, more seams.
+stream_chunk_secs = 0.6
 
 [avatar]
 model_path = "models/airi.vrm"

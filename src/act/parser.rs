@@ -298,6 +298,168 @@ pub fn strip_act_delay(input: &str) -> Cow<'_, str> {
     Cow::Owned(tidy)
 }
 
+// ------- Sentence chunking (incremental TTS) ----------------------------------
+
+/// Largest single Kokoro request we'll emit before soft-splitting at a clause
+/// break. Keeps time-to-first-audio bounded even for a long, punctuation-free
+/// run-on sentence.
+const MAX_TTS_CHUNK_CHARS: usize = 220;
+
+/// Split an assistant reply into ordered chunks for **incremental TTS**.
+///
+/// Sending the first sentence to Kokoro while later sentences are still
+/// synthesizing is the single biggest cut to time-to-first-audio: playback
+/// starts after `synth(sentence_1)` instead of `synth(whole_reply)`. Input is
+/// expected to already be ACT/DELAY-stripped (see [`strip_act_delay_for_tts`]).
+///
+/// Boundary rules:
+///   * Break after a run of `.`/`!`/`?`/`…` that is followed by whitespace or
+///     end-of-text — so decimals (`3.5`), versions (`0.18`) and URLs stay whole.
+///   * Break on newlines (lists / paragraphs are natural pauses).
+///   * Don't break after common abbreviations (`Dr.`, `e.g.`) or single-letter
+///     initials (`J. R. R.`).
+///   * Soft-split any chunk longer than [`MAX_TTS_CHUNK_CHARS`] at the last
+///     clause break before the limit.
+///
+/// Returns chunks in speaking order; never returns empty strings. Uses a manual
+/// scan rather than a regex because Rust's `regex` crate has no lookbehind, so
+/// the "split on `.` only when followed by a capital" idiom isn't expressible.
+#[must_use]
+pub fn split_into_tts_sentences(text: &str) -> Vec<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut raw: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if c == '\n' {
+            flush_sentence(&mut current, &mut raw);
+            i += 1;
+            continue;
+        }
+        current.push(c);
+        if matches!(c, '.' | '!' | '?' | '…') {
+            // Consume a run of terminal punctuation ("?!", "...", "…").
+            while i + 1 < n && matches!(chars[i + 1], '.' | '!' | '?' | '…') {
+                i += 1;
+                current.push(chars[i]);
+            }
+            // Real boundary = terminal punctuation, then whitespace (guards
+            // decimals like `3.5`), then a char that *starts* a new sentence
+            // (uppercase / opening quote / EOS). This keeps trailing-off
+            // ellipses joined ("Wait... really?!") while still breaking on a
+            // genuine full stop.
+            let immediate = chars.get(i + 1).copied();
+            let followed_by_space = immediate.is_none_or(char::is_whitespace);
+            let next_non_ws = chars[i + 1..].iter().copied().find(|c| !c.is_whitespace());
+            let starts_sentence = next_non_ws.is_none_or(is_sentence_start);
+            if followed_by_space && starts_sentence && !ends_with_abbreviation(&current) {
+                flush_sentence(&mut current, &mut raw);
+            }
+        }
+        i += 1;
+    }
+    flush_sentence(&mut current, &mut raw);
+
+    let mut out = Vec::with_capacity(raw.len());
+    for s in raw {
+        soft_split_long_chunk(&s, MAX_TTS_CHUNK_CHARS, &mut out);
+    }
+    out
+}
+
+/// True for a character that can begin a new sentence (so a preceding period is
+/// a real full stop, not an abbreviation or decimal point).
+fn is_sentence_start(c: char) -> bool {
+    c.is_uppercase() || matches!(c, '"' | '\'' | '“' | '‘' | '(' | '[' | '*' | '_' | '¿' | '¡' | '«')
+}
+
+/// Push `current` (trimmed) onto `out` if it has any speakable content, then
+/// clear it either way.
+fn flush_sentence(current: &mut String, out: &mut Vec<String>) {
+    let trimmed = current.trim();
+    if trimmed.chars().any(char::is_alphanumeric) {
+        out.push(trimmed.to_string());
+    }
+    current.clear();
+}
+
+/// True when `s` ends in an abbreviation or single-letter initial whose period
+/// is not a sentence terminator. `"no"`/`"am"`/`"us"` are deliberately absent so
+/// real sentences ending in those words still split; their dotted forms
+/// (`a.m`, `u.s`) are matched instead.
+fn ends_with_abbreviation(s: &str) -> bool {
+    const ABBREV: &[&str] = &[
+        "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "inc", "ltd", "co", "fig",
+        "vol", "pp", "e.g", "i.e", "a.m", "p.m", "u.s", "u.k",
+    ];
+    let trailing: String = s
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '.')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let tok = trailing.trim_end_matches('.').to_ascii_lowercase();
+    if tok.is_empty() {
+        return false;
+    }
+    // Single-letter initial (e.g. "J", "R") — common in names.
+    if tok.chars().filter(|c| c.is_alphanumeric()).count() == 1 {
+        return true;
+    }
+    ABBREV.contains(&tok.as_str())
+}
+
+/// Break `s` into <= `max_chars` pieces at the last clause break (`,`/`;`/`:`)
+/// or whitespace before the limit, pushing each onto `out`. Always makes
+/// forward progress so it can't loop on a break-free run.
+fn soft_split_long_chunk(s: &str, max_chars: usize, out: &mut Vec<String>) {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        if !s.trim().is_empty() {
+            out.push(s.trim().to_string());
+        }
+        return;
+    }
+    let mut start = 0usize;
+    while start < chars.len() {
+        let end = (start + max_chars).min(chars.len());
+        if end == chars.len() {
+            let piece: String = chars[start..end].iter().collect();
+            if !piece.trim().is_empty() {
+                out.push(piece.trim().to_string());
+            }
+            break;
+        }
+        let window = &chars[start..end];
+        let cut = window
+            .iter()
+            .rposition(|&c| matches!(c, ',' | ';' | ':'))
+            .map(|p| start + p + 1)
+            .or_else(|| {
+                window
+                    .iter()
+                    .rposition(|c| c.is_whitespace())
+                    .map(|p| start + p + 1)
+            })
+            .filter(|&c| c > start)
+            .unwrap_or(end);
+        let piece: String = chars[start..cut].iter().collect();
+        if !piece.trim().is_empty() {
+            out.push(piece.trim().to_string());
+        }
+        start = cut;
+    }
+}
+
 // ------- Helpers --------------------------------------------------------------
 
 /// Convert a bracket-form attribute body (`emotion="x" intensity=0.5`) into
@@ -397,5 +559,84 @@ mod tests {
     fn labels_are_lowercased() {
         let labels = emotion_labels(r#"[ACT emotion="SENSUAL"]"#);
         assert_eq!(labels, vec!["sensual".to_string()]);
+    }
+
+    #[test]
+    fn splits_basic_sentences() {
+        assert_eq!(
+            split_into_tts_sentences("Hello there. How are you?"),
+            vec!["Hello there.".to_string(), "How are you?".to_string()]
+        );
+    }
+
+    #[test]
+    fn keeps_decimals_and_versions_whole() {
+        assert_eq!(
+            split_into_tts_sentences("The value is 3.5 today."),
+            vec!["The value is 3.5 today.".to_string()]
+        );
+        assert_eq!(
+            split_into_tts_sentences("Bevy 0.18 is great. Indeed."),
+            vec!["Bevy 0.18 is great.".to_string(), "Indeed.".to_string()]
+        );
+    }
+
+    #[test]
+    fn does_not_split_after_abbreviations() {
+        assert_eq!(
+            split_into_tts_sentences("Dr. Smith arrived. Good."),
+            vec!["Dr. Smith arrived.".to_string(), "Good.".to_string()]
+        );
+        assert_eq!(
+            split_into_tts_sentences("Use fruit, e.g. apples. Done."),
+            vec!["Use fruit, e.g. apples.".to_string(), "Done.".to_string()]
+        );
+    }
+
+    #[test]
+    fn real_word_endings_still_split() {
+        // "am"/"no" are NOT treated as abbreviations (only their dotted forms).
+        assert_eq!(
+            split_into_tts_sentences("I am. You are."),
+            vec!["I am.".to_string(), "You are.".to_string()]
+        );
+    }
+
+    #[test]
+    fn collapses_terminal_punctuation_runs() {
+        assert_eq!(
+            split_into_tts_sentences("Wait... really?! Yes."),
+            vec!["Wait... really?!".to_string(), "Yes.".to_string()]
+        );
+    }
+
+    #[test]
+    fn breaks_on_newlines() {
+        assert_eq!(
+            split_into_tts_sentences("Line one\nLine two"),
+            vec!["Line one".to_string(), "Line two".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_input_yields_no_chunks() {
+        assert!(split_into_tts_sentences("   ").is_empty());
+        assert!(split_into_tts_sentences("...").is_empty());
+    }
+
+    #[test]
+    fn soft_splits_long_runon() {
+        let long = format!("{} and that is the end.", "word ".repeat(80));
+        let chunks = split_into_tts_sentences(&long);
+        assert!(chunks.len() > 1, "expected long run-on to be soft-split");
+        assert!(
+            chunks.iter().all(|c| c.chars().count() <= MAX_TTS_CHUNK_CHARS),
+            "every chunk must respect the size cap"
+        );
+        // Reassembling the words must preserve content (whitespace-normalized).
+        let rejoined = chunks.join(" ");
+        let want: String = long.split_whitespace().collect::<Vec<_>>().join(" ");
+        let got: String = rejoined.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(got, want);
     }
 }

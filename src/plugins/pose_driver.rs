@@ -156,6 +156,10 @@ impl Plugin for PoseDriverPlugin {
                 apply_pose_commands
                     .after(AnimationSystems)
                     .after(sync_bone_entity_index)
+                    // Run after the hips anti-slide lock so a clip's deliberate
+                    // root-motion delta (ApplyBoneTranslations on hips) survives
+                    // instead of being snapped back to bind the same frame.
+                    .after(crate::plugins::avatar::lock_hips_root_motion)
                     .before(VrmSystemSets::Constraints)
                     .before(TransformSystems::Propagate),
             )
@@ -776,6 +780,19 @@ fn sync_extra_skin_bones(world: &mut World) {
         extras.insert(key, e);
     }
 
+    // Capture each extra skin bone's bind (rest) local transform the first time
+    // we index it. At index time the rig is at bind, so this is the true rest —
+    // reset paths use it to restore non-humanoid bones (see `ExtraRestTransform`).
+    let need_bind: Vec<(Entity, Transform)> = extras
+        .values()
+        .copied()
+        .filter(|&e| world.get::<ExtraRestTransform>(e).is_none())
+        .filter_map(|e| world.get::<Transform>(e).map(|tf| (e, *tf)))
+        .collect();
+    for (e, tf) in need_bind {
+        world.entity_mut(e).insert(ExtraRestTransform(tf));
+    }
+
     let Some(mut index) = world.get_resource_mut::<BoneEntityIndex>() else {
         return;
     };
@@ -1196,6 +1213,25 @@ fn resume_idle_vrma_if_configured(world: &mut World) {
 /// `pose_bones` / UI sliders round-trip with [`normalized_from_local`] in
 /// [`publish_bone_snapshot`] without a separate “delta quaternion” path for
 /// Rigify `DEF-*` joints (which previously broke Euler slider extraction).
+/// Bind (rest) local transform for an EXTRA (non-humanoid) skin bone, captured
+/// the first time the bone is indexed. `bevy_vrm1` only attaches `RestTransform`
+/// to humanoid bones, so without this the reset paths silently skip every extra
+/// skin bone (legGlute, breast2, toe tips, …) and a twist parked on one — e.g. a
+/// bad pose's `legGlute` 180° — can never be cleared. NOT read by the snapshot /
+/// apply path, which keeps treating extras as raw-local.
+#[derive(Component, Clone, Copy)]
+pub struct ExtraRestTransform(pub Transform);
+
+/// Bind local transform for any indexed bone: `RestTransform` (humanoid) falling
+/// back to the captured [`ExtraRestTransform`] (extra skin bones). Reset paths
+/// use this so non-humanoid bones restore to bind, not identity.
+fn bind_local_transform(world: &World, e: Entity) -> Option<Transform> {
+    world
+        .get::<RestTransform>(e)
+        .map(|rt| rt.0)
+        .or_else(|| world.get::<ExtraRestTransform>(e).map(|rt| rt.0))
+}
+
 fn bone_target_local_rotation(
     world: &World,
     _bone_name: &str,
@@ -1356,8 +1392,15 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
 
                 if !preserve_omitted_bones {
                     for (name, &e) in &bone_map {
-                        let target =
-                            bone_target_local_rotation(world, name.as_str(), e, Quat::IDENTITY);
+                        // Bind rotation: `RestTransform` (humanoid) or the captured
+                        // `ExtraRestTransform` (extras) so an omitted non-humanoid bone
+                        // resets to true bind, not identity. Humanoid result is unchanged
+                        // (`bone_target_local_rotation(…, IDENTITY)` == `rest_local`).
+                        let target = bind_local_transform(world, e)
+                            .map(|t| t.rotation)
+                            .unwrap_or_else(|| {
+                                bone_target_local_rotation(world, name.as_str(), e, Quat::IDENTITY)
+                            });
                         if let Some(mut tf) = world.get_mut::<Transform>(e) {
                             tf.rotation = target;
                         }
@@ -1562,7 +1605,7 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                     // and other Rigify `DEF-*` extras often carry non-zero bind translation; only
                     // overwriting rotation while translation stayed edited left the toe mesh
                     // translated / flipped when sliders were zeroed.
-                    if let Some(bind) = world.get::<RestTransform>(e).map(|rt| rt.0) {
+                    if let Some(bind) = bind_local_transform(world, e) {
                         if let Some(mut tf) = world.get_mut::<Transform>(e) {
                             *tf = bind;
                         }
@@ -1623,7 +1666,7 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                             if descends_from_vrma(world, e, &vrma_roots) {
                                 continue;
                             }
-                            let Some(bind) = world.get::<RestTransform>(e).map(|rt| rt.0) else {
+                            let Some(bind) = bind_local_transform(world, e) else {
                                 continue;
                             };
                             if let Some(mut tf) = world.get_mut::<Transform>(e) {
@@ -1637,7 +1680,7 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                         if descends_from_vrma(world, e, &vrma_roots) {
                             continue;
                         }
-                        let Some(bind) = world.get::<RestTransform>(e).map(|rt| rt.0) else {
+                        let Some(bind) = bind_local_transform(world, e) else {
                             continue;
                         };
                         if let Some(mut tf) = world.get_mut::<Transform>(e) {

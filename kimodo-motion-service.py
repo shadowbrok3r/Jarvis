@@ -429,12 +429,31 @@ def _pose_local_joints_rot(pose_name: str) -> list:
     return out
 
 
+def _local_joints_rot_from_bones(bones: dict) -> list:
+    """77 axis-angle joint rotations from an INLINE bone map sent by the caller:
+    { vrmBoneName: [x,y,z,w] }  (or { vrmBoneName: {"rotation": [x,y,z,w]} }).
+
+    Lets a remote caller (the avatar's MCP layer) pass pose rotations directly so
+    we don't need the pose JSON on THIS host's disk. Zeros for unmapped joints."""
+    out = []
+    for vrm in SOMA77_INDEX_TO_VRM:
+        rot = bones.get(vrm) if vrm else None
+        if rot is not None:
+            q = rot.get("rotation") if isinstance(rot, dict) else rot
+            out.append(_quat_to_rotvec(q))
+        else:
+            out.append([0.0, 0.0, 0.0])
+    return out
+
+
 def build_fullbody_from_pose_keyframes(pose_keyframes: list) -> list:
-    """pose_keyframes: [{pose, frame, root_y}, ...] -> [fullbody constraint dict].
+    """pose_keyframes: [{pose, frame, root_y, bones?}, ...] -> [fullbody constraint dict].
 
     Sorted by frame. root_y = approx hip height (m) at each keyframe (standing
     ~0.9, kneeling/folded lower); XZ pinned to 0 (in place). Required by the
-    constraint loader's FK.
+    constraint loader's FK. When a keyframe carries an inline `bones` map (the
+    MCP layer sends one so remote hosts need no pose files), it is used directly;
+    otherwise the pose is read from POSES_DIR by name.
 
     Frame 0 HARD-CRASHES the Kimodo fullbody loader/model (CUDA fault that kills
     the service), so every index is clamped to >= 1; identical indices are nudged
@@ -451,7 +470,11 @@ def build_fullbody_from_pose_keyframes(pose_keyframes: list) -> list:
     return [{
         "type": "fullbody",
         "frame_indices": [fi for fi, _ in clean],
-        "local_joints_rot": [_pose_local_joints_rot(k["pose"]) for _, k in clean],
+        "local_joints_rot": [
+            _local_joints_rot_from_bones(k["bones"]) if k.get("bones")
+            else _pose_local_joints_rot(k["pose"])
+            for _, k in clean
+        ],
         "root_positions": [[0.0, float(k.get("root_y", 0.9)), 0.0] for _, k in clean],
         "smooth_root_2d": [[0.0, 0.0] for _ in clean],
     }]
@@ -846,12 +869,23 @@ async def handle_generate(ws, msg):
         if stream:
             await stream_frames(ws, vrm_frames, fps, request_id, save_path)
         else:
+            # Send full frames (bones + duration + root motion) so the avatar can
+            # persist the clip on ITS OWN disk even when we run on a remote host
+            # (no shared filesystem). Previously only `bones` went over the wire,
+            # so rootPosition was lost and the avatar couldn't save the clip.
+            frame_duration_ms = 1000.0 / fps
+            result_frames = []
+            for i, f in enumerate(vrm_frames):
+                fr = {"bones": f, "duration_ms": frame_duration_ms}
+                if root_deltas and i < len(root_deltas):
+                    fr["rootPosition"] = root_deltas[i]
+                result_frames.append(fr)
             await ws.send(make_message("kimodo:generate:result", {
                 "requestId": request_id,
                 "prompt": prompt,
                 "fps": fps,
                 "frameCount": len(vrm_frames),
-                "frames": [{"bones": f} for f in vrm_frames],
+                "frames": result_frames,
                 "savedPath": save_path,
             }))
 

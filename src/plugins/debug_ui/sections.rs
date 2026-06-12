@@ -315,7 +315,12 @@ pub fn avatar_panel(
             add_as_base_layer: true,
             save_to_defaults: true,
             use_layer_stack_for_idle: true,
-            per_bone_layers: true,
+            // Single looping clip layer (NOT 50 per-bone slices). It references
+            // the real saved animation file, so it loops, reloads cleanly, and
+            // sets as default idle. The per-bone explosion is only for advanced
+            // bone-level editing ("Edit idle layers") and its in-memory slices
+            // don't persist into saved sets — keep it off the simple idle path.
+            per_bone_layers: false,
         });
     }
     if pending_edit_idle_layers {

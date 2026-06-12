@@ -762,6 +762,27 @@ pub struct TtsSettings {
     /// Sample rate when `response_format` is `pcm` (Kokoro default **24000**).
     #[serde(default = "default_kokoro_pcm_sample_rate")]
     pub pcm_sample_rate: u32,
+    /// Split each reply into sentence chunks so the first one reaches Kokoro
+    /// while the rest synthesize — big cut to time-to-first-audio. Disable to
+    /// send each reply as one request.
+    #[serde(default = "default_true")]
+    pub chunk_tts: bool,
+    /// Stream Kokoro PCM and play sub-clips as audio arrives, instead of waiting
+    /// for the whole sentence. Lowest latency, but requires `response_format =
+    /// "pcm"` and (when A2F lip-sync is on) runs A2F per sub-chunk, which weakens
+    /// cross-chunk context. Off by default — flip on to trade a little fidelity
+    /// for speed.
+    #[serde(default)]
+    pub stream_playback: bool,
+    /// Target seconds of audio per streamed sub-clip (see [`Self::stream_playback`]).
+    /// Smaller = faster first audio but more seams; larger = smoother. The first
+    /// sub-clip is capped smaller than this for a fast start.
+    #[serde(default = "default_stream_chunk_secs")]
+    pub stream_chunk_secs: f32,
+}
+
+fn default_stream_chunk_secs() -> f32 {
+    0.6
 }
 
 fn default_true() -> bool {

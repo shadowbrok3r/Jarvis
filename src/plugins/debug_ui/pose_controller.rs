@@ -45,6 +45,8 @@ use crate::plugins::anim_layers::{
     LayerStackHandle, RestPoseSnapshot, animation_edit_layer_set_name,
     bake_layer_stack_to_animation, begin_library_animation_edit,
 };
+use crate::plugins::bone_influence::BoneInfluence;
+use crate::plugins::material_visibility::MaterialVisibilityStore;
 use crate::plugins::native_anim_player::{ActiveNativeAnimation, StreamingAnimation};
 use crate::plugins::pose_driver::{
     BoneHierarchy, IndexedBones, PoseCommand, PoseCommandSender, VRM_BONE_NAMES,
@@ -68,6 +70,17 @@ pub struct AnimationLayerEditUiParams<'w> {
     pub layer_sets: Option<Res<'w, LayerSetsStore>>,
     pub rest: Option<Res<'w, RestPoseSnapshot>>,
     pub hierarchy: Option<Res<'w, BoneHierarchy>>,
+}
+
+/// Bones-tab resources bundled to keep `draw_pose_controller_window` under
+/// Bevy's 16 system-param limit. `indexed` is the writable bone set every tab
+/// reads; `influence` + `material_vis` drive the Bones tab's non-deforming /
+/// hidden-mesh declutter filters.
+#[derive(SystemParam)]
+pub struct BonesPanelData<'w> {
+    pub indexed: Option<Res<'w, IndexedBones>>,
+    pub influence: Option<Res<'w, BoneInfluence>>,
+    pub material_vis: Option<Res<'w, MaterialVisibilityStore>>,
 }
 
 /// Visual groupings for the manual Bones tab. Order matters — the UI renders
@@ -161,6 +174,36 @@ fn def_bone_category_key(name: &str) -> Option<String> {
         .unwrap_or(rest.len());
     let cat = rest[..end].trim_matches('-');
     (!cat.is_empty()).then(|| cat.to_string())
+}
+
+/// Semantic group for a non-humanoid, non-DEF extra bone (Implacable names its
+/// extras `hair_*`, `skirt_*`, `waistBelt_*`, `toe_*`, …). First substring match
+/// wins; order puts specific names ahead of generic ones.
+fn extra_bone_category(name: &str) -> &'static str {
+    let l = name.to_ascii_lowercase();
+    const TABLE: &[(&str, &str)] = &[
+        ("hair", "Hair"),
+        ("headband", "Headband"),
+        ("ribbon", "Ribbon"),
+        ("sleeve", "Sleeve"),
+        ("skirt", "Skirt"),
+        ("waistbelt", "Belt"),
+        ("belt", "Belt"),
+        ("waist", "Waist"),
+        ("breast", "Breast"),
+        ("glute", "Glute"),
+        ("toe", "Toes"),
+        ("eye", "Eyes"),
+        ("heart", "Heart"),
+        ("twist", "Twist"),
+        ("shoulder", "Shoulder"),
+    ];
+    for (pat, label) in TABLE {
+        if l.contains(pat) {
+            return label;
+        }
+    }
+    "Other"
 }
 
 fn is_def_toe_bone(bone: Option<&str>) -> bool {
@@ -301,6 +344,12 @@ pub struct PoseControllerUiState {
     pub bone_euler: HashMap<String, [f32; 3]>,
     /// Filter string for the **Bones** tab only (library/animations use [`Self::search`]).
     pub bone_search: String,
+    /// Bones tab: reveal bones that move no geometry (toe `_03` tips, hair/ribbon
+    /// tips). Off by default — those are hidden to declutter the extra-bone list.
+    pub bones_show_non_deforming: bool,
+    /// Bones tab: hide bones whose influenced meshes are all currently hidden
+    /// (e.g. `waistBelt_front_03` once its material is hidden). On by default.
+    pub bones_hide_hidden_mesh: bool,
     /// Last `expression_presets` list from the live VRM; when it changes, [`Self::expression_sliders`]
     /// is rebuilt (weights preserved for names that still exist).
     pub expr_tracked_presets: Vec<String>,
@@ -368,6 +417,8 @@ impl Default for PoseControllerUiState {
             default_playback_mode: PlaybackMode::Native,
             bone_euler: HashMap::new(),
             bone_search: String::new(),
+            bones_show_non_deforming: false,
+            bones_hide_hidden_mesh: true,
             expr_tracked_presets: Vec::new(),
             expression_sliders: HashMap::new(),
             intent_lab_sync_key: String::new(),
@@ -487,7 +538,7 @@ pub fn draw_pose_controller_window(
     kimodo_client: Option<Res<KimodoClientRes>>,
     tokio_rt: Option<Res<SharedTokio>>,
     snapshot: Option<Res<crate::plugins::pose_driver::BoneSnapshotHandle>>,
-    indexed: Option<Res<IndexedBones>>,
+    bones_data: BonesPanelData,
     intent_cal: Option<Res<SemanticIntentCalibrationHandle>>,
     intent_wizard: Option<Res<IntentCalibrationWizardHandle>>,
     undo: Res<UndoHistory>,
@@ -504,6 +555,12 @@ pub fn draw_pose_controller_window(
     let Some(library) = library else {
         return;
     };
+
+    // Bones-tab resources (bundled in `bones_data` to stay under the system-param
+    // limit) — borrowed once and threaded to the Bones panel alongside `indexed`.
+    let indexed = bones_data.indexed.as_deref();
+    let bone_influence = bones_data.influence.as_deref();
+    let material_vis = bones_data.material_vis.as_deref();
 
     // Note: the always-visible transport buttons (Reset / Stop native / Stop
     // idle / Resume idle) and the rig hover hint (`[edit] hover: …
@@ -609,7 +666,9 @@ pub fn draw_pose_controller_window(
                     kimodo_client.as_deref(),
                     tokio_rt.as_deref(),
                     snapshot.as_deref(),
-                    indexed.as_deref(),
+                    indexed,
+                    bone_influence,
+                    material_vis,
                     &mut rig_params,
                     &mut settings,
                     intent_cal.as_deref(),
@@ -640,7 +699,9 @@ pub fn draw_pose_controller_window(
                     kimodo_client.as_deref(),
                     tokio_rt.as_deref(),
                     snapshot.as_deref(),
-                    indexed.as_deref(),
+                    indexed,
+                    bone_influence,
+                    material_vis,
                     &mut rig_params,
                     &mut settings,
                     intent_cal.as_deref(),
@@ -671,7 +732,9 @@ pub fn draw_pose_controller_window(
                     kimodo_client.as_deref(),
                     tokio_rt.as_deref(),
                     snapshot.as_deref(),
-                    indexed.as_deref(),
+                    indexed,
+                    bone_influence,
+                    material_vis,
                     &mut rig_params,
                     &mut settings,
                     intent_cal.as_deref(),
@@ -709,7 +772,9 @@ pub fn draw_pose_controller_window(
                         kimodo_client.as_deref(),
                         tokio_rt.as_deref(),
                         snapshot.as_deref(),
-                        indexed.as_deref(),
+                        indexed,
+                        bone_influence,
+                        material_vis,
                         &mut rig_params,
                         &mut settings,
                         intent_cal.as_deref(),
@@ -783,6 +848,8 @@ fn render_side_panel(
     tokio_rt: Option<&SharedTokio>,
     snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
     indexed: Option<&IndexedBones>,
+    bone_influence: Option<&BoneInfluence>,
+    material_vis: Option<&MaterialVisibilityStore>,
     rig_params: &mut super::rig_editor::RigTabSystemParam,
     settings: &mut Settings,
     intent_cal: Option<&SemanticIntentCalibrationHandle>,
@@ -833,6 +900,8 @@ fn render_side_panel(
         tokio_rt,
         snapshot,
         indexed,
+        bone_influence,
+        material_vis,
         rig_params,
         settings,
         intent_cal,
@@ -961,6 +1030,8 @@ fn render_tab_body(
     tokio_rt: Option<&SharedTokio>,
     snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
     indexed: Option<&IndexedBones>,
+    bone_influence: Option<&BoneInfluence>,
+    material_vis: Option<&MaterialVisibilityStore>,
     rig_params: &mut super::rig_editor::RigTabSystemParam,
     settings: &mut Settings,
     intent_cal: Option<&SemanticIntentCalibrationHandle>,
@@ -988,6 +1059,8 @@ fn render_tab_body(
             sender,
             snapshot,
             indexed,
+            bone_influence,
+            material_vis,
             settings,
             rig_params,
             undo,
@@ -2270,6 +2343,8 @@ fn bones_with_expressions_tab(
     sender: Option<&PoseCommandSender>,
     snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
     indexed: Option<&IndexedBones>,
+    bone_influence: Option<&BoneInfluence>,
+    material_vis: Option<&MaterialVisibilityStore>,
     settings: &mut Settings,
     rig_params: &mut super::rig_editor::RigTabSystemParam,
     undo: Option<&UndoHistory>,
@@ -2294,7 +2369,10 @@ fn bones_with_expressions_tab(
             egui::vec2(left_w, avail_h),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                bones_panel(ui, state, sender, snapshot, indexed, rig, mirror, undo);
+                bones_panel(
+                    ui, state, sender, snapshot, indexed, bone_influence, material_vis, rig,
+                    mirror, undo,
+                );
             },
         );
         ui.separator();
@@ -2357,6 +2435,8 @@ fn bones_panel(
     sender: Option<&PoseCommandSender>,
     snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
     indexed: Option<&IndexedBones>,
+    bone_influence: Option<&BoneInfluence>,
+    material_vis: Option<&MaterialVisibilityStore>,
     rig: &mut crate::plugins::rig_editor::RigEditorState,
     mirror: &mut crate::plugins::mirror::MirrorState,
     undo: Option<&UndoHistory>,
@@ -2420,6 +2500,22 @@ fn bones_panel(
         });
     });
 
+    // Declutter toggles for the extra-bone list (need the per-model sidecar).
+    if bone_influence.is_some() {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut state.bones_show_non_deforming, "Show non-deforming")
+                .on_hover_text(
+                    "Reveal bones that move no geometry (toe _03 tips, hair/ribbon tips). \
+Hidden by default to declutter the extra-bone list.",
+                );
+            ui.checkbox(&mut state.bones_hide_hidden_mesh, "Hide hidden-mesh")
+                .on_hover_text(
+                    "Hide bones whose every influenced mesh is currently hidden \
+(e.g. waistBelt bones once the belt material is hidden in Graphics).",
+                );
+        });
+    }
+
     ui.separator();
 
     // Consume the one-shot scroll target from the Rig tab (or viewport pick).
@@ -2482,8 +2578,15 @@ fn bones_panel(
             }
 
             if let Some(idx) = indexed {
+                let show_nondef = state.bones_show_non_deforming;
+                let hide_hidden_mesh = state.bones_hide_hidden_mesh;
+                // Declutter only when no bone filter is typed, so search always
+                // reaches every bone regardless of the toggles.
+                let declutter = filter_lc.is_empty();
                 let mut def_groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
-                let mut misc: Vec<String> = Vec::new();
+                let mut extra_groups: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+                let mut hidden_nondef = 0usize;
+                let mut hidden_mesh = 0usize;
                 for n in &idx.names {
                     if is_vrm_humanoid_bone(n.as_str()) {
                         continue;
@@ -2491,16 +2594,39 @@ fn bones_panel(
                     if !bone_name_matches_search(&filter_lc, n.as_str()) {
                         continue;
                     }
+                    if declutter {
+                        if let Some(bi) = bone_influence {
+                            if !show_nondef && bi.is_non_deforming(n.as_str()) {
+                                hidden_nondef += 1;
+                                continue;
+                            }
+                            if hide_hidden_mesh
+                                && bi.all_meshes_hidden(n.as_str(), |m| {
+                                    material_vis.map(|mv| !mv.is_visible(m)).unwrap_or(false)
+                                })
+                            {
+                                hidden_mesh += 1;
+                                continue;
+                            }
+                        }
+                    }
                     if let Some(cat) = def_bone_category_key(n.as_str()) {
                         def_groups.entry(cat).or_default().push(n.clone());
                     } else {
-                        misc.push(n.clone());
+                        extra_groups
+                            .entry(extra_bone_category(n.as_str()))
+                            .or_default()
+                            .push(n.clone());
                     }
                 }
+                let cmp_ci =
+                    |a: &String, b: &String| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase());
                 for bones in def_groups.values_mut() {
-                    bones.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+                    bones.sort_by(cmp_ci);
                 }
-                misc.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+                for bones in extra_groups.values_mut() {
+                    bones.sort_by(cmp_ci);
+                }
 
                 for (cat_key, bones) in &def_groups {
                     if bones.is_empty() {
@@ -2523,20 +2649,40 @@ fn bones_panel(
                         });
                 }
 
-                if !misc.is_empty() {
-                    let force_open = st.is_some_and(|t| misc.iter().any(|b| b.as_str() == t));
-                    egui::CollapsingHeader::new(format!(
-                        "Extra · other (non-DEF pattern) ({})",
-                        misc.len()
-                    ))
-                    .id_salt("bones-extra-misc")
-                    .default_open(false)
-                    .open(if force_open { Some(true) } else { None })
-                    .show(ui, |ui| {
-                        for bone in &misc {
-                            bone_row(ui, state, sender, indexed, rig, mirror, bone.as_str(), st, snapshot, undo);
-                        }
-                    });
+                for (cat, bones) in &extra_groups {
+                    if bones.is_empty() {
+                        continue;
+                    }
+                    let title = format!("{cat} ({})", bones.len());
+                    let force_open = st.is_some_and(|t| bones.iter().any(|b| b.as_str() == t));
+                    egui::CollapsingHeader::new(title)
+                        .id_salt(format!("bones-extra-{cat}"))
+                        .default_open(false)
+                        .open(if force_open { Some(true) } else { None })
+                        .show(ui, |ui| {
+                            for bone in bones {
+                                bone_row(ui, state, sender, indexed, rig, mirror, bone.as_str(), st, snapshot, undo);
+                            }
+                        });
+                }
+
+                if hidden_nondef > 0 || hidden_mesh > 0 {
+                    let mut parts: Vec<String> = Vec::new();
+                    if hidden_nondef > 0 {
+                        parts.push(format!("{hidden_nondef} non-deforming"));
+                    }
+                    if hidden_mesh > 0 {
+                        parts.push(format!("{hidden_mesh} hidden-mesh"));
+                    }
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} bone(s) hidden — toggles above",
+                            parts.join(" + ")
+                        ))
+                        .weak()
+                        .small(),
+                    );
                 }
             }
         });

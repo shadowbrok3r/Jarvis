@@ -20,7 +20,7 @@
 //! before shipping them to Bevy — if it won't parse, we drop the clip and
 //! log instead of panicking.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::sync::Arc;
 use std::thread;
@@ -35,12 +35,14 @@ use jarvis_avatar::a2f::{A2fClient, A2fConfig, A2fResult};
 use jarvis_avatar::arkit::{
     ArkitKeyframe, map_keyframes_to_vrm, merge_a2f_emotion_hint_into_keyframes,
 };
+use jarvis_avatar::act::parser::split_into_tts_sentences;
 use jarvis_avatar::config::Settings;
 
 use super::chat_pipeline_status::{ChatPipelineStage, ChatPipelineStatus};
 use super::pose_driver::{PoseCommand, PoseCommandSender};
 use jarvis_avatar::kokoro_http::{
-    fetch_kokoro_speech, pcm_s16le_mono_to_wav_bytes, wav_bytes_to_pcm16_mono,
+    fetch_kokoro_speech, pcm_s16le_mono_to_wav_bytes, start_kokoro_pcm_stream,
+    wav_bytes_to_pcm16_mono,
 };
 
 use super::channel_server::TtsSpeakMessage;
@@ -53,7 +55,8 @@ pub struct TtsPlugin;
 
 impl Plugin for TtsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_tts_thread)
+        app.init_resource::<TtsPlayQueue>()
+            .add_systems(Startup, spawn_tts_thread)
             .add_systems(Update, (dispatch_tts_requests, play_ready_clips));
     }
 }
@@ -76,6 +79,10 @@ struct TtsRequest {
     /// Run A2F on the same audio and return a mapped expression clip for the main thread.
     a2f_apply: bool,
     a2f_cfg: A2fConfig,
+    /// Stream Kokoro PCM and emit playback sub-clips as audio arrives (lowest latency).
+    stream_playback: bool,
+    /// Target seconds of audio per streamed sub-clip when `stream_playback`.
+    stream_chunk_secs: f32,
 }
 
 struct TtsReady {
@@ -83,6 +90,16 @@ struct TtsReady {
     text_preview: String,
     /// `(keyframes, duration_seconds)` for [`PoseCommand::AnimateExpressions`].
     face_clip: Option<(Vec<(f32, HashMap<String, f32>)>, f32)>,
+}
+
+/// Synthesized clips awaiting **serial** playback. Sentence chunking can put
+/// several ready clips on `rx_ready` near-simultaneously (synthesis runs ahead
+/// of real-time playback); without this queue they'd all spawn at once and
+/// overlap into garbled audio. We buffer them here in arrival order and start
+/// the next only when nothing is currently sounding.
+#[derive(Resource, Default)]
+struct TtsPlayQueue {
+    pending: VecDeque<TtsReady>,
 }
 
 fn subsample_expression_keyframes(
@@ -131,6 +148,64 @@ fn a2f_result_to_face_clip(result: &A2fResult) -> Option<(Vec<(f32, HashMap<Stri
         return None;
     }
     Some((frames, duration))
+}
+
+/// Bytes of `s16le` mono PCM that hold ~`secs` of audio at `sample_rate`
+/// (rounded to an even count so we never split a sample). Minimum one sample.
+fn pcm_bytes_for_secs(secs: f32, sample_rate: u32) -> usize {
+    let samples = (secs.max(0.02) * sample_rate as f32) as usize;
+    (samples * 2).max(2)
+}
+
+/// Wrap one streamed PCM slice as a WAV playback clip, optionally run A2F on the
+/// same PCM for lip-sync, and ship it to the playback queue. PCM is raw `s16le`
+/// mono at `sample_rate` (Kokoro's native stream format = A2F's input format, so
+/// no WAV round-trip is needed for A2F).
+async fn emit_pcm_subclip(
+    pcm: &[u8],
+    sample_rate: u32,
+    a2f_apply: bool,
+    a2f_cfg: &A2fConfig,
+    preview: &str,
+    tx_ready: &Sender<TtsReady>,
+    traffic: &Option<TrafficLogSink>,
+) {
+    let wav = match pcm_s16le_mono_to_wav_bytes(pcm, sample_rate) {
+        Ok(w) => w,
+        Err(e) => {
+            warn!("tts: stream pcm→wav failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = validate_wav(&wav) {
+        warn!("tts: stream sub-clip failed wav validation — {e}");
+        return;
+    }
+    let mut face_clip = None;
+    if a2f_apply && a2f_cfg.enabled {
+        match A2fClient::new(a2f_cfg.clone())
+            .process_audio_pcm16(pcm.to_vec(), sample_rate, None)
+            .await
+        {
+            Ok(result) => {
+                if let Some(log) = traffic {
+                    log.push(
+                        TrafficChannel::A2fGrpc,
+                        TrafficDirection::Outbound,
+                        format!("stream sub-clip → A2F ({} keyframes)", result.keyframes.len()),
+                        None,
+                    );
+                }
+                face_clip = a2f_result_to_face_clip(&result);
+            }
+            Err(e) => warn!("tts: A2F on stream sub-chunk failed: {e}"),
+        }
+    }
+    let _ = tx_ready.send(TtsReady {
+        bytes: Arc::from(wav.into_boxed_slice()),
+        text_preview: preview.to_string(),
+        face_clip,
+    });
 }
 
 fn spawn_tts_thread(mut commands: Commands, traffic: Option<Res<TrafficLogSink>>) {
@@ -188,6 +263,85 @@ fn spawn_tts_thread(mut commands: Commands, traffic: Option<Res<TrafficLogSink>>
                                 "inputPreview": preview,
                             })),
                         );
+                    }
+                    // Streaming path: pull PCM as it synthesizes and emit playback
+                    // sub-clips incrementally, so the first audio starts ~one chunk
+                    // into synthesis instead of after the whole sentence.
+                    if req.stream_playback {
+                        match start_kokoro_pcm_stream(&client, &req.url, &req.voice, &req.text).await
+                        {
+                            Ok(mut resp) => {
+                                let sr = req.pcm_sample_rate;
+                                let first_bytes =
+                                    pcm_bytes_for_secs(req.stream_chunk_secs.min(0.35), sr);
+                                let steady_bytes = pcm_bytes_for_secs(req.stream_chunk_secs, sr);
+                                let mut buf: Vec<u8> = Vec::new();
+                                let mut target = first_bytes;
+                                let mut emitted = 0usize;
+                                loop {
+                                    match resp.chunk().await {
+                                        Ok(Some(b)) => {
+                                            buf.extend_from_slice(&b);
+                                            while buf.len() >= target {
+                                                let take = target & !1;
+                                                if take == 0 {
+                                                    break;
+                                                }
+                                                let pcm: Vec<u8> = buf.drain(..take).collect();
+                                                emit_pcm_subclip(
+                                                    &pcm, sr, req.a2f_apply, &req.a2f_cfg, &preview,
+                                                    &tx_ready, &traffic,
+                                                )
+                                                .await;
+                                                emitted += 1;
+                                                target = steady_bytes;
+                                            }
+                                        }
+                                        Ok(None) => break,
+                                        Err(e) => {
+                                            warn!("tts: kokoro stream read error: {e}");
+                                            break;
+                                        }
+                                    }
+                                }
+                                // Flush the trailing partial chunk (drop a stray odd byte).
+                                let rem = buf.len() & !1;
+                                if rem > 0 {
+                                    let pcm: Vec<u8> = buf.drain(..rem).collect();
+                                    emit_pcm_subclip(
+                                        &pcm, sr, req.a2f_apply, &req.a2f_cfg, &preview, &tx_ready,
+                                        &traffic,
+                                    )
+                                    .await;
+                                    emitted += 1;
+                                }
+                                info!(
+                                    "tts: streamed {emitted} sub-clip(s) for \"{}{}\"",
+                                    preview,
+                                    if req.text.len() > 60 { "…" } else { "" }
+                                );
+                                if let Some(ref log) = traffic {
+                                    log.push(
+                                        TrafficChannel::TtsHttp,
+                                        TrafficDirection::Inbound,
+                                        format!("TTS stream: {emitted} sub-clip(s)"),
+                                        None,
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(ref log) = traffic {
+                                    log.push(
+                                        TrafficChannel::TtsHttp,
+                                        TrafficDirection::Inbound,
+                                        format!("TTS stream error: {e}"),
+                                        None,
+                                    );
+                                }
+                                warn!("tts: kokoro stream start failed: {e}");
+                            }
+                        }
+                        continue;
                     }
                     match fetch_kokoro_speech(
                         &client,
@@ -380,37 +534,67 @@ fn dispatch_tts_requests(
     let a2f_apply = settings.a2f.enabled
         && settings.a2f.apply_from_tts
         && !settings.a2f.endpoint.trim().is_empty();
+    // Streaming needs PCM (the only format that survives chunked transfer); fall
+    // back to the one-shot path for any other response_format.
+    let stream_playback =
+        settings.tts.stream_playback && settings.tts.response_format.eq_ignore_ascii_case("pcm");
     for msg in reader.read() {
-        if msg.text.trim().is_empty() {
+        let text = msg.text.trim();
+        if text.is_empty() {
             continue;
         }
-        let req = TtsRequest {
-            text: msg.text.clone(),
-            voice: settings.tts.voice.clone(),
-            url: settings.tts.kokoro_url.clone(),
-            response_format: settings.tts.response_format.clone(),
-            stream: settings.tts.stream,
-            pcm_sample_rate: settings.tts.pcm_sample_rate,
-            a2f_apply,
-            a2f_cfg: a2f_cfg.clone(),
+        // Split into sentence chunks so the first one reaches Kokoro while the
+        // rest synthesize. The worker processes requests in order and `play_ready_clips`
+        // serializes playback, so chunks speak back-to-back without overlap.
+        let chunks: Vec<String> = if settings.tts.chunk_tts {
+            split_into_tts_sentences(text)
+        } else {
+            vec![text.to_string()]
         };
+        if chunks.is_empty() {
+            continue;
+        }
+        let chunk_n = chunks.len();
         pipeline.set(
             ChatPipelineStage::KokoroSynthesizing,
             format!(
-                "POST Kokoro ({}){}",
+                "POST Kokoro ({}{}){}{}",
                 settings.tts.response_format,
-                if a2f_apply { " + A2F" } else { "" }
+                if stream_playback { " stream" } else { "" },
+                if a2f_apply { " + A2F" } else { "" },
+                if chunk_n > 1 {
+                    format!(" ×{chunk_n} chunks")
+                } else {
+                    String::new()
+                },
             ),
         );
-        if let Err(e) = bridge.tx_request.send(req) {
-            warn!("tts: dispatch failed: {e}");
-            pipeline.set(ChatPipelineStage::Idle, "TTS dispatch failed".to_string());
+        for chunk in chunks {
+            let req = TtsRequest {
+                text: chunk,
+                voice: settings.tts.voice.clone(),
+                url: settings.tts.kokoro_url.clone(),
+                response_format: settings.tts.response_format.clone(),
+                stream: settings.tts.stream,
+                pcm_sample_rate: settings.tts.pcm_sample_rate,
+                a2f_apply,
+                a2f_cfg: a2f_cfg.clone(),
+                stream_playback,
+                stream_chunk_secs: settings.tts.stream_chunk_secs,
+            };
+            if let Err(e) = bridge.tx_request.send(req) {
+                warn!("tts: dispatch failed: {e}");
+                pipeline.set(ChatPipelineStage::Idle, "TTS dispatch failed".to_string());
+                break;
+            }
         }
     }
 }
 
 fn play_ready_clips(
     bridge: Option<Res<TtsBridge>>,
+    mut queue: ResMut<TtsPlayQueue>,
+    active: Query<(), With<TtsClip>>,
     mut sources: ResMut<Assets<bevy::audio::AudioSource>>,
     mut commands: Commands,
     mut pipeline: ResMut<ChatPipelineStatus>,
@@ -419,58 +603,59 @@ fn play_ready_clips(
     let Some(bridge) = bridge else {
         return;
     };
-    let mut n = 0u32;
-    let mut any_face_this_frame = false;
-    let mut last_clip_drove_face = false;
+    // Buffer everything the worker has finished synthesizing. Synthesis runs
+    // ahead of playback, so later chunks are usually queued before the current
+    // one ends (gapless), but we still only *start* one clip at a time.
     while let Ok(ready) = bridge.rx_ready.try_recv() {
-        n += 1;
-        let handle = sources.add(bevy::audio::AudioSource { bytes: ready.bytes });
-        commands.spawn((
-            bevy::audio::AudioPlayer(handle),
-            bevy::audio::PlaybackSettings::DESPAWN,
-            TtsClip {
-                preview: ready.text_preview.clone(),
-            },
-        ));
-        last_clip_drove_face = false;
-        if let Some((keyframes, duration_seconds)) = ready.face_clip {
-            if let Some(tx) = pose_tx.as_ref() {
-                let kf_n = keyframes.len();
-                tx.send(PoseCommand::AnimateExpressions {
-                    keyframes,
-                    duration_seconds,
-                    looping: false,
-                });
-                pipeline.set(
-                    ChatPipelineStage::A2fLipSync,
-                    format!("{kf_n} expr keys · {duration_seconds:.2}s"),
-                );
-                last_clip_drove_face = true;
-                any_face_this_frame = true;
-            } else {
-                warn!(
-                    "tts: A2F face clip ready but PoseCommandSender missing — load PoseDriverPlugin"
-                );
-            }
-        }
+        queue.pending.push_back(ready);
     }
-    if n == 0 {
+    // Serial playback: never start a clip while one is still sounding, or the
+    // sentence chunks of a single reply would overlap into garbled audio.
+    if !active.is_empty() {
         return;
     }
-    if !any_face_this_frame {
+    let Some(ready) = queue.pending.pop_front() else {
+        return;
+    };
+
+    let handle = sources.add(bevy::audio::AudioSource { bytes: ready.bytes });
+    commands.spawn((
+        bevy::audio::AudioPlayer(handle),
+        bevy::audio::PlaybackSettings::DESPAWN,
+        TtsClip {
+            preview: ready.text_preview.clone(),
+        },
+    ));
+
+    let queued = queue.pending.len();
+    let queued_suffix = if queued > 0 {
+        format!(" (+{queued} queued)")
+    } else {
+        String::new()
+    };
+    if let Some((keyframes, duration_seconds)) = ready.face_clip {
+        if let Some(tx) = pose_tx.as_ref() {
+            let kf_n = keyframes.len();
+            tx.send(PoseCommand::AnimateExpressions {
+                keyframes,
+                duration_seconds,
+                looping: false,
+            });
+            pipeline.set(
+                ChatPipelineStage::A2fLipSync,
+                format!("{kf_n} expr keys · {duration_seconds:.2}s{queued_suffix}"),
+            );
+        } else {
+            warn!("tts: A2F face clip ready but PoseCommandSender missing — load PoseDriverPlugin");
+            pipeline.set(
+                ChatPipelineStage::KokoroPlaying,
+                format!("Bevy audio clip (no pose sink){queued_suffix}"),
+            );
+        }
+    } else {
         pipeline.set(
             ChatPipelineStage::KokoroPlaying,
-            if n == 1 {
-                "Bevy audio clip".into()
-            } else {
-                format!("Bevy audio clips ×{n}")
-            },
-        );
-    } else if !last_clip_drove_face {
-        // Rare: A2F clip then extra audio-only clips in the same drain — show playback.
-        pipeline.set(
-            ChatPipelineStage::KokoroPlaying,
-            format!("Bevy audio clips ×{n} (after A2F)"),
+            format!("Bevy audio clip{queued_suffix}"),
         );
     }
 }
