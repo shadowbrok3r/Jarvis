@@ -39,6 +39,7 @@ struct MainShellView: View {
     @AppStorage(HubProfileSync.Kokoro.userDefaultsVoiceKey) private var kokoroVoice: String = ""
     @State private var syncStatus: String = ""
     @State private var syncInFlight = false
+    @AppStorage("jarvis.hub.syncScope") private var syncScope: String = "all"
     @State private var hubSyncProgress: Progress?
     @State private var discoveredVrms: [String] = []
     @State private var manifestModelHint: String = ""
@@ -318,10 +319,20 @@ struct MainShellView: View {
                     SecureField("Bearer token (optional)", text: $hubAuthToken)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                    Picker("Sync scope", selection: $syncScope) {
+                        Text("All").tag("all")
+                        Text("Models").tag("models")
+                        Text("Animations").tag("animations")
+                        Text("Poses").tag("poses")
+                    }
+                    .pickerStyle(.segmented)
+                    Text("All = full profile (unchanged files are reused). A single scope re-downloads only that kind — everything else is reused from the last sync.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                     Button {
                         Task { await runHubSync() }
                     } label: {
-                        Text("Sync profile")
+                        Text(syncScope == "all" ? "Sync profile" : "Sync \(syncScope)")
                     }
                     .disabled(syncInFlight || hubBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     if syncInFlight, let prog = hubSyncProgress {
@@ -455,7 +466,9 @@ struct MainShellView: View {
         progress.completedUnitCount = 0
         hubSyncProgress = progress
         HubProfileSync.persistAuthTokenFromUI(hubAuthToken)
-        let ok = await HubProfileSync.syncFromHubToCache(progress: progress)
+        let categories: Set<HubProfileSync.SyncCategory>? =
+            HubProfileSync.SyncCategory(rawValue: syncScope).map { [$0] }
+        let ok = await HubProfileSync.syncFromHubToCache(progress: progress, categories: categories)
         hubSyncProgress = nil
         syncInFlight = false
         if ok {

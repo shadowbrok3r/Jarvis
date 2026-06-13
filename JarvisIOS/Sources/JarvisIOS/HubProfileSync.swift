@@ -151,61 +151,81 @@ enum HubProfileSync {
     @MainActor
     static func warmUpCachedHubEnvironmentIfPossible() {
         migrateAuthTokenFromUserDefaultsIfNeeded()
-        let hub = UserDefaults.standard.string(forKey: userDefaultsBaseURLKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !hub.isEmpty else { return }
-        if applyPersistedHubCacheEnvIfValid(currentHubBaseURL: hub) {
-            JarvisIOSLog.recordHub("warmUpCachedHubEnvironment: applied persisted hub cache at launch")
-            JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "warmUp")
+        // Accept a cache from ANY configured hub (primary or secondary fallback).
+        for hub in hubProfileSyncBaseURLCandidates() {
+            if applyPersistedHubCacheEnvIfValid(currentHubBaseURL: hub) {
+                JarvisIOSLog.recordHub("warmUpCachedHubEnvironment: applied persisted hub cache at launch (hub=\(hub))")
+                JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "warmUp")
+                return
+            }
         }
     }
 
     /// If hub base URL is empty: bundled assets only. Otherwise: reuse last successful on-disk cache when it
-    /// still matches this hub (avoids a second download after About “Sync”, which could fail and wipe env).
-    /// If there is no cache yet, downloads manifest + assets. On download failure, re-applies last cache if any.
+    /// matches ANY configured hub (primary or secondary), then try downloading from each candidate in order
+    /// (primary first, secondary fallback — e.g. home desktop off → public/tailscale mirror). On total
+    /// failure, re-applies last cache from any candidate, else bundled assets.
     static func prepareForBevyBootstrap() async {
-        let hub = UserDefaults.standard.string(forKey: userDefaultsBaseURLKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        JarvisIOSLog.recordHub("prepareForBevyBootstrap hubEmpty=\(hub.isEmpty ? "yes" : "no") hub=\(hub)")
-        if hub.isEmpty {
+        let candidates = hubProfileSyncBaseURLCandidates()
+        JarvisIOSLog.recordHub("prepareForBevyBootstrap candidates=\(candidates.count) \(candidates.joined(separator: " | "))")
+        if candidates.isEmpty {
             prepareBundledOnlySync()
             return
         }
-        if applyPersistedHubCacheEnvIfValid(currentHubBaseURL: hub) {
-            JarvisIOSLog.recordHub("prepareForBevyBootstrap: reused persisted hub cache (no download)")
+        // Cache hit from ANY candidate is fine — the cache stores whichever hub
+        // last succeeded, which may be the secondary.
+        for hub in candidates where applyPersistedHubCacheEnvIfValid(currentHubBaseURL: hub) {
+            JarvisIOSLog.recordHub("prepareForBevyBootstrap: reused persisted hub cache (hub=\(hub), no download)")
             JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "prepareForBevyBootstrap cache-hit")
             return
         }
         JarvisIOSLog.recordHub("prepareForBevyBootstrap: downloading profile (no valid cache)")
-        do {
-            try await downloadHubProfileIntoCacheAndApplyEnv(baseURLString: hub, progress: nil)
-            JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "prepareForBevyBootstrap download OK")
-        } catch {
-            JarvisIOSLog.recordHubError("prepareForBevyBootstrap download failed: \(String(describing: error))")
-            if applyPersistedHubCacheEnvIfValid(currentHubBaseURL: hub) {
-                JarvisIOSLog.recordHubWarning("prepareForBevyBootstrap: reapplied older persisted cache after failure")
-                JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "prepareForBevyBootstrap reapply-cache")
+        var lastError: Error?
+        for hub in candidates {
+            do {
+                try await downloadHubProfileIntoCacheAndApplyEnv(baseURLString: hub, progress: nil)
+                JarvisIOSLog.recordHub("prepareForBevyBootstrap: download OK hub=\(hub)")
+                JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "prepareForBevyBootstrap download OK")
                 return
+            } catch {
+                lastError = error
+                JarvisIOSLog.recordHubError("prepareForBevyBootstrap download failed hub=\(hub): \(String(describing: error))")
             }
-            JarvisIOSLog.recordHubError("prepareForBevyBootstrap: falling back to bundle")
-            prepareBundledOnlySync()
         }
+        if let lastError {
+            JarvisIOSLog.recordHubError("prepareForBevyBootstrap all candidates failed: \(String(describing: lastError))")
+        }
+        for hub in candidates where applyPersistedHubCacheEnvIfValid(currentHubBaseURL: hub) {
+            JarvisIOSLog.recordHubWarning("prepareForBevyBootstrap: reapplied older persisted cache (hub=\(hub)) after failure")
+            JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "prepareForBevyBootstrap reapply-cache")
+            return
+        }
+        JarvisIOSLog.recordHubError("prepareForBevyBootstrap: falling back to bundle")
+        prepareBundledOnlySync()
     }
 
     /// Explicit sync (e.g. About tab). Returns whether manifest and all listed assets were cached and env updated.
     /// When `progress` is set, it is updated on the main actor (manifest fetch + each asset; suitable for `ProgressView`).
+    /// `categories` limits which asset kinds are re-downloaded (models / animations / poses);
+    /// everything else is reused from the previous sync — so grabbing one new pose no longer
+    /// re-pulls 100+ MB of VRMs. `nil` = full sync (unchanged files are still reused via size+mtime).
     @discardableResult
-    static func syncFromHubToCache(progress: Progress? = nil) async -> Bool {
+    static func syncFromHubToCache(progress: Progress? = nil, categories: Set<SyncCategory>? = nil) async -> Bool {
         let candidates = hubProfileSyncBaseURLCandidates()
         guard !candidates.isEmpty else { return false }
+        let catLabel = categories.map { set in set.map(\.rawValue).sorted().joined(separator: "+") } ?? "all"
         JarvisIOSLog.recordHub(
-            "syncFromHubToCache start candidates=\(candidates.count) hasToken=\(!resolvedHubBearerToken().isEmpty)"
+            "syncFromHubToCache start candidates=\(candidates.count) categories=\(catLabel) hasToken=\(!resolvedHubBearerToken().isEmpty)"
         )
         var lastError: Error?
         for hub in candidates {
             JarvisIOSLog.recordHub("syncFromHubToCache try hub=\(hub)")
             do {
-                try await downloadHubProfileIntoCacheAndApplyEnv(baseURLString: hub, progress: progress)
+                try await downloadHubProfileIntoCacheAndApplyEnv(
+                    baseURLString: hub,
+                    progress: progress,
+                    categories: categories
+                )
                 JarvisIOSLog.recordHub("syncFromHubToCache success hub=\(hub)")
                 JarvisIOSLog.logJarvisEnv(JarvisIOSLog.hub, tag: "syncFromHubToCache")
                 return true
@@ -346,7 +366,55 @@ enum HubProfileSync {
         struct AssetRef: Decodable {
             let path: String
             let url: String
+            /// Optional role from the desktop manifest (`vrm`, `vrma`, `idle_vrma`,
+            /// `anim_json`, `pose_json`, `emotions`, …) — drives category filtering.
+            let role: String?
+            /// Optional change-detection metadata from the desktop manifest.
+            /// When both match the previous manifest's entry for the same path,
+            /// the cached file is reused instead of re-downloaded.
+            let size: UInt64?
+            let mtime_ms: UInt64?
         }
+    }
+
+    /// User-facing sync categories (About tab picker). `nil` filter = everything.
+    enum SyncCategory: String, CaseIterable {
+        case models
+        case animations
+        case poses
+
+        static func category(forRole role: String?, path: String) -> SyncCategory? {
+            switch role ?? "" {
+            case "vrm": return .models
+            case "vrma", "idle_vrma", "anim_json": return .animations
+            case "pose_json": return .poses
+            default: break
+            }
+            // Fallback for older desktops that don't send `role`.
+            if path.hasPrefix("models/") || path.lowercased().hasSuffix(".vrm") { return .models }
+            if path.hasPrefix("animations/") || path.lowercased().hasSuffix(".vrma") { return .animations }
+            if path.hasPrefix("poses/") { return .poses }
+            return nil // config / emotions / unknown → always synced
+        }
+    }
+
+    /// path → (size, mtime_ms) from the previous successful sync's manifest, so
+    /// unchanged assets can be reused from the previous rev folder.
+    private static func previousManifestAssetIndex() -> (index: [String: (UInt64, UInt64)], assetRoot: String)? {
+        guard let manifestPathRaw = UserDefaults.standard.string(forKey: userDefaultsCachedManifestPathKey),
+              let assetRoot = UserDefaults.standard.string(forKey: userDefaultsCachedAssetRootKey),
+              let manifestPath = resolvedManifestFilePath(storedPath: manifestPathRaw),
+              FileManager.default.fileExists(atPath: assetRoot),
+              let data = FileManager.default.contents(atPath: manifestPath),
+              let header = try? JSONDecoder().decode(ManifestHeader.self, from: data)
+        else { return nil }
+        var index: [String: (UInt64, UInt64)] = [:]
+        for a in header.assets {
+            if let s = a.size, let m = a.mtime_ms, s > 0 || m > 0 {
+                index[a.path] = (s, m)
+            }
+        }
+        return (index, assetRoot)
     }
 
     /// Bearer for hub HTTP (`Authorization`) and WebSocket `module:authenticate` (Keychain first, then UserDefaults).
@@ -486,7 +554,11 @@ enum HubProfileSync {
         UserDefaults.standard.set(assetsDir.path, forKey: userDefaultsCachedAssetRootKey)
     }
 
-    private static func downloadHubProfileIntoCacheAndApplyEnv(baseURLString: String, progress: Progress?) async throws {
+    private static func downloadHubProfileIntoCacheAndApplyEnv(
+        baseURLString: String,
+        progress: Progress?,
+        categories: Set<SyncCategory>? = nil
+    ) async throws {
         guard let baseURL = URL(string: baseURLString),
               let scheme = baseURL.scheme?.lowercased(),
               scheme == "http" || scheme == "https"
@@ -533,41 +605,87 @@ enum HubProfileSync {
         let assetsDir = sessionDir.appendingPathComponent("assets", isDirectory: true)
         try fm.createDirectory(at: assetsDir, withIntermediateDirectories: true)
 
+        // Previous successful sync → reuse unchanged / out-of-category files
+        // instead of re-downloading (hardlink when possible, else copy).
+        let previous = previousManifestAssetIndex()
+        var reused = 0
+        var downloaded = 0
+
         for (index, asset) in header.assets.enumerated() {
             guard isSafeAssetsRelPath(asset.path) else {
                 throw NSError(domain: "HubProfileSync", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unsafe asset path"])
             }
             let destURL = fileURL(directory: assetsDir, relativePOSIXPath: asset.path)
             try fm.createDirectory(at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-
-            guard let downloadURL = resolveAssetURL(assetURLString: asset.url, baseURL: baseURL) else {
-                throw URLError(.badURL)
-            }
             let assetLabel = (asset.path as NSString).lastPathComponent
 
-            var req = URLRequest(url: downloadURL)
-            req.httpMethod = "GET"
-            if !token.isEmpty {
-                req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            // Decide reuse: (a) category filter excludes it → reuse if the file
+            // exists in the previous rev at all (the new rev must stay complete);
+            // (b) no filter / included → reuse only when size+mtime match the
+            // previous manifest's entry. Reuse failure falls through to download.
+            var didReuse = false
+            if !fm.fileExists(atPath: destURL.path), let previous {
+                let prevFile = fileURL(
+                    directory: URL(fileURLWithPath: previous.assetRoot, isDirectory: true),
+                    relativePOSIXPath: asset.path
+                )
+                let prevExists = fm.fileExists(atPath: prevFile.path)
+                let category = SyncCategory.category(forRole: asset.role, path: asset.path)
+                let excludedByFilter = categories != nil && category != nil && !(categories!.contains(category!))
+                let unchanged: Bool = {
+                    guard let s = asset.size, let m = asset.mtime_ms, s > 0 || m > 0,
+                          let prev = previous.index[asset.path]
+                    else { return false }
+                    return prev.0 == s && prev.1 == m
+                }()
+                if prevExists && (excludedByFilter || unchanged) {
+                    do {
+                        do {
+                            try fm.linkItem(at: prevFile, to: destURL)
+                        } catch {
+                            try fm.copyItem(at: prevFile, to: destURL)
+                        }
+                        didReuse = true
+                        reused += 1
+                    } catch {
+                        JarvisIOSLog.recordHubWarning(
+                            "sync: reuse failed for \(asset.path), downloading instead: \(String(describing: error))"
+                        )
+                    }
+                }
             }
 
-            // Large binary assets (VRM/VRMA/GLB) are streamed directly to disk so the full file
-            // is never held in RAM as a Data object.  Everything else (JSON, TOML, …) uses the
-            // in-memory path which is simpler and fine for small payloads.
-            let pathExt = (asset.path as NSString).pathExtension.lowercased()
-            let isLargeBinary = pathExt == "vrm" || pathExt == "vrma" || pathExt == "glb"
-            if isLargeBinary {
-                try await JarvisHubDownloadNetworking.downloadFileStreamingWithRetries(for: req, dest: destURL)
-            } else {
-                let (fileData, resp) = try await JarvisHubDownloadNetworking.dataWithRetries(for: req)
-                guard let http = resp as? HTTPURLResponse, (200 ... 299).contains(http.statusCode) else {
-                    throw URLError(.badServerResponse)
+            if !didReuse {
+                guard let downloadURL = resolveAssetURL(assetURLString: asset.url, baseURL: baseURL) else {
+                    throw URLError(.badURL)
                 }
-                try fileData.write(to: destURL, options: .atomic)
+                var req = URLRequest(url: downloadURL)
+                req.httpMethod = "GET"
+                if !token.isEmpty {
+                    req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                }
+
+                // Large binary assets (VRM/VRMA/GLB) are streamed directly to disk so the full file
+                // is never held in RAM as a Data object.  Everything else (JSON, TOML, …) uses the
+                // in-memory path which is simpler and fine for small payloads.
+                let pathExt = (asset.path as NSString).pathExtension.lowercased()
+                let isLargeBinary = pathExt == "vrm" || pathExt == "vrma" || pathExt == "glb"
+                if isLargeBinary {
+                    try await JarvisHubDownloadNetworking.downloadFileStreamingWithRetries(for: req, dest: destURL)
+                } else {
+                    let (fileData, resp) = try await JarvisHubDownloadNetworking.dataWithRetries(for: req)
+                    guard let http = resp as? HTTPURLResponse, (200 ... 299).contains(http.statusCode) else {
+                        throw URLError(.badServerResponse)
+                    }
+                    try fileData.write(to: destURL, options: .atomic)
+                }
+                downloaded += 1
             }
 
             let done = index + 1
-            let cap = done == n ? "Finishing…" : "Downloaded \(assetLabel) (\(done)/\(n))"
+            let cap = done == n
+                ? "Finishing…"
+                : (didReuse ? "Reused \(assetLabel) (\(done)/\(n))" : "Downloaded \(assetLabel) (\(done)/\(n))")
             await updateHubDownloadProgress(
                 progress,
                 completed: Int64(2 + index),
@@ -575,6 +693,7 @@ enum HubProfileSync {
                 localizedDescription: cap
             )
         }
+        JarvisIOSLog.recordHub("sync: assets done downloaded=\(downloaded) reused=\(reused) total=\(n)")
 
         let manifestFile = sessionDir.appendingPathComponent("manifest.json")
         try manifestData.write(to: manifestFile, options: .atomic)

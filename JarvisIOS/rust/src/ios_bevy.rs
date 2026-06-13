@@ -521,14 +521,24 @@ fn spawn_jarvis_ios_vrm_root(commands: &mut Commands, asset_server: &AssetServer
         )).id();
     }
 
-    if !settings.idle_vrma_path.trim().is_empty() {
-        let vrma_disk = Path::new(&asset_root).join(settings.idle_vrma_path.trim());
+    let idle_path = settings.idle_vrma_path.trim().to_string();
+    let idle_is_json = idle_path.ends_with(".json");
+    if !idle_path.is_empty() {
+        let idle_disk = Path::new(&asset_root).join(&idle_path);
         crate::jarvis_ios_line!(
-            "[JarvisIOS] spawn_jarvis_ios_vrm_root idle_vrma_path={} exists_on_disk={}",
-            settings.idle_vrma_path,
-            vrma_disk.is_file()
+            "[JarvisIOS] spawn_jarvis_ios_vrm_root idle_path={} json={} exists_on_disk={}",
+            idle_path,
+            idle_is_json,
+            idle_disk.is_file()
         );
     }
+    // JSON-clip idle: handled by `ios_json_idle_restart` (looping JSON playback
+    // with loop crossfade + root motion) — no VRMA child. Reset/seed the state
+    // either way so a profile reload switches modes cleanly.
+    commands.insert_resource(crate::ios_anim_json::IosJsonIdleState {
+        rel_path: (idle_is_json && !idle_path.is_empty()).then(|| idle_path.clone()),
+        pending: idle_is_json && !idle_path.is_empty(),
+    });
 
     let pos = settings.world_position;
     let scale = settings.uniform_scale.max(0.001);
@@ -547,11 +557,10 @@ fn spawn_jarvis_ios_vrm_root(commands: &mut Commands, asset_server: &AssetServer
         resolved_model_path,
     );
 
-    if !settings.idle_vrma_path.trim().is_empty() {
-        let path = settings.idle_vrma_path.clone();
+    if !idle_path.is_empty() && !idle_is_json {
         vrm.with_children(|parent| {
             parent
-                .spawn(VrmaHandle(asset_server.load(path)))
+                .spawn(VrmaHandle(asset_server.load(idle_path)))
                 .observe(play_idle_when_vrma_loaded);
         });
     }
@@ -684,9 +693,16 @@ fn ios_refresh_animation_catalog(
     catalog.json_paths = json;
 }
 
+/// Apply a single JSON pose-clip request from the USER (Swift FFI / egui).
+/// Cancels any running playlist — a direct play wins over the sequence.
+pub(crate) fn ios_apply_json_anim_request(world: &mut World, path: String, loop_forever: bool) {
+    crate::ios_anim_json::ios_cancel_json_playlist(world);
+    ios_apply_json_anim_request_no_playlist_cancel(world, path, loop_forever);
+}
+
 /// Apply a single JSON pose-clip request. Mirrors `IosEmbeddedRenderer::flush_queued_json_anim_requests`
 /// but as a free function so the egui drain system can reuse it without borrowing the renderer.
-pub(crate) fn ios_apply_json_anim_request(world: &mut World, path: String, loop_forever: bool) {
+pub(crate) fn ios_apply_json_anim_request_no_playlist_cancel(world: &mut World, path: String, loop_forever: bool) {
     let old_stopped = world
         .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
         .supersede_stopped_idle_snapshot();
@@ -732,6 +748,29 @@ pub(crate) fn ios_apply_vrma_requests(world: &mut World, requests: Vec<(String, 
         crate::jarvis_ios_line!("[JarvisIOS] queue_vrma: no avatar root (reload profile first)");
         return;
     };
+    // Direct VRMA play cancels a running playlist.
+    crate::ios_anim_json::ios_cancel_json_playlist(world);
+    // A JSON clip (including the JSON-clip idle) writes bones AFTER VRMA
+    // sampling each frame and would stomp the requested VRMA — stop it and
+    // park the JSON idle (re-enable idle to bring it back after the VRMA).
+    if world
+        .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
+        .is_active()
+    {
+        let touched = world
+            .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
+            .supersede_touched_snapshot();
+        world
+            .resource_mut::<crate::ios_anim_json::IosJsonAnimPlayback>()
+            .stop();
+        crate::ios_anim_json::reset_bones_to_rest_on_world(world, &touched);
+        world
+            .resource_mut::<crate::ios_anim_json::IosJsonIdleState>()
+            .pending = false;
+        crate::jarvis_ios_line!(
+            "[JarvisIOS] queue_vrma: stopped active JSON clip so the VRMA owns the rig"
+        );
+    }
     // Despawn any prior user-played VRMA children before queueing the new
     // batch — without this, two animations get spawned as siblings under
     // the avatar root, both run their PlayVrma observers, and bevy_vrm1's
@@ -800,6 +839,44 @@ fn ios_drain_egui_anim_requests(world: &mut World) {
     }
 }
 
+/// Self-crossfade looping for VRMA clips. `RepeatAnimation::Forever` makes
+/// Bevy's `AnimationPlayer` HARD-WRAP last frame → first frame with no blend —
+/// the harsh restart jump. Instead: play a single pass (`Never`) with this
+/// marker, and re-trigger `PlayVrma` `VRMA_LOOP_FADE_SECS` before the end with
+/// a matching `transition_duration` so `AnimationTransitions` crossfades the
+/// outgoing tail into the restarting head (desktop loop_fade parity).
+pub(crate) const VRMA_LOOP_FADE_SECS: f32 = 0.25;
+
+#[derive(Component, Default)]
+pub(crate) struct IosVrmaSelfLoop {
+    elapsed: f32,
+}
+
+fn ios_vrma_self_loop_tick(
+    time: Res<Time>,
+    mut q: Query<(Entity, &mut IosVrmaSelfLoop, &VrmaDuration)>,
+    mut commands: Commands,
+) {
+    for (e, mut st, dur) in q.iter_mut() {
+        let total = dur.0.as_secs_f32();
+        if total <= 0.05 {
+            continue;
+        }
+        st.elapsed += time.delta_secs();
+        // Very short clips keep at least half their length before re-triggering.
+        let retrigger_at = (total - VRMA_LOOP_FADE_SECS).max(total * 0.5);
+        if st.elapsed >= retrigger_at {
+            st.elapsed = 0.0;
+            commands.entity(e).trigger(|ent| PlayVrma {
+                repeat: RepeatAnimation::Never,
+                transition_duration: Duration::from_secs_f32(VRMA_LOOP_FADE_SECS),
+                vrma: ent,
+                reset_spring_bones: false,
+            });
+        }
+    }
+}
+
 fn play_idle_when_vrma_loaded(
     trigger: On<LoadedVrma>,
     mut commands: Commands,
@@ -809,8 +886,11 @@ fn play_idle_when_vrma_loaded(
         crate::jarvis_ios_line!("[JarvisIOS] idle VRMA loaded — playback disabled by user");
         return;
     }
+    commands
+        .entity(trigger.vrma)
+        .insert(IosVrmaSelfLoop::default());
     commands.trigger(PlayVrma {
-        repeat: RepeatAnimation::Forever,
+        repeat: RepeatAnimation::Never,
         transition_duration: Duration::ZERO,
         vrma: trigger.vrma,
         reset_spring_bones: false,
@@ -832,6 +912,45 @@ pub fn ios_set_idle_animation_enabled(world: &mut World, enabled: bool) {
         return;
     };
     let settings = world.resource::<IosAvatarSettings>().clone();
+
+    // JSON-clip idle: drive the IosJsonIdleState machine instead of VRMA.
+    let idle_path = settings.idle_vrma_path.trim().to_string();
+    if idle_path.ends_with(".json") {
+        if enabled {
+            world
+                .resource_mut::<crate::ios_anim_json::IosJsonIdleState>()
+                .pending = true;
+            crate::jarvis_ios_line!("[JarvisIOS] json idle: enabled (restart pending)");
+        } else {
+            world
+                .resource_mut::<crate::ios_anim_json::IosJsonIdleState>()
+                .pending = false;
+            // Stop the idle clip if it is the one playing (leave user clips alone).
+            let is_idle_active = world
+                .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
+                .active_rel_path()
+                .is_some_and(|p| p == idle_path);
+            if is_idle_active {
+                let touched = world
+                    .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
+                    .supersede_touched_snapshot();
+                let vrm = world
+                    .resource::<crate::ios_anim_json::IosJsonAnimPlayback>()
+                    .active_vrm_entity();
+                world
+                    .resource_mut::<crate::ios_anim_json::IosJsonAnimPlayback>()
+                    .stop();
+                crate::ios_anim_json::reset_bones_to_rest_on_world(world, &touched);
+                if let Some(vrm) = vrm {
+                    world.trigger(ClearExpressions { entity: vrm });
+                }
+                bevy_vrm1::prelude::reset_spring_velocities_recursive_world(world, root);
+                world.flush();
+            }
+            crate::jarvis_ios_line!("[JarvisIOS] json idle: disabled");
+        }
+        return;
+    }
 
     if enabled {
         let paused = world
@@ -871,8 +990,11 @@ pub fn ios_set_idle_animation_enabled(world: &mut World, enabled: bool) {
 }
 
 fn observe_vrma_play_forever(trigger: On<LoadedVrma>, mut commands: Commands) {
+    commands
+        .entity(trigger.vrma)
+        .insert(IosVrmaSelfLoop::default());
     commands.trigger(PlayVrma {
-        repeat: RepeatAnimation::Forever,
+        repeat: RepeatAnimation::Never,
         transition_duration: Duration::from_millis(300),
         vrma: trigger.vrma,
         reset_spring_bones: true,
@@ -1361,6 +1483,7 @@ impl IosEmbeddedRenderer {
                 handle_deferred_vrm_load,
                 jarvis_ios_vrm_load_diag,
                 ios_refresh_animation_catalog,
+                ios_vrma_self_loop_tick,
             ),
         );
         app.add_systems(

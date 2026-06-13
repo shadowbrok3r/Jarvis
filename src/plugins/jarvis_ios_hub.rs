@@ -99,6 +99,45 @@ pub struct JarvisIosAssetRef {
     pub path: String,
     /// HTTP path on the hub (GET with `Authorization` when token is set).
     pub url: String,
+    /// File size in bytes (0 = unknown). Together with `mtime_ms` this lets the
+    /// iOS client reuse unchanged files from its previous sync instead of
+    /// re-downloading everything (manifest-to-manifest comparison).
+    pub size: u64,
+    /// File modified time in milliseconds since the Unix epoch (0 = unknown).
+    pub mtime_ms: u64,
+}
+
+impl JarvisIosAssetRef {
+    fn new(role: &str, rel: impl Into<String>) -> Self {
+        let rel = rel.into();
+        Self {
+            url: format!("/jarvis-ios/v1/asset/{rel}"),
+            role: role.into(),
+            path: rel,
+            size: 0,
+            mtime_ms: 0,
+        }
+    }
+}
+
+/// (size, mtime_ms) for a manifest asset path relative to the assets root.
+fn stat_manifest_asset(root: &Path, rel: &str) -> (u64, u64) {
+    let candidate = root.join(rel);
+    let meta = std::fs::metadata(&candidate)
+        .ok()
+        .or_else(|| resolve_asset_file(rel).and_then(|p| std::fs::metadata(p).ok()));
+    match meta {
+        Some(m) => {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            (m.len(), mtime)
+        }
+        None => (0, 0),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,42 +157,26 @@ fn build_manifest_value(settings: &Settings, revision: u64) -> Value {
     let vrm_key = vrm_preset_key(&logical);
     let profile_id = format!("vrm:{vrm_key}");
 
-    let mut assets: Vec<JarvisIosAssetRef> = vec![JarvisIosAssetRef {
-        role: "vrm".into(),
-        path: settings.avatar.model_path.clone(),
-        url: format!("/jarvis-ios/v1/asset/{}", settings.avatar.model_path),
-    }];
+    let mut assets: Vec<JarvisIosAssetRef> =
+        vec![JarvisIosAssetRef::new("vrm", settings.avatar.model_path.clone())];
 
     if !settings.avatar.idle_vrma_path.trim().is_empty() {
-        assets.push(JarvisIosAssetRef {
-            role: "idle_vrma".into(),
-            path: settings.avatar.idle_vrma_path.clone(),
-            url: format!("/jarvis-ios/v1/asset/{}", settings.avatar.idle_vrma_path),
-        });
+        assets.push(JarvisIosAssetRef::new(
+            "idle_vrma",
+            settings.avatar.idle_vrma_path.clone(),
+        ));
     }
 
     let root = assets_root();
     const MAX_SYNC_JSON: usize = 500;
     for rel in collect_json_assets_under(&root.join("animations"), &root, MAX_SYNC_JSON) {
-        assets.push(JarvisIosAssetRef {
-            role: "anim_json".into(),
-            path: rel.clone(),
-            url: format!("/jarvis-ios/v1/asset/{rel}"),
-        });
+        assets.push(JarvisIosAssetRef::new("anim_json", rel));
     }
     for rel in collect_json_assets_under(&root.join("poses"), &root, MAX_SYNC_JSON) {
-        assets.push(JarvisIosAssetRef {
-            role: "pose_json".into(),
-            path: rel.clone(),
-            url: format!("/jarvis-ios/v1/asset/{rel}"),
-        });
+        assets.push(JarvisIosAssetRef::new("pose_json", rel));
     }
     if resolve_asset_file("config/emotions.json").is_some() {
-        assets.push(JarvisIosAssetRef {
-            role: "emotions".into(),
-            path: "config/emotions.json".into(),
-            url: "/jarvis-ios/v1/asset/config/emotions.json".into(),
-        });
+        assets.push(JarvisIosAssetRef::new("emotions", "config/emotions.json"));
     }
 
     // Any other `.vrm` / `.vrma` under `./assets/` so iOS can hot-swap models without changing
@@ -212,12 +235,16 @@ fn build_manifest_value(settings: &Settings, revision: u64) -> Value {
             } else {
                 "vrm"
             };
-            assets.push(JarvisIosAssetRef {
-                role: role.into(),
-                path: rel.clone(),
-                url: format!("/jarvis-ios/v1/asset/{rel}"),
-            });
+            assets.push(JarvisIosAssetRef::new(role, rel));
         }
+    }
+
+    // Fill size + mtime for every asset (after the .ios.vrm swap so the stat
+    // matches the path actually served). 0/0 when the file is missing.
+    for a in &mut assets {
+        let (size, mtime_ms) = stat_manifest_asset(&root, &a.path);
+        a.size = size;
+        a.mtime_ms = mtime_ms;
     }
 
     let preset_path = default_preset_path_for_logical_path(None, &settings.avatar.model_path);
