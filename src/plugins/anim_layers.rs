@@ -652,18 +652,7 @@ pub enum DriverKind {
         rate_hz: f32,
         amount_deg: f32,
     },
-    /// Coordinated lower-body weight transfer — a *contrapposto* standing idle.
-    /// One slow wandering "weight" signal drives the whole lower body coherently:
-    /// the hips lean toward the loaded leg (pelvic obliquity), the pelvis rotates
-    /// slightly into the stance, the free-side **knee softens and bends**, the
-    /// thighs rotate into/out of the stance, and a faster **ankle postural
-    /// micro-sway** rides on both feet (the constant balance correction a real
-    /// person makes). Self-contained for the lower body: drives hips/spine/chest
-    /// + both `UpperLeg`/`LowerLeg`/`Foot`. Leg bones are authored in normalized
-    /// humanoid space and converted through the rest snapshot (so knee = +pitch
-    /// etc. hold regardless of bind orientation), like the finger fidget. Emits
-    /// rest-relative deltas — use [`BlendMode::RestRelative`]. Supersedes the
-    /// roll-only [`Self::WeightShift`]; don't stack both on the hips at once.
+
     LegShift {
         rate_hz: f32,
         /// Lateral hip lean toward the weighted leg (degrees).

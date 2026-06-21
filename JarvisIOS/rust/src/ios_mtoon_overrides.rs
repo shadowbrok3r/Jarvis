@@ -82,10 +82,10 @@ pub fn ios_apply_mtoon_overrides_on_vrm_ready(
         let Some(entry) = file.entries.get(&key) else {
             continue;
         };
-        let Some(material) = materials.get_mut(&handle.0) else {
+        let Some(mut material) = materials.get_mut(&handle.0) else {
             continue;
         };
-        apply_ios_mtoon_entry(material, entry);
+        apply_ios_mtoon_entry(&mut material, entry);
         touched += 1;
     }
     crate::jarvis_ios_line!("[JarvisIOS] mtoon overrides: applied to {touched} material(s)");

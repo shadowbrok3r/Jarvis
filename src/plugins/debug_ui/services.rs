@@ -1,6 +1,5 @@
 //! Services overview panel for the Service Hub workspace.
 
-use bevy::prelude::*;
 use bevy_egui::egui;
 
 use jarvis_avatar::config::Settings;
@@ -92,6 +91,6 @@ fn status_dot(ui: &mut egui::Ui, state: ServiceState) {
     painter.circle_stroke(
         center,
         5.0,
-        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(140)),
     );
 }

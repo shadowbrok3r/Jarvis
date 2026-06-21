@@ -131,7 +131,10 @@ fn main() {
                 plugins::material_visibility::MaterialVisibilityPlugin,
                 plugins::bone_influence::BoneInfluencePlugin,
             ),
-            plugins::idle_tick::IdleTickPlugin,
+            (
+                plugins::idle_tick::IdleTickPlugin,
+                plugins::alive_director::AliveDirectorPlugin,
+            ),
             plugins::anim_layers::AnimLayersPlugin,
             plugins::anim_layer_sets::AnimLayerSetsPlugin,
             plugins::avatar_defaults::AvatarDefaultsPlugin,

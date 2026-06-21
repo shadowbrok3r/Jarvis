@@ -9,6 +9,7 @@ pub mod look_at;
 pub mod orbit_camera;
 mod vrm_eye_debug;
 pub use vrm_eye_debug::VrmEyeLookatDebug;
+pub mod alive_director;
 pub mod anim_layer_sets;
 pub mod anim_layers;
 pub mod channel_server;

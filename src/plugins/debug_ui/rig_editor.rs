@@ -1313,7 +1313,7 @@ pub(crate) fn rig_editor_viewport_hover(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    if ctx.wants_pointer_input() {
+    if ctx.egui_wants_pointer_input() {
         if rig.hovered_source == HoverSource::Viewport {
             rig.hovered_bone = None;
             rig.hovered_source = HoverSource::None;
@@ -1491,7 +1491,7 @@ pub(crate) fn rig_editor_viewport_pick(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    if ctx.wants_pointer_input() {
+    if ctx.egui_wants_pointer_input() {
         return;
     }
     let Ok(window) = windows.single() else {
@@ -1630,7 +1630,7 @@ pub(crate) fn rig_editor_axis_drag(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    if ctx.wants_pointer_input() {
+    if ctx.egui_wants_pointer_input() {
         return;
     }
     let Some(sender) = sender.as_deref() else {

@@ -40,6 +40,12 @@ fn run_idle_tick(
     mut active_anim: ResMut<ActiveNativeAnimation>,
     mut state: ResMut<IdleTickState>,
 ) {
+    // The AliveDirectorPlugin supersedes the flat-random idle loop when enabled.
+    if settings.pose_controller.director_enabled {
+        state.next_pick_in = None;
+        state.elapsed = Duration::ZERO;
+        return;
+    }
     if !settings.pose_controller.idle_enabled {
         state.next_pick_in = None;
         state.elapsed = Duration::ZERO;

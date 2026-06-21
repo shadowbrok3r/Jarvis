@@ -117,6 +117,9 @@ impl CaptureView {
 pub enum CaptureFramingPreset {
     FullBody,
     FaceCloseup,
+    Feet,
+    /// Tight framing around hip/hand height — for verifying finger curl / grips.
+    Hands,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +248,18 @@ impl CaptureCameraProfile {
                 focus_y_offset: 1.58,
                 radius: 0.72,
                 height_lift: 0.03,
+            },
+            // Low + close on the feet so toe curl / foot articulation is legible.
+            CaptureFramingPreset::Feet => Self {
+                focus_y_offset: 0.14,
+                radius: 0.55,
+                height_lift: 0.10,
+            },
+            // Close on hip/hand height for finger curl / grip QA.
+            CaptureFramingPreset::Hands => Self {
+                focus_y_offset: 0.88,
+                radius: 0.6,
+                height_lift: 0.0,
             },
         }
     }

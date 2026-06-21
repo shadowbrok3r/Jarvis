@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use bevy::gizmos::light::{LightGizmoConfigGroup, ShowLightGizmo};
+use bevy::light::gizmos::{LightGizmoConfigGroup, ShowLightGizmo};
 use bevy::gizmos::prelude::GizmoConfigStore;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::Vrm;
@@ -102,7 +102,7 @@ fn spawn_one(commands: &mut Commands, role: LightRigRole, spec: &LightSpec) {
         DirectionalLight {
             color: Color::linear_rgb(spec.color[0], spec.color[1], spec.color[2]),
             illuminance: spec.illuminance,
-            shadows_enabled: spec.shadows,
+            shadow_maps_enabled: spec.shadows,
             ..default()
         },
         transform,
@@ -162,7 +162,7 @@ fn sync_light_rig(
         *vis = vis_for(effective);
         light.color = Color::linear_rgb(spec.color[0], spec.color[1], spec.color[2]);
         light.illuminance = spec.illuminance;
-        light.shadows_enabled = spec.shadows;
+        light.shadow_maps_enabled = spec.shadows;
         let direction = Vec3::from_array(spec.direction).normalize_or_zero();
         *tf = light_transform(direction, focus, gizmo_dist);
     }
@@ -187,7 +187,7 @@ fn sync_light_gizmo_visibility(
                 LightRigRole::Back => Color::linear_rgb(0.75, 0.85, 1.0),
             };
             commands.entity(entity).insert(ShowLightGizmo {
-                color: Some(bevy::gizmos::light::LightGizmoColor::Manual(color)),
+                color: Some(bevy::light::gizmos::LightGizmoColor::Manual(color)),
                 ..default()
             });
         } else {

@@ -327,10 +327,10 @@ fn apply_overrides_on_material_change(
         let Some(entry) = file.entries.get(&key) else {
             continue;
         };
-        let Some(material) = materials.get_mut(&handle.0) else {
+        let Some(mut material) = materials.get_mut(&handle.0) else {
             continue;
         };
-        apply_override_entry(material, entry);
+        apply_override_entry(&mut material, entry);
         touched += 1;
     }
     if touched > 0 {

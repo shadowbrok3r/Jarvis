@@ -19,14 +19,14 @@ swift-bridge = "0.1"
 # cross-compiling Linux → `aarch64-apple-ios` without a full SDK toolchain.
 # Direct dependency so `#[derive(Component)]` / `#[derive(Resource)]` proc-macros resolve `bevy_ecs`
 # when using `bevy` with `default-features = false` (BevyManifest / rustc extern prelude).
-bevy_ecs = { version = "0.18", default-features = false, features = ["std", "bevy_reflect", "async_executor"] }
+bevy_ecs = { version = "0.19", default-features = false, features = ["std", "bevy_reflect", "async_executor"] }
 libc = "0.2"
 # Do **not** use `default_platform`: it pulls `bevy_gilrs`, `sysinfo_plugin`, `webgl2`, `x11`, `wayland`,
 # etc. Embedded JarvisIOS only needs `WinitPlugin` as a **type** to `.disable::<WinitPlugin>()` — not
 # gilrs threads (seen in crash reports next to the main-thread DisplayLink abort).
 # Omit `multi_threaded`: it enables `PipelinedRenderingPlugin`, which drives the render world on
 # background threads — unsafe with Metal + a UIKit `UIView` surface (main-thread DisplayLink).
-bevy = { version = "0.18", default-features = false, features = [
+bevy = { version = "0.19", default-features = false, features = [
   "default_app",
   "std",
   "default_font",
@@ -42,9 +42,9 @@ raw-window-handle = "0.6"
 blake3 = { version = "1.8", default-features = false, features = ["std", "pure"] }
 bevy_vrm1 = "0.7"
 # `bevy_egui` enables PanOrbit’s `check_egui_wants_focus` so touches over egui don’t steal the orbit camera.
-bevy_egui = { version = "0.39.1", features = ["serde"] }
-egui-phosphor = { version = "0.11.0", default-features = false, features = ["regular"] }
-bevy_panorbit_camera = { version = "0.34", default-features = false, features = ["bevy_egui"] }
+bevy_egui = { version = "0.40", features = ["serde"] }
+egui-phosphor = { version = "0.12.0", default-features = false, features = ["regular"] }
+bevy_panorbit_camera = { path = "../../vendor/bevy_panorbit_camera", default-features = false, features = ["bevy_egui"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

@@ -649,10 +649,10 @@ pub fn draw_pose_controller_window(
     // so it claims the bottom strip across the full window width, then the
     // left/right side panels render above it.
     if let Some(tabs) = side_tabs.get("bottom").cloned() {
-        let resp = egui::TopBottomPanel::bottom("pose_controller_bottom_panel")
+        let resp = egui::Panel::bottom("pose_controller_bottom_panel")
             .resizable(true)
-            .default_height(dock_height)
-            .min_height(180.0)
+            .default_size(dock_height)
+            .min_size(180.0)
             .show(ctx, |ui| {
                 render_side_panel(
                     ui,
@@ -681,11 +681,11 @@ pub fn draw_pose_controller_window(
         pending_panel_height = Some(resp.response.rect.height());
     }
     if let Some(tabs) = side_tabs.get("left").cloned() {
-        let resp = egui::SidePanel::left("pose_controller_left_panel")
+        let resp = egui::Panel::left("pose_controller_left_panel")
             .resizable(true)
-            .default_width(dock_width)
-            .min_width(320.0)
-            .max_width(1100.0)
+            .default_size(dock_width)
+            .min_size(320.0)
+            .max_size(1100.0)
             .show(ctx, |ui| {
                 render_side_panel(
                     ui,
@@ -714,11 +714,11 @@ pub fn draw_pose_controller_window(
         pending_panel_width = Some(resp.response.rect.width());
     }
     if let Some(tabs) = side_tabs.get("right").cloned() {
-        let resp = egui::SidePanel::right("pose_controller_right_panel")
+        let resp = egui::Panel::right("pose_controller_right_panel")
             .resizable(true)
-            .default_width(dock_width)
-            .min_width(320.0)
-            .max_width(1100.0)
+            .default_size(dock_width)
+            .min_size(320.0)
+            .max_size(1100.0)
             .show(ctx, |ui| {
                 render_side_panel(
                     ui,
@@ -910,7 +910,7 @@ fn render_side_panel(
         layer_ctx,
     );
 
-    egui::TopBottomPanel::bottom(format!("pose_controller_{side}_status_strip")).show_inside(
+    egui::Panel::bottom(format!("pose_controller_{side}_status_strip")).show_inside(
         ui,
         |ui| {
             ui.horizontal(|ui| {

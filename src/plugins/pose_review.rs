@@ -172,7 +172,7 @@ fn draw_pose_review_window(mut contexts: EguiContexts, handle: Res<PoseReviewHan
             };
             egui::Frame::group(ui.style())
                 .fill(ui.visuals().faint_bg_color)
-                .stroke(egui::Stroke::new(1.0, theme::accent(ui)))
+                .stroke(egui::Stroke::new(1.0_f32, theme::accent(ui)))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(

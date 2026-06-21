@@ -1026,9 +1026,9 @@ pub fn apply_mtoon_material_live_preview(
     let Some(handle) = found else {
         return;
     };
-    let Some(m) = materials.get_mut(&handle) else {
+    let Some(mut m) = materials.get_mut(&handle) else {
         return;
     };
     *m = baseline.clone();
-    apply_override_entry(m, &draft.to_entry());
+    apply_override_entry(&mut m, &draft.to_entry());
 }

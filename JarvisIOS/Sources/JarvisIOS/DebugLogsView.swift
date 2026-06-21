@@ -181,15 +181,14 @@ struct DebugLogsView: View {
     }
 
     private func pushLogsToHub() {
-        let hubURL = UserDefaults.standard.string(forKey: HubProfileSync.userDefaultsBaseURLKey) ?? ""
-        guard !hubURL.isEmpty else {
+        guard !HubProfileSync.orderedHubHttpBases().isEmpty else {
             uploadStatus = "No hub URL configured"
             return
         }
         uploading = true
         uploadStatus = nil
         Task {
-            let ok = await JarvisIOSCrashLog.uploadCurrentSnapshot(hubBaseURL: hubURL)
+            let ok = await JarvisIOSCrashLog.uploadCurrentSnapshotWithFallback()
             uploading = false
             uploadStatus = ok ? "Pushed to hub → .dev/ios_live_snapshot.txt" : "Push failed — check logs"
             try? await Task.sleep(nanoseconds: 4_000_000_000)

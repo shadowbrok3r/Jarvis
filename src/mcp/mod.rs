@@ -693,6 +693,39 @@ pub struct CaptureAnimationMontageArgs {
     pub output_dir: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RecordViewportArgs {
+    /// Seconds of LIVE viewport to record. **0 = default 6.** Clamped 0.5..30.
+    #[serde(default)]
+    pub duration_sec: f32,
+    /// Frames sampled per second. **0 = default 6.** Clamped 1..20. Total frames
+    /// = duration_sec × fps, capped at 48 (the montage/GIF frame budget).
+    #[serde(default)]
+    pub fps: u32,
+    /// Camera view (`front`, `left`, `right`, `back`, diagonals). Default `front`.
+    #[serde(default)]
+    pub view: Option<String>,
+    /// Tiles per row in the montage grid. **0 = default 4.**
+    #[serde(default)]
+    pub columns: u32,
+    /// Per-tile render size before compositing. **0 = default 384.** Min 96, max 1024.
+    #[serde(default)]
+    pub tile_size: u32,
+    /// `full_body` (default) or `face_closeup`.
+    #[serde(default)]
+    pub framing_preset: Option<String>,
+    /// Also write an animated GIF of the recording to disk (for the human; the
+    /// agent reliably sees only the static montage grid). Default true.
+    #[serde(default = "default_true")]
+    pub also_gif: bool,
+    /// Filename stem for the montage PNG + GIF. Default `viewport`.
+    #[serde(default)]
+    pub label: String,
+    /// Directory for the recording outputs. Default `pose_captures`.
+    #[serde(default = "default_capture_output_dir")]
+    pub output_dir: String,
+}
+
 fn parse_capture_view_slug(raw: &str) -> Result<CaptureView, String> {
     let s = raw.trim();
     if s.is_empty() {
@@ -2284,6 +2317,8 @@ impl JarvisMcpServer {
             None | Some("") => None,
             Some("full_body") => Some(CaptureFramingPreset::FullBody),
             Some("face_closeup") => Some(CaptureFramingPreset::FaceCloseup),
+            Some("feet") => Some(CaptureFramingPreset::Feet),
+            Some("hands") => Some(CaptureFramingPreset::Hands),
             Some(x) => {
                 return err_text(format!(
                     "invalid framing_preset {x:?} — use full_body or face_closeup"
@@ -2411,6 +2446,8 @@ impl JarvisMcpServer {
         let framing = match args.framing_preset.as_deref().map(str::trim) {
             None | Some("") | Some("full_body") => Some(CaptureFramingPreset::FullBody),
             Some("face_closeup") => Some(CaptureFramingPreset::FaceCloseup),
+            Some("feet") => Some(CaptureFramingPreset::Feet),
+            Some("hands") => Some(CaptureFramingPreset::Hands),
             Some(x) => return err_text(format!("invalid framing_preset {x:?}")),
         };
         let k = ((if args.frame_count == 0 { 12 } else { args.frame_count }).clamp(2, 36) as usize)
@@ -2546,6 +2583,150 @@ impl JarvisMcpServer {
             "gifPath": gif_path.as_ref().map(|p| p.display().to_string()),
             "gifError": gif_err,
             "note": "Montage grid reads left-to-right, top-to-bottom (start → end). GIF is for the human.",
+        });
+        let mut blocks = vec![Content::text(
+            serde_json::to_string_pretty(&summary).unwrap_or_default(),
+        )];
+        {
+            use base64::engine::general_purpose::STANDARD as B64;
+            use base64::Engine as _;
+            blocks.push(Content::image(B64.encode(&montage_bytes), "image/png"));
+        }
+        CallToolResult::success(blocks)
+    }
+
+    #[tool(description = "RECORD THE LIVE VIEWPORT OVER TIME. Samples the running avatar's viewport at `fps` for `duration_sec` seconds from one camera view WITHOUT suppressing the layer stack / alive director — so it captures AUTONOMOUS live behavior (idle director picks, procedural fidgets, transitions, expression presets, gestures) actually in motion. Composites the frames into a MONTAGE GRID PNG returned inline (earliest→latest, left-to-right) so the agent can review the motion arc, and writes an animated GIF to disk for the human. Use this to self-verify live behavior instead of guessing from a single static capture.")]
+    async fn record_viewport(
+        &self,
+        Parameters(args): Parameters<RecordViewportArgs>,
+    ) -> CallToolResult {
+        let view_slug = args
+            .view
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("front");
+        let view = match parse_capture_view_slug(view_slug) {
+            Ok(v) => v,
+            Err(e) => return err_text(e),
+        };
+        let framing = match args.framing_preset.as_deref().map(str::trim) {
+            None | Some("") | Some("full_body") => Some(CaptureFramingPreset::FullBody),
+            Some("face_closeup") => Some(CaptureFramingPreset::FaceCloseup),
+            Some("feet") => Some(CaptureFramingPreset::Feet),
+            Some("hands") => Some(CaptureFramingPreset::Hands),
+            Some(x) => return err_text(format!("invalid framing_preset {x:?}")),
+        };
+        let duration_sec = (if args.duration_sec == 0.0 { 6.0 } else { args.duration_sec })
+            .clamp(0.5, 30.0);
+        let fps = (if args.fps == 0 { 6 } else { args.fps }).clamp(1, 20);
+        let frame_count = ((duration_sec * fps as f32).round() as u32).clamp(2, 48);
+        let interval = Duration::from_secs_f32(1.0 / fps as f32);
+        let columns = (if args.columns == 0 { 4 } else { args.columns }).clamp(1, 8);
+        let tile = (if args.tile_size == 0 { 384 } else { args.tile_size }).clamp(96, 1024);
+        let also_gif = args.also_gif;
+        let output_dir = expand_home(Path::new(args.output_dir.trim()));
+        let stem = {
+            let l = args.label.trim();
+            if l.is_empty() {
+                "viewport".to_string()
+            } else {
+                l.replace([' ', '/', '\\'], "_")
+            }
+        };
+
+        // Sample the LIVE scene over wall-clock time. We deliberately do NOT
+        // suppress the layer stack / director, so the recording shows real
+        // autonomous behavior in motion.
+        let mut paths: Vec<PathBuf> = Vec::with_capacity(frame_count as usize);
+        let mut step_err: Option<String> = None;
+        for n in 0..frame_count {
+            tokio::time::sleep(interval).await;
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let req = CaptureRequest {
+                output_dir: output_dir.clone(),
+                capture_id: format!("{stem}_rec_f{n:03}"),
+                width: tile,
+                height: tile,
+                views: vec![view.clone()],
+                framing_preset: framing,
+                camera_overrides: None,
+                response_tx: tx,
+            };
+            if self.capture_tx.0.send(req).is_err() {
+                step_err = Some("capture channel closed".into());
+                break;
+            }
+            let res =
+                tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(20))).await;
+            match res {
+                Ok(Ok(result)) => {
+                    if let Some(img) = result.images.first() {
+                        paths.push(PathBuf::from(&img.path));
+                    } else {
+                        step_err = Some(format!("frame {n}: capture returned no image"));
+                        break;
+                    }
+                }
+                Ok(Err(_)) => {
+                    step_err = Some(format!("frame {n}: capture timed out"));
+                    break;
+                }
+                Err(e) => {
+                    step_err = Some(format!("frame {n}: join {e}"));
+                    break;
+                }
+            }
+        }
+
+        if paths.is_empty() {
+            return err_text(format!(
+                "no frames captured{}",
+                step_err.map(|e| format!(": {e}")).unwrap_or_default()
+            ));
+        }
+
+        let paths_for_blocking = paths.clone();
+        let out_dir = output_dir.clone();
+        let stem_b = stem.clone();
+        let gif_fps = fps;
+        let build = tokio::task::spawn_blocking(
+            move || -> Result<(Vec<u8>, PathBuf, Option<PathBuf>, Option<String>), String> {
+                let montage = build_montage_png(&paths_for_blocking, columns, tile)?;
+                let montage_path = out_dir.join(format!("{stem_b}_recording.png"));
+                std::fs::write(&montage_path, &montage)
+                    .map_err(|e| format!("write montage: {e}"))?;
+                let (gif_path, gif_err) = if also_gif {
+                    let gp = out_dir.join(format!("{stem_b}_recording.gif"));
+                    match write_animation_gif(&paths_for_blocking, &gp, gif_fps) {
+                        Ok(()) => (Some(gp), None),
+                        Err(e) => (None, Some(e)),
+                    }
+                } else {
+                    (None, None)
+                };
+                Ok((montage, montage_path, gif_path, gif_err))
+            },
+        )
+        .await;
+
+        let (montage_bytes, montage_path, gif_path, gif_err) = match build {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return err_text(e),
+            Err(e) => return err_text(format!("composite task join: {e}")),
+        };
+
+        let summary = json!({
+            "durationSec": duration_sec,
+            "fps": fps,
+            "frames": paths.len(),
+            "view": view_slug,
+            "columns": columns,
+            "montagePath": montage_path.display().to_string(),
+            "gifPath": gif_path.as_ref().map(|p| p.display().to_string()),
+            "gifError": gif_err,
+            "partial": step_err,
+            "note": "LIVE recording (layer stack / director NOT suppressed). Montage grid reads left-to-right, top-to-bottom = earliest → latest. GIF is for the human.",
         });
         let mut blocks = vec![Content::text(
             serde_json::to_string_pretty(&summary).unwrap_or_default(),

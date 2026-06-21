@@ -119,7 +119,7 @@ fn spacebar_global_pause_toggle(
     if !keys.just_pressed(KeyCode::Space) {
         return;
     }
-    if matches!(contexts.ctx_mut(), Ok(ctx) if ctx.wants_keyboard_input()) {
+    if matches!(contexts.ctx_mut(), Ok(ctx) if ctx.egui_wants_keyboard_input()) {
         return;
     }
 
@@ -291,7 +291,7 @@ fn draw_menu_bar(
         match serde_json::from_str::<egui::Style>(jarvis_avatar::egui_theme::STYLE) {
             Ok(theme) => {
                 let style = std::sync::Arc::new(theme);
-                ctx.set_style(style);
+                ctx.set_global_style(style);
             }
             Err(e) => error!("Error setting theme: {e:?}"),
         };
@@ -300,7 +300,7 @@ fn draw_menu_bar(
     let vrma_entities: Vec<Entity> = vrma_q.iter().collect();
     let pose_controller_open = settings.ui.show_pose_controller;
 
-    egui::TopBottomPanel::top("jarvis_menu_bar").show(ctx, |ui| {
+    egui::Panel::top("jarvis_menu_bar").show(ctx, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             file_menu(ui, &mut settings, &mut state, &mut exit);
             view_menu(ui, &mut settings, &mut state);

@@ -19,7 +19,8 @@ use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
-use bevy::render::view::{Hdr, Msaa};
+use bevy::camera::Hdr;
+use bevy::render::view::Msaa;
 use bevy::render::RenderPlugin;
 use bevy::window::{
     CursorOptions, ExitCondition, PrimaryWindow, RawHandleWrapper, RawHandleWrapperHolder,
@@ -133,8 +134,11 @@ pub(crate) struct IosEguiAnimRequests {
 
 /// Passed into the app before `DefaultPlugins`; consumed by [`IosEmbedRawHandlesPlugin`].
 ///
-/// Manual [`Resource`] impl avoids `#[derive(Resource)]` needing a direct `bevy_ecs` crate path
-/// when Bevy is built with `default-features = false` for the iOS staticlib.
+/// Bevy 0.19 unified resources and components ("resources as components"), so the
+/// `Resource` trait now requires `Component` — a bare `impl Resource` no longer
+/// compiles. `#[derive(Resource)]` implements both, and resolves the `bevy_ecs`
+/// path via this crate's direct `bevy_ecs` dependency (added for exactly this).
+#[derive(Resource)]
 struct PendingIosSurface {
     view: NonNull<c_void>,
     width_px: u32,
@@ -145,8 +149,6 @@ struct PendingIosSurface {
 // UIKit view pointer: only touched from the main thread via Swift `CADisplayLink` + FFI.
 unsafe impl Send for PendingIosSurface {}
 unsafe impl Sync for PendingIosSurface {}
-
-impl Resource for PendingIosSurface {}
 
 /// UIKit view pointer as a `HasWindowHandle` source for `RawHandleWrapper`.
 #[derive(Clone)]
@@ -286,7 +288,7 @@ fn spawn_ios_light_one(commands: &mut Commands, role: IosLightRigRole, spec: &Io
         DirectionalLight {
             color: Color::linear_rgb(spec.color[0], spec.color[1], spec.color[2]),
             illuminance: spec.illuminance,
-            shadows_enabled: spec.shadows,
+            shadow_maps_enabled: spec.shadows,
             ..default()
         },
         transform,
@@ -308,7 +310,7 @@ fn spawn_ios_lights(commands: &mut Commands, graphics: &IosGraphicsSettings, loo
             JarvisIosSun,
             DirectionalLight {
                 illuminance: graphics.directional_illuminance,
-                shadows_enabled: graphics.directional_shadows,
+                shadow_maps_enabled: graphics.directional_shadows,
                 ..default()
             },
             Transform::from_translation(graphics.directional_position).looking_at(look_at, Vec3::Y),
@@ -335,7 +337,7 @@ fn sync_ios_light_rig(world: &mut World, rig: &IosLightRigSettings) {
         *vis = ios_light_vis(effective);
         light.color = Color::linear_rgb(spec.color[0], spec.color[1], spec.color[2]);
         light.illuminance = spec.illuminance;
-        light.shadows_enabled = spec.shadows;
+        light.shadow_maps_enabled = spec.shadows;
         let direction = Vec3::from_array(spec.direction).normalize_or_zero();
         if direction.length_squared() > 0.0 {
             *tf = Transform::IDENTITY.looking_to(direction, Vec3::Y);
@@ -1029,7 +1031,7 @@ fn apply_scene_graphics_from_settings(world: &mut World, g: &IosGraphicsSettings
             world.query_filtered::<(&mut DirectionalLight, &mut Transform), With<JarvisIosSun>>();
         for (mut dl, mut tf) in sun_q.iter_mut(world) {
             dl.illuminance = g.directional_illuminance;
-            dl.shadows_enabled = g.directional_shadows;
+            dl.shadow_maps_enabled = g.directional_shadows;
             *tf = Transform::from_translation(g.directional_position).looking_at(look_at, Vec3::Y);
         }
     }
@@ -1062,7 +1064,7 @@ fn apply_scene_graphics_from_settings(world: &mut World, g: &IosGraphicsSettings
     {
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
         for h in &ground_mesh_handles {
-            if let Some(m) = meshes.get_mut(h) {
+            if let Some(mut m) = meshes.get_mut(h) {
                 *m = Mesh::from(Plane3d::new(Vec3::Y, Vec2::splat(half)));
             }
         }
@@ -1084,7 +1086,7 @@ fn apply_scene_graphics_from_settings(world: &mut World, g: &IosGraphicsSettings
         .collect();
     let mut mats = world.resource_mut::<Assets<StandardMaterial>>();
     for h in handles {
-        if let Some(m) = mats.get_mut(&h) {
+        if let Some(mut m) = mats.get_mut(&h) {
             m.base_color = ground_color;
         }
     }

@@ -134,7 +134,7 @@ pub fn apply_sun_light(
     let g = &settings.graphics;
     for (mut dl, mut tf) in &mut sun_q {
         dl.illuminance = g.directional_illuminance;
-        dl.shadows_enabled = g.directional_shadows;
+        dl.shadow_maps_enabled = g.directional_shadows;
         let pos = Vec3::from_array(g.directional_position);
         let look = Vec3::from_array(g.directional_look_at);
         *tf = Transform::from_translation(pos).looking_at(look, Vec3::Y);
@@ -153,10 +153,10 @@ pub fn apply_ground_material(
     let g = &settings.graphics;
     let [r, gc, b] = g.ground_base_color;
     for (plane, mut vis) in &mut ground_q {
-        if let Some(mat) = materials.get_mut(&plane.material) {
+        if let Some(mut mat) = materials.get_mut(&plane.material) {
             mat.base_color = Color::linear_rgb(r, gc, b);
         }
-        if let Some(mesh) = meshes.get_mut(&plane.mesh) {
+        if let Some(mut mesh) = meshes.get_mut(&plane.mesh) {
             let half = g.ground_size * 0.5;
             *mesh = Plane3d::new(Vec3::Y, Vec2::new(half, half)).into();
         }

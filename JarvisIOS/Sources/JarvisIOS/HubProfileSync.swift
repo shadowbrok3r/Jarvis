@@ -426,6 +426,22 @@ enum HubProfileSync {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
+    /// Ordered hub HTTP base URLs: primary first, then optional secondary
+    /// fallback (e.g. home desktop off → public/tailscale mirror). Used for
+    /// one-shot hub HTTP POSTs like crash/live log upload so a downed primary
+    /// still reaches the fallback. Trimmed, non-empty, de-duplicated.
+    static func orderedHubHttpBases() -> [String] {
+        let primary = UserDefaults.standard.string(forKey: userDefaultsBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let secondary = UserDefaults.standard.string(forKey: userDefaultsSecondaryBaseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var out: [String] = []
+        for raw in [primary, secondary] where !raw.isEmpty {
+            if !out.contains(raw) { out.append(raw) }
+        }
+        return out
+    }
+
     /// `ws://host:6121/ws` from the hub base URL field (same host as profile sync).
     static func hubWebSocketURL() -> URL? {
         hubWebSocketURLCandidates().first

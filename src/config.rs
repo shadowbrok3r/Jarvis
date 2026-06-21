@@ -1234,6 +1234,17 @@ pub struct PoseControllerSettings {
     /// sampling bone transforms every frame and overwrites our writes.
     #[serde(default = "default_auto_stop_idle_vrma")]
     pub auto_stop_idle_vrma: bool,
+    /// When true, the `AliveDirectorPlugin` owns autonomous idle behavior
+    /// (presence-aware, non-repetitive, always-on alive base) and the legacy
+    /// flat-random `idle_tick` stands down. Reuses `idle_interval_*` for dwell.
+    #[serde(default = "default_director_enabled")]
+    pub director_enabled: bool,
+    /// Substrings the director matches (case-insensitive) against the VRM's
+    /// expression preset names to drive during "expressive" beats.
+    /// The director discovers the actual
+    /// preset names from the loaded VRM at runtime and applies matches.
+    #[serde(default = "default_expressive_preset_match")]
+    pub director_expressive_preset_match: Vec<String>,
 }
 
 impl Default for PoseControllerSettings {
@@ -1247,8 +1258,23 @@ impl Default for PoseControllerSettings {
             default_blend_weight: default_blend_weight(),
             blend_transitions_enabled: false,
             auto_stop_idle_vrma: default_auto_stop_idle_vrma(),
+            director_enabled: default_director_enabled(),
+            director_expressive_preset_match: default_expressive_preset_match(),
         }
     }
+}
+
+fn default_director_enabled() -> bool {
+    true
+}
+
+fn default_expressive_preset_match() -> Vec<String> {
+    vec![
+        "toe".to_string(),
+        "curl".to_string(),
+        "foot".to_string(),
+        "feet".to_string(),
+    ]
 }
 
 fn default_idle_interval_min() -> f32 {

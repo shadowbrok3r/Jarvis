@@ -129,7 +129,7 @@ fn undo_redo_keyboard_handler(
     mut debug: ResMut<DebugUiState>,
 ) {
     // Don't fire while typing into a text field.
-    if matches!(contexts.ctx_mut(), Ok(ctx) if ctx.wants_keyboard_input()) {
+    if matches!(contexts.ctx_mut(), Ok(ctx) if ctx.egui_wants_keyboard_input()) {
         return;
     }
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);

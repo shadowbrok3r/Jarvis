@@ -190,8 +190,8 @@ pub fn draw_anim_layers_window(
             );
             master_filter_row(ui, &mut state.anim_layers, stack);
             ui.separator();
-            egui::TopBottomPanel::bottom("anim_layers_add_bar")
-                .exact_height(ADD_BAR_HEIGHT)
+            egui::Panel::bottom("anim_layers_add_bar")
+                .exact_size(ADD_BAR_HEIGHT)
                 .show_inside(ui, |ui| {
                     let presets = expression_presets(params.snapshot.as_deref());
                     add_layer_bar(
@@ -207,8 +207,8 @@ pub fn draw_anim_layers_window(
             });
             let has_status_strip = state.anim_layers.status.is_some() || store_err.is_some();
             if has_status_strip {
-                egui::TopBottomPanel::bottom("anim_layers_status_strip")
-                    .exact_height(STATUS_STRIP_HEIGHT)
+                egui::Panel::bottom("anim_layers_status_strip")
+                    .exact_size(STATUS_STRIP_HEIGHT)
                     .show_inside(ui, |ui| {
                         ui.horizontal(|ui| {
                             if let Some(msg) = &state.anim_layers.status {
@@ -238,10 +238,10 @@ pub fn draw_anim_layers_window(
 
     match dock_side.as_str() {
         "bottom" => {
-            let resp = egui::TopBottomPanel::bottom("anim_layers_bottom_panel")
+            let resp = egui::Panel::bottom("anim_layers_bottom_panel")
                 .resizable(true)
-                .default_height(bottom_h)
-                .min_height(160.0)
+                .default_size(bottom_h)
+                .min_size(160.0)
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -252,10 +252,10 @@ pub fn draw_anim_layers_window(
             new_height = Some(resp.response.rect.height());
         }
         "left" => {
-            egui::SidePanel::left("anim_layers_left_panel")
+            egui::Panel::left("anim_layers_left_panel")
                 .resizable(true)
-                .default_width(540.0)
-                .min_width(360.0)
+                .default_size(540.0)
+                .min_size(360.0)
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -265,10 +265,10 @@ pub fn draw_anim_layers_window(
                 });
         }
         "right" => {
-            egui::SidePanel::right("anim_layers_right_panel")
+            egui::Panel::right("anim_layers_right_panel")
                 .resizable(true)
-                .default_width(540.0)
-                .min_width(360.0)
+                .default_size(540.0)
+                .min_size(360.0)
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -1329,7 +1329,7 @@ fn timeline(ui: &mut egui::Ui, layer: &Layer) {
             egui::pos2(head_x, rect.top()),
             egui::pos2(head_x, rect.bottom()),
         ],
-        egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 255, 240)),
+        egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(120, 255, 240)),
     );
     // Time text.
     let label = if layer.duration.is_some() {

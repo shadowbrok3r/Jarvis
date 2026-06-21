@@ -13,10 +13,10 @@ struct ContentView: View {
 
                 // Auto-upload the previous (potentially crashed) session log to the
                 // desktop hub if one exists and the hub URL is configured.
-                let hubURL = UserDefaults.standard.string(forKey: HubProfileSync.userDefaultsBaseURLKey) ?? ""
-                if !hubURL.isEmpty, JarvisIOSCrashLog.previousSessionLogURL != nil {
+                if !HubProfileSync.orderedHubHttpBases().isEmpty,
+                   JarvisIOSCrashLog.previousSessionLogURL != nil {
                     Task {
-                        if let result = await JarvisIOSCrashLog.uploadPreviousSessionLog(hubBaseURL: hubURL) {
+                        if let result = await JarvisIOSCrashLog.uploadPreviousSessionLogWithFallback() {
                             JarvisIOSLog.recordHub("Prev crash log uploaded: \(result)")
                         }
                     }

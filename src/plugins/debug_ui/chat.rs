@@ -10,7 +10,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use bevy::prelude::*;
-use bevy_egui::egui::{Button, Layout, TopBottomPanel, Vec2, Widget};
+use bevy_egui::egui::{Button, Layout, Panel, Vec2, Widget};
 use bevy_egui::{EguiContexts, egui};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
@@ -75,7 +75,7 @@ pub fn draw_chat_window(
                 // updated `state.chat.pending` list in the same frame.
                 ingest_dropped_files(ui.ctx(), &mut state);
 
-                TopBottomPanel::top("chat_top_panel").show_inside(ui, |ui| {
+                Panel::top("chat_top_panel").show_inside(ui, |ui| {
                     ui.with_layout(Layout::left_to_right(egui::Align::Min), |ui| {
                         if ui
                             .button(if state.chat.sidebar_collapsed {
@@ -97,10 +97,10 @@ pub fn draw_chat_window(
                 });
 
                 if !state.chat.sidebar_collapsed {
-                    egui::SidePanel::left("chat_thread_sidebar")
+                    egui::Panel::left("chat_thread_sidebar")
                         .resizable(true)
-                        .default_width(210.0)
-                        .min_width(44.0)
+                        .default_size(210.0)
+                        .min_size(44.0)
                         .show_inside(ui, |ui| {
                             thread_sidebar_with_backend(
                                 ui,
@@ -112,9 +112,9 @@ pub fn draw_chat_window(
                         });
                 }
 
-                egui::TopBottomPanel::bottom("chat_compose_bar")
+                egui::Panel::bottom("chat_compose_bar")
                     .resizable(false)
-                    .min_height(96.0)
+                    .min_size(96.0)
                     .show_inside(ui, |ui| {
                         compose_bar(
                             ui,

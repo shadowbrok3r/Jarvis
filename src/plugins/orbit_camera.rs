@@ -22,7 +22,7 @@
 use bevy::camera::{Exposure, PerspectiveProjection, Projection};
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
+use bevy::camera::Hdr;
 use bevy::window::{PrimaryWindow, Window};
 use bevy_egui::{EguiContexts, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
@@ -105,7 +105,7 @@ fn rig_editor_suppress_orbit_for_twist(
     mut orbit_q: Query<&mut PanOrbitCamera, With<Camera3d>>,
 ) {
     let egui_blocks = match contexts.ctx_mut() {
-        Ok(ctx) => ctx.wants_pointer_input(),
+        Ok(ctx) => ctx.egui_wants_pointer_input(),
         Err(_) => false,
     };
 
@@ -274,7 +274,7 @@ fn visible_viewport_offset(
     // replacement for the deprecated `screen_rect()`), and
     // `available_rect()` is what's left after side / bottom panels.
     let screen_rect: egui::Rect = ctx.viewport_rect();
-    let available_rect: egui::Rect = ctx.available_rect();
+    let available_rect: egui::Rect = ctx.content_rect();
 
     let screen_center = screen_rect.center();
     let visible_center = available_rect.center();
@@ -533,7 +533,7 @@ fn set_orbit_pivot_from_click(
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
-    if matches!(contexts.ctx_mut(), Ok(ctx) if ctx.wants_pointer_input()) {
+    if matches!(contexts.ctx_mut(), Ok(ctx) if ctx.egui_wants_pointer_input()) {
         return;
     }
     if rig.dragging_axis.is_some() || rig.hovered_axis.is_some() {

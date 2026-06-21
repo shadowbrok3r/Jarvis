@@ -132,6 +132,26 @@ enum JarvisIOSCrashLog {
             return false
         }
     }
+
+    /// Upload the live snapshot trying each configured hub base in order
+    /// (primary, then secondary fallback) until one succeeds.
+    @discardableResult
+    static func uploadCurrentSnapshotWithFallback() async -> Bool {
+        for base in HubProfileSync.orderedHubHttpBases() {
+            if await uploadCurrentSnapshot(hubBaseURL: base) { return true }
+        }
+        return false
+    }
+
+    /// Upload the previous-session log trying each configured hub base in order
+    /// (primary, then secondary fallback) until one succeeds.
+    @discardableResult
+    static func uploadPreviousSessionLogWithFallback() async -> String? {
+        for base in HubProfileSync.orderedHubHttpBases() {
+            if let msg = await uploadPreviousSessionLog(hubBaseURL: base) { return msg }
+        }
+        return nil
+    }
 }
 
 // MARK: - In-app log bus (Swift + polled Rust buffer)

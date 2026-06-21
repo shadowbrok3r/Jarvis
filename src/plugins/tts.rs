@@ -661,7 +661,7 @@ fn play_ready_clips(
 }
 
 #[derive(Component)]
-struct TtsClip {
+pub struct TtsClip {
     #[allow(dead_code)]
     preview: String,
 }
