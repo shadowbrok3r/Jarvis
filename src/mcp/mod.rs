@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::schemars::{self, JsonSchema};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::{Deserialize, Serialize};
@@ -750,11 +750,11 @@ fn parse_capture_view_slug(raw: &str) -> Result<CaptureView, String> {
 // ---------- helpers -----------------------------------------------------------
 
 fn ok_text(body: impl Into<String>) -> CallToolResult {
-    CallToolResult::success(vec![Content::text(body.into())])
+    CallToolResult::success(vec![ContentBlock::text(body.into())])
 }
 
 fn err_text(body: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(body.into())])
+    CallToolResult::error(vec![ContentBlock::text(body.into())])
 }
 
 /// MCP pose tools accept VRM humanoid keys plus any bone currently in the live snapshot
@@ -802,10 +802,10 @@ fn ok_json(v: &impl Serialize) -> CallToolResult {
     }
 }
 
-/// Load a PNG from disk and return an MCP `Content::image` block (base64 PNG).
+/// Load a PNG from disk and return an MCP `ContentBlock::image` block (base64 PNG).
 /// When `max_dim > 0` and the image's longest side exceeds it, the image is
 /// downscaled with Lanczos3 before re-encoding so MCP responses stay compact.
-fn embed_png_as_content(path: &Path, max_dim: u32) -> Result<Content, String> {
+fn embed_png_as_content(path: &Path, max_dim: u32) -> Result<ContentBlock, String> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine as _;
     use std::io::Cursor;
@@ -829,7 +829,7 @@ fn embed_png_as_content(path: &Path, max_dim: u32) -> Result<Content, String> {
             .map_err(|e| format!("re-encode {}: {e}", path.display()))?;
         B64.encode(&out)
     };
-    Ok(Content::image(encoded, "image/png"))
+    Ok(ContentBlock::image(encoded, "image/png"))
 }
 
 /// Composite a sequence of PNG frame paths into one labeled grid montage PNG.
@@ -2382,8 +2382,8 @@ impl JarvisMcpServer {
             Ok(s) => s,
             Err(e) => return err_text(format!("serialize failure: {e}")),
         };
-        let mut blocks: Vec<Content> = Vec::with_capacity(1 + result.images.len());
-        blocks.push(Content::text(json_text));
+        let mut blocks: Vec<ContentBlock> = Vec::with_capacity(1 + result.images.len());
+        blocks.push(ContentBlock::text(json_text));
         if embed_images {
             let paths: Vec<PathBuf> = result
                 .images
@@ -2392,7 +2392,7 @@ impl JarvisMcpServer {
                 .collect();
             // Decoding + resizing PNGs is CPU-bound; offload to spawn_blocking so we
             // do not stall the tokio runtime when many large views are embedded.
-            let embed_results = tokio::task::spawn_blocking(move || -> Vec<Result<Content, String>> {
+            let embed_results = tokio::task::spawn_blocking(move || -> Vec<Result<ContentBlock, String>> {
                 paths
                     .iter()
                     .map(|p| embed_png_as_content(p, max_embed_dim))
@@ -2404,7 +2404,7 @@ impl JarvisMcpServer {
                     for (img, res) in result.images.iter().zip(items.into_iter()) {
                         match res {
                             Ok(content) => blocks.push(content),
-                            Err(e) => blocks.push(Content::text(format!(
+                            Err(e) => blocks.push(ContentBlock::text(format!(
                                 "embed {} ({}): {e}",
                                 img.view.as_slug(),
                                 img.path
@@ -2412,7 +2412,7 @@ impl JarvisMcpServer {
                         }
                     }
                 }
-                Err(e) => blocks.push(Content::text(format!("embed task join: {e}"))),
+                Err(e) => blocks.push(ContentBlock::text(format!("embed task join: {e}"))),
             }
         }
         CallToolResult::success(blocks)
@@ -2584,13 +2584,13 @@ impl JarvisMcpServer {
             "gifError": gif_err,
             "note": "Montage grid reads left-to-right, top-to-bottom (start → end). GIF is for the human.",
         });
-        let mut blocks = vec![Content::text(
+        let mut blocks = vec![ContentBlock::text(
             serde_json::to_string_pretty(&summary).unwrap_or_default(),
         )];
         {
             use base64::engine::general_purpose::STANDARD as B64;
             use base64::Engine as _;
-            blocks.push(Content::image(B64.encode(&montage_bytes), "image/png"));
+            blocks.push(ContentBlock::image(B64.encode(&montage_bytes), "image/png"));
         }
         CallToolResult::success(blocks)
     }
@@ -2728,13 +2728,13 @@ impl JarvisMcpServer {
             "partial": step_err,
             "note": "LIVE recording (layer stack / director NOT suppressed). Montage grid reads left-to-right, top-to-bottom = earliest → latest. GIF is for the human.",
         });
-        let mut blocks = vec![Content::text(
+        let mut blocks = vec![ContentBlock::text(
             serde_json::to_string_pretty(&summary).unwrap_or_default(),
         )];
         {
             use base64::engine::general_purpose::STANDARD as B64;
             use base64::Engine as _;
-            blocks.push(Content::image(B64.encode(&montage_bytes), "image/png"));
+            blocks.push(ContentBlock::image(B64.encode(&montage_bytes), "image/png"));
         }
         CallToolResult::success(blocks)
     }
@@ -2978,11 +2978,10 @@ mod tests {
         img.save(path).expect("write test PNG");
     }
 
-    fn decoded_dims(content: &rmcp::model::Content) -> (u32, u32) {
+    fn decoded_dims(content: &rmcp::model::ContentBlock) -> (u32, u32) {
         let raw = content
-            .raw
             .as_image()
-            .expect("expected RawContent::Image variant");
+            .expect("expected ContentBlock::Image variant");
         assert_eq!(raw.mime_type, "image/png", "mime must be image/png");
         let bytes = B64.decode(raw.data.as_bytes()).expect("base64 decodes");
         let img = image::load_from_memory(&bytes).expect("png decodes");

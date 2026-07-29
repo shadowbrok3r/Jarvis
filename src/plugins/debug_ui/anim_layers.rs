@@ -175,6 +175,8 @@ pub fn draw_anim_layers_window(
     let mut new_height: Option<f32> = None;
     let mut window_open = settings.ui.show_anim_layers;
 
+    let mut dock = std::mem::take(&mut state.dock);
+
     let mut render = |ui: &mut egui::Ui| {
         handle.with_write(|stack| {
             menu_bar_row(
@@ -192,7 +194,7 @@ pub fn draw_anim_layers_window(
             ui.separator();
             egui::Panel::bottom("anim_layers_add_bar")
                 .exact_size(ADD_BAR_HEIGHT)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     let presets = expression_presets(params.snapshot.as_deref());
                     add_layer_bar(
                         ui,
@@ -209,7 +211,7 @@ pub fn draw_anim_layers_window(
             if has_status_strip {
                 egui::Panel::bottom("anim_layers_status_strip")
                     .exact_size(STATUS_STRIP_HEIGHT)
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             if let Some(msg) = &state.anim_layers.status {
                                 ui.colored_label(theme::success(ui), msg);
@@ -238,11 +240,12 @@ pub fn draw_anim_layers_window(
 
     match dock_side.as_str() {
         "bottom" => {
+            let mut root = dock.begin(ctx);
             let resp = egui::Panel::bottom("anim_layers_bottom_panel")
                 .resizable(true)
                 .default_size(bottom_h)
                 .min_size(160.0)
-                .show(ctx, |ui| {
+                .show(&mut root, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -250,32 +253,37 @@ pub fn draw_anim_layers_window(
                         });
                 });
             new_height = Some(resp.response.rect.height());
+            dock.end(&root);
         }
         "left" => {
+            let mut root = dock.begin(ctx);
             egui::Panel::left("anim_layers_left_panel")
                 .resizable(true)
                 .default_size(540.0)
                 .min_size(360.0)
-                .show(ctx, |ui| {
+                .show(&mut root, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             render(ui);
                         });
                 });
+            dock.end(&root);
         }
         "right" => {
+            let mut root = dock.begin(ctx);
             egui::Panel::right("anim_layers_right_panel")
                 .resizable(true)
                 .default_size(540.0)
                 .min_size(360.0)
-                .show(ctx, |ui| {
+                .show(&mut root, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             render(ui);
                         });
                 });
+            dock.end(&root);
         }
         _ => {
             egui::Window::new("Animation Layers")
@@ -288,6 +296,8 @@ pub fn draw_anim_layers_window(
                 });
         }
     }
+
+    state.dock = dock;
 
     if dock_side == "floating" {
         settings.ui.show_anim_layers = window_open;

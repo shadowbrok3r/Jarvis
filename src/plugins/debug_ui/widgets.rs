@@ -2,6 +2,41 @@
 
 use bevy_egui::egui;
 
+/// Remaining screen rect for top-level `Panel`s across chained egui systems.
+///
+/// egui 0.35's `Panel::show` takes `&mut Ui` (not `Context`). bevy_egui's
+/// multipass discards its root `Ui`, so each panel system builds a dock root
+/// from this remaining rect and commits what panels left behind.
+#[derive(Default)]
+pub struct EguiDockLayout {
+    available: Option<egui::Rect>,
+    next_salt: u64,
+}
+
+impl EguiDockLayout {
+    pub fn reset(&mut self) {
+        self.available = None;
+        self.next_salt = 0;
+    }
+
+    pub fn begin(&mut self, ctx: &egui::Context) -> egui::Ui {
+        let max_rect = self.available.unwrap_or_else(|| ctx.viewport_rect());
+        let salt = self.next_salt;
+        self.next_salt = salt.wrapping_add(1);
+        egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new(("jarvis_dock_root", ctx.viewport_id(), salt)),
+            egui::UiBuilder::new()
+                .layer_id(egui::LayerId::background())
+                .max_rect(max_rect),
+        )
+    }
+
+    pub fn end(&mut self, ui: &egui::Ui) {
+        self.available = Some(ui.available_rect_before_wrap());
+    }
+}
+
 pub fn vec3_row(
     ui: &mut egui::Ui,
     label: &str,

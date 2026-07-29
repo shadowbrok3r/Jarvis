@@ -192,6 +192,8 @@ pub struct DebugUiState {
     pub avatar_vrm_picker: AvatarVrmPickerState,
     /// Avatar defaults sidecar editor (expressions / layer set / rest pose).
     pub avatar_defaults: AvatarDefaultsUiState,
+    /// Shared remaining rect for top-level egui panels this frame.
+    pub dock: widgets::EguiDockLayout,
 }
 
 /// Transient state for the Avatar window's runtime VRM list (not persisted to `user.toml`).
@@ -239,6 +241,7 @@ impl Default for DebugUiState {
             network_trace_pick: None,
             avatar_vrm_picker: AvatarVrmPickerState::default(),
             avatar_defaults: AvatarDefaultsUiState::default(),
+            dock: widgets::EguiDockLayout::default(),
         }
     }
 }
@@ -300,7 +303,10 @@ fn draw_menu_bar(
     let vrma_entities: Vec<Entity> = vrma_q.iter().collect();
     let pose_controller_open = settings.ui.show_pose_controller;
 
-    egui::Panel::top("jarvis_menu_bar").show(ctx, |ui| {
+    let mut dock = std::mem::take(&mut state.dock);
+    dock.reset();
+    let mut root = dock.begin(ctx);
+    egui::Panel::top("jarvis_menu_bar").show(&mut root, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             file_menu(ui, &mut settings, &mut state, &mut exit);
             view_menu(ui, &mut settings, &mut state);
@@ -362,6 +368,8 @@ fn draw_menu_bar(
             });
         });
     });
+    dock.end(&root);
+    state.dock = dock;
 }
 
 fn file_menu(

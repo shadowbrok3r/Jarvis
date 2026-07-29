@@ -645,6 +645,9 @@ pub fn draw_pose_controller_window(
     let dock_width = settings.ui.pose_controller_dock_width.max(280.0);
     let dock_height = settings.ui.pose_controller_dock_bottom_height.max(180.0);
 
+    let mut dock = std::mem::take(&mut state.dock);
+    let mut root = dock.begin(ctx);
+
     // Order matters for egui SidePanel/BottomPanel rendering: do bottom first
     // so it claims the bottom strip across the full window width, then the
     // left/right side panels render above it.
@@ -653,7 +656,7 @@ pub fn draw_pose_controller_window(
             .resizable(true)
             .default_size(dock_height)
             .min_size(180.0)
-            .show(ctx, |ui| {
+            .show(&mut root, |ui| {
                 render_side_panel(
                     ui,
                     "bottom",
@@ -686,7 +689,7 @@ pub fn draw_pose_controller_window(
             .default_size(dock_width)
             .min_size(320.0)
             .max_size(1100.0)
-            .show(ctx, |ui| {
+            .show(&mut root, |ui| {
                 render_side_panel(
                     ui,
                     "left",
@@ -719,7 +722,7 @@ pub fn draw_pose_controller_window(
             .default_size(dock_width)
             .min_size(320.0)
             .max_size(1100.0)
-            .show(ctx, |ui| {
+            .show(&mut root, |ui| {
                 render_side_panel(
                     ui,
                     "right",
@@ -749,6 +752,9 @@ pub fn draw_pose_controller_window(
         // doesn't need separate config knobs per side. Last-resize wins.
         pending_panel_width = Some(resp.response.rect.width());
     }
+
+    dock.end(&root);
+    state.dock = dock;
 
     // Floating tabs: each gets its own egui::Window.
     if let Some(tabs) = side_tabs.get("floating").cloned() {
@@ -910,7 +916,7 @@ fn render_side_panel(
         layer_ctx,
     );
 
-    egui::Panel::bottom(format!("pose_controller_{side}_status_strip")).show_inside(
+    egui::Panel::bottom(format!("pose_controller_{side}_status_strip")).show(
         ui,
         |ui| {
             ui.horizontal(|ui| {

@@ -40,22 +40,20 @@ bevy = { version = "0.19", default-features = false, features = [
 raw-window-handle = "0.6"
 # Avoid blake3's NEON C build (cc-rs → xcrun) when cross-compiling from Linux.
 blake3 = { version = "1.8", default-features = false, features = ["std", "pure"] }
-bevy_vrm1 = "0.7"
+bevy_vrm1 = "0.9"
 # `bevy_egui` enables PanOrbit’s `check_egui_wants_focus` so touches over egui don’t steal the orbit camera.
-bevy_egui = { version = "0.40", features = ["serde"] }
-egui-phosphor = { version = "0.12.0", default-features = false, features = ["regular"] }
+bevy_egui = { version = "0.41.1", features = ["serde"] }
+egui-phosphor = { version = "0.13.0", default-features = false, features = ["regular"] }
 bevy_panorbit_camera = { path = "../../vendor/bevy_panorbit_camera", default-features = false, features = ["bevy_egui"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-rand = "0.9"
+toml = "1"
+rand = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
 
 # `tracing-oslog` runs a C build that expects Apple `xcrun`; use a stub when building on Linux.
-# `bevy_vrm1` is patched to make optional `VrmPreset` fields (isBinary, overrideBlink/Mouth/LookAt)
-# tolerate absence — without this, custom expressions silently disappear because the upstream struct
-# rejects entries missing those fields. Desktop applies the same patch in the workspace Cargo.toml.
+# Vendored bevy_vrm1 0.9 keeps jarvis IBL/spring/matcap patches on upstream.
 [patch.crates-io]
 tracing-oslog = { path = "vendor/tracing-oslog-stub" }
 bevy_vrm1 = { path = "../../vendor/bevy_vrm1" }

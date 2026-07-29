@@ -75,7 +75,7 @@ pub fn draw_chat_window(
                 // updated `state.chat.pending` list in the same frame.
                 ingest_dropped_files(ui.ctx(), &mut state);
 
-                Panel::top("chat_top_panel").show_inside(ui, |ui| {
+                Panel::top("chat_top_panel").show(ui, |ui| {
                     ui.with_layout(Layout::left_to_right(egui::Align::Min), |ui| {
                         if ui
                             .button(if state.chat.sidebar_collapsed {
@@ -101,7 +101,7 @@ pub fn draw_chat_window(
                         .resizable(true)
                         .default_size(210.0)
                         .min_size(44.0)
-                        .show_inside(ui, |ui| {
+                        .show(ui, |ui| {
                             thread_sidebar_with_backend(
                                 ui,
                                 &mut state,
@@ -115,7 +115,7 @@ pub fn draw_chat_window(
                 egui::Panel::bottom("chat_compose_bar")
                     .resizable(false)
                     .min_size(96.0)
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         compose_bar(
                             ui,
                             &mut state,
@@ -127,7 +127,7 @@ pub fn draw_chat_window(
                     });
 
                 egui::CentralPanel::default()
-                    .show_inside(ui, |ui| transcript(ui, &mut state.chat, chat));
+                    .show(ui, |ui| transcript(ui, &mut state.chat, chat));
 
                 // Drag-and-drop overlay hint.
                 if ui.ctx().input(|i| !i.raw.hovered_files.is_empty()) {
@@ -429,7 +429,7 @@ fn render_streaming_bubble(
 }
 
 /// Collapsible reasoning / model thinking (plain text, above the reply bubble).
-fn render_thinking_collapsible(ui: &mut egui::Ui, id_salt: impl std::hash::Hash, text: &str) {
+fn render_thinking_collapsible(ui: &mut egui::Ui, id_salt: impl std::hash::Hash + std::fmt::Debug, text: &str) {
     egui::CollapsingHeader::new(egui::RichText::new("Thinking").small())
         .id_salt(id_salt)
         .default_open(false)
@@ -452,7 +452,7 @@ fn render_thinking_collapsible(ui: &mut egui::Ui, id_salt: impl std::hash::Hash,
 }
 
 /// Collapsible pretty-printed `tool_calls` JSON from a structured assistant envelope.
-fn render_tool_calls_collapsible(ui: &mut egui::Ui, id_salt: impl std::hash::Hash, json: &str) {
+fn render_tool_calls_collapsible(ui: &mut egui::Ui, id_salt: impl std::hash::Hash + std::fmt::Debug, json: &str) {
     egui::CollapsingHeader::new(egui::RichText::new("Tool calls").small())
         .id_salt(id_salt)
         .default_open(false)
