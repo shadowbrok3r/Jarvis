@@ -15,10 +15,16 @@ use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy::transform::TransformSystems;
 use bevy_vrm1::prelude::Vrm;
+
+use crate::plugins::pose_driver::IndexedBones;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use serde::Serialize;
 
 pub const AVATAR_CAPTURE_LAYER: usize = 7;
+
+/// Metres above the `head` bone (base of the skull) that head-anchored framing aims at, in
+/// unscaled rig units.
+const HEAD_BONE_FACE_LIFT: f32 = 0.1;
 
 pub struct PoseCapturePlugin;
 
@@ -224,6 +230,9 @@ struct CaptureCameraProfile {
     focus_y_offset: f32,
     radius: f32,
     height_lift: f32,
+    /// Anchors focus on the `head` bone's world position instead of `focus_y_offset` above the
+    /// VRM root, so tight framing tracks the head through poses that move it.
+    anchor_head_bone: bool,
 }
 
 impl CaptureCameraProfile {
@@ -232,6 +241,7 @@ impl CaptureCameraProfile {
             focus_y_offset: 1.35,
             radius: 1.75,
             height_lift: 0.15,
+            anchor_head_bone: false,
         }
     }
 
@@ -242,24 +252,28 @@ impl CaptureCameraProfile {
                 focus_y_offset: 0.95,
                 radius: 2.35,
                 height_lift: 0.12,
+                anchor_head_bone: false,
             },
             // Tight framing around face/head for expression QA.
             CaptureFramingPreset::FaceCloseup => Self {
                 focus_y_offset: 1.58,
                 radius: 0.72,
                 height_lift: 0.03,
+                anchor_head_bone: true,
             },
             // Low + close on the feet so toe curl / foot articulation is legible.
             CaptureFramingPreset::Feet => Self {
                 focus_y_offset: 0.14,
                 radius: 0.55,
                 height_lift: 0.10,
+                anchor_head_bone: false,
             },
             // Close on hip/hand height for finger curl / grip QA.
             CaptureFramingPreset::Hands => Self {
                 focus_y_offset: 0.88,
                 radius: 0.6,
                 height_lift: 0.0,
+                anchor_head_bone: false,
             },
         }
     }
@@ -275,6 +289,8 @@ impl CaptureCameraProfile {
                 .height_lift
                 .unwrap_or(self.height_lift)
                 .clamp(-1.0, 2.0),
+            // An explicit focus height is a request for that height, not for the head bone.
+            anchor_head_bone: self.anchor_head_bone && overrides.focus_y_offset.is_none(),
         }
     }
 }
@@ -389,6 +405,20 @@ fn promote_warmed_capture_screenshots(
     }
 }
 
+/// World-space aim point for head-anchored framing: the `head` bone lifted to face height.
+///
+/// Returns `None` until [`IndexedBones`] has resolved `head`, so callers fall back to the
+/// root-relative profile offset.
+fn head_bone_focus(
+    indexed: Option<&IndexedBones>,
+    gtf_q: &Query<&GlobalTransform>,
+    avatar_scale: f32,
+) -> Option<Vec3> {
+    let head = *indexed?.entities.get("head")?;
+    let head_gtf = gtf_q.get(head).ok()?;
+    Some(head_gtf.translation() + Vec3::Y * HEAD_BONE_FACE_LIFT * avatar_scale)
+}
+
 fn drain_capture_requests(
     mut commands: Commands,
     queue: Res<CaptureCommandQueue>,
@@ -396,6 +426,8 @@ fn drain_capture_requests(
     tick: Res<CapturePipelineTick>,
     mut sessions: ResMut<CaptureSessions>,
     vrm_q: Query<&GlobalTransform, With<Vrm>>,
+    indexed_bones: Option<Res<IndexedBones>>,
+    bone_gtf_q: Query<&GlobalTransform>,
     mut images: ResMut<Assets<Image>>,
 ) {
     while let Ok(req) = queue.0.try_recv() {
@@ -443,9 +475,20 @@ fn drain_capture_requests(
             camera_profile = camera_profile.with_overrides(overrides);
         }
 
-        let focus = vrm_tf.translation() + Vec3::Y * camera_profile.focus_y_offset;
-        let radius = camera_profile.radius;
-        let height_lift = camera_profile.height_lift;
+        // Profile offsets are authored against an unscaled rig, but `Settings::avatar
+        // .uniform_scale` is applied to the VRM root's `Transform`. Without folding that scale in,
+        // `face_closeup` aims 1.58 m up at a rig whose head sits at 1.19 m (scale 0.7) and every
+        // capture renders nothing but the transparent clear colour.
+        let avatar_scale = vrm_tf.scale().y.abs().max(1e-3);
+        let head_focus = camera_profile
+            .anchor_head_bone
+            .then(|| head_bone_focus(indexed_bones.as_deref(), &bone_gtf_q, avatar_scale))
+            .flatten();
+        let focus = head_focus.unwrap_or_else(|| {
+            vrm_tf.translation() + Vec3::Y * camera_profile.focus_y_offset * avatar_scale
+        });
+        let radius = camera_profile.radius * avatar_scale;
+        let height_lift = camera_profile.height_lift * avatar_scale;
         let session_id = sessions.next_id;
         sessions.next_id = sessions.next_id.saturating_add(1);
         let mut camera_entities = Vec::with_capacity(req.views.len());
