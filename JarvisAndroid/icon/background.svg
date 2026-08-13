@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+  <!-- Adaptive-icon background: full bleed, no art near the edges (the launcher masks it). -->
+  <defs>
+    <radialGradient id="bg" cx="0.42" cy="0.36" r="0.78">
+      <stop offset="0%" stop-color="#18213D"/>
+      <stop offset="55%" stop-color="#0B0E1A"/>
+      <stop offset="100%" stop-color="#05070F"/>
+    </radialGradient>
+  </defs>
+  <rect width="108" height="108" fill="url(#bg)"/>
+  <circle cx="45" cy="38" r="40" fill="#00E5FF" opacity="0.07"/>
+  <circle cx="78" cy="82" r="34" fill="#B366FF" opacity="0.06"/>
+</svg>

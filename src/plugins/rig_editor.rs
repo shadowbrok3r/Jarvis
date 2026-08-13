@@ -31,11 +31,14 @@ impl Plugin for RigEditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RigEditorState>()
             .init_resource::<crate::plugins::mirror::MirrorState>()
-            .insert_gizmo_config(RigEditorGizmoGroup::default(), rig_editor_gizmo_config())
-            .add_systems(
-                PostUpdate,
-                rig_editor_draw_gizmo.after(TransformSystems::Propagate),
-            );
+            .insert_gizmo_config(RigEditorGizmoGroup::default(), rig_editor_gizmo_config());
+
+        // The gizmo overlay reads `DebugUiState`; Android has no debug UI.
+        #[cfg(not(target_os = "android"))]
+        app.add_systems(
+            PostUpdate,
+            rig_editor_draw_gizmo.after(TransformSystems::Propagate),
+        );
     }
 }
 
@@ -145,9 +148,7 @@ pub struct RigEditorState {
     pub pending_scroll_to_bone: Option<String>,
     /// One-shot: when set, the orbit camera moves its focus onto the bone's
     /// world position next frame, then clears. List click in edit mode is
-    /// the only producer — the viewport mesh pick deliberately does NOT
-    /// snap the camera (per user request: viewport selection is "I want to
-    /// pose this bone", not "look at it").
+    /// the only producer; viewport mesh pick does not snap the camera.
     pub pending_focus_camera_to_bone: Option<String>,
     /// Mesh-pick tube radius (meters) for bone hover / click.
     pub pick_radius_m: f32,
@@ -355,6 +356,7 @@ pub fn axis_handle_world(
     centre + q * local
 }
 
+#[cfg(not(target_os = "android"))]
 fn rig_editor_draw_gizmo(
     mut gizmos: Gizmos<RigEditorGizmoGroup>,
     rig: Res<RigEditorState>,
@@ -369,9 +371,7 @@ fn rig_editor_draw_gizmo(
         return;
     };
 
-    // Camera direction so the bone-pick markers can be drawn as
-    // billboard-style circles ("circle around the joint", per user request)
-    // instead of tiny depth-occluded spheres.
+    // Camera direction so bone-pick markers draw as billboard circles.
     let cam_pos = cam_q
         .iter()
         .next()

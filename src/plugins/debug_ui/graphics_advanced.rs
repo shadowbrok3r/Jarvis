@@ -2,7 +2,7 @@
 //! environment map), the three-light rig, and the per-material MToon
 //! overrides editor.
 //!
-//! Everything here mutates [`jarvis_avatar::config::Settings`] (so hits are
+//! Everything here mutates [`crate::config::Settings`] (so hits are
 //! persisted through "Save settings") and the [`MToonOverridesStore`]
 //! resource (which writes its own JSON sidecar immediately).
 
@@ -15,11 +15,11 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 use bevy_vrm1::prelude::{MToonMaterial, Vrm};
 
-use jarvis_avatar::config::{
+use crate::config::{
     apply_character_showcase_lighting_preset, BloomSettings, LightRigSettings, LightSpec,
     Settings, msaa_allows_ssao,
 };
-use jarvis_avatar::icons;
+use crate::icons;
 
 use crate::plugins::graphics_advanced::EnvironmentMapStatus;
 use crate::plugins::material_visibility::{

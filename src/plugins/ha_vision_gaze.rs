@@ -13,12 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
-use jarvis_avatar::config::HomeAssistantSettings;
+use crate::config::HomeAssistantSettings;
 use reqwest::Client;
 use serde_json::Value;
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::home_assistant;
+use crate::config::Settings;
+use crate::home_assistant;
 
 use super::channel_server::LookAtRequestMessage;
 use super::shared_runtime::SharedTokio;

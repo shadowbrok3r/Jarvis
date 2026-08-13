@@ -33,10 +33,10 @@ use bevy_egui::{
     EguiContexts,
 };
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::icons;
-use jarvis_avatar::pose_library::{AnimationFile, slugify};
-use jarvis_avatar::theme;
+use crate::config::Settings;
+use crate::icons;
+use crate::pose_library::{AnimationFile, slugify};
+use crate::theme;
 
 use crate::plugins::anim_layer_sets::LayerSetsStore;
 use crate::plugins::anim_layers::{
@@ -524,7 +524,7 @@ fn master_filter_row(ui: &mut egui::Ui, ui_state: &mut AnimLayersUiState, stack:
                 {
                     let n = matching_ids.len();
                     for id in matching_ids {
-                        stack.remove_layer(id);
+                        stack.retire_layer(id);
                     }
                     ui_state.status = Some(format!("deleted {n} layer(s)"));
                 }
@@ -600,7 +600,7 @@ fn layer_sets_bar(
                 .clicked()
             {
                 if let Some(lib) = library {
-                    match store.load_into(&ui_state.picked_set, stack, &lib.library) {
+                    match store.load_into(&ui_state.picked_set, stack, &lib.library, true) {
                         Ok(count) => {
                             ui_state.status =
                                 Some(format!("loaded '{}' ({count} layers)", ui_state.picked_set));
@@ -1071,7 +1071,7 @@ fn layer_list(
         });
 
     if let Some(id) = to_remove {
-        if stack.remove_layer(id) {
+        if stack.retire_layer(id) {
             ui_state.status = Some(format!("deleted layer {id}"));
         }
     }
@@ -1446,10 +1446,23 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             rate_hz,
             pitch_deg,
             roll_deg,
+            shoulder_deg,
+            rate_jitter,
+            sighing,
+            ..
         } => {
             slider(ui, "rate (Hz)", rate_hz, 0.05..=1.5);
             slider(ui, "pitch (°)", pitch_deg, 0.0..=4.0);
             slider(ui, "roll (°)", roll_deg, 0.0..=3.0);
+            slider(ui, "shoulder (°)", shoulder_deg, 0.0..=2.0);
+            slider(ui, "rate jitter", rate_jitter, 0.0..=0.5);
+            if *sighing {
+                ui.label(
+                    egui::RichText::new("sighing")
+                        .small()
+                        .color(egui::Color32::from_gray(170)),
+                );
+            }
         }
         DriverKind::Blink {
             mean_interval,
@@ -1457,6 +1470,7 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             next_in,
             phase,
             phase_t,
+            ..
         } => {
             slider(ui, "mean interval (s)", mean_interval, 1.0..=10.0);
             slider(ui, "double-blink p", double_blink_chance, 0.0..=0.5);
@@ -1473,10 +1487,21 @@ fn driver_params(ui: &mut egui::Ui, layer: &mut Layer) {
             rate_hz,
             hip_roll_deg,
             spine_counter_deg,
+            dwell_min,
+            dwell_max,
+            ws_state,
+            ..
         } => {
             slider(ui, "rate (Hz)", rate_hz, 0.02..=0.5);
             slider(ui, "hip roll (°)", hip_roll_deg, 0.0..=5.0);
             slider(ui, "spine counter (°)", spine_counter_deg, 0.0..=3.0);
+            slider(ui, "dwell min (s)", dwell_min, 2.0..=30.0);
+            slider(ui, "dwell max (s)", dwell_max, 4.0..=40.0);
+            ui.label(
+                egui::RichText::new(format!("phase: {ws_state:?}"))
+                    .small()
+                    .color(egui::Color32::from_gray(170)),
+            );
         }
         DriverKind::FingerFidget {
             amplitude_deg,

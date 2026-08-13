@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 use super::shared_runtime::SharedTokio;
 

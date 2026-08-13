@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 use super::emotion_mappings::{emotion_mappings_panel, EmotionPanelParams};
 use super::graphics_advanced::{graphics_panel, GraphicsPanelParams};

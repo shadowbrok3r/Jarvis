@@ -31,16 +31,16 @@ use reqwest::Client;
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 
-use jarvis_avatar::a2f::{A2fClient, A2fConfig, A2fResult};
-use jarvis_avatar::arkit::{
+use crate::a2f::{A2fClient, A2fConfig, A2fResult};
+use crate::arkit::{
     ArkitKeyframe, map_keyframes_to_vrm, merge_a2f_emotion_hint_into_keyframes,
 };
-use jarvis_avatar::act::parser::split_into_tts_sentences;
-use jarvis_avatar::config::Settings;
+use crate::act::parser::split_into_tts_sentences;
+use crate::config::Settings;
 
 use super::chat_pipeline_status::{ChatPipelineStage, ChatPipelineStatus};
 use super::pose_driver::{PoseCommand, PoseCommandSender};
-use jarvis_avatar::kokoro_http::{
+use crate::kokoro_http::{
     fetch_kokoro_speech, pcm_s16le_mono_to_wav_bytes, start_kokoro_pcm_stream,
     wav_bytes_to_pcm16_mono,
 };
@@ -79,6 +79,8 @@ struct TtsRequest {
     /// Run A2F on the same audio and return a mapped expression clip for the main thread.
     a2f_apply: bool,
     a2f_cfg: A2fConfig,
+    /// A2F emotion hints snapshotted from the current ACT mood at dispatch.
+    emotion_hints: HashMap<String, f32>,
     /// Stream Kokoro PCM and emit playback sub-clips as audio arrives (lowest latency).
     stream_playback: bool,
     /// Target seconds of audio per streamed sub-clip when `stream_playback`.
@@ -166,6 +168,7 @@ async fn emit_pcm_subclip(
     sample_rate: u32,
     a2f_apply: bool,
     a2f_cfg: &A2fConfig,
+    emotion_hints: &HashMap<String, f32>,
     preview: &str,
     tx_ready: &Sender<TtsReady>,
     traffic: &Option<TrafficLogSink>,
@@ -183,8 +186,9 @@ async fn emit_pcm_subclip(
     }
     let mut face_clip = None;
     if a2f_apply && a2f_cfg.enabled {
+        let hints = (!emotion_hints.is_empty()).then(|| emotion_hints.clone());
         match A2fClient::new(a2f_cfg.clone())
-            .process_audio_pcm16(pcm.to_vec(), sample_rate, None)
+            .process_audio_pcm16(pcm.to_vec(), sample_rate, hints)
             .await
         {
             Ok(result) => {
@@ -289,7 +293,8 @@ fn spawn_tts_thread(mut commands: Commands, traffic: Option<Res<TrafficLogSink>>
                                                 }
                                                 let pcm: Vec<u8> = buf.drain(..take).collect();
                                                 emit_pcm_subclip(
-                                                    &pcm, sr, req.a2f_apply, &req.a2f_cfg, &preview,
+                                                    &pcm, sr, req.a2f_apply, &req.a2f_cfg,
+                                                    &req.emotion_hints, &preview,
                                                     &tx_ready, &traffic,
                                                 )
                                                 .await;
@@ -309,7 +314,8 @@ fn spawn_tts_thread(mut commands: Commands, traffic: Option<Res<TrafficLogSink>>
                                 if rem > 0 {
                                     let pcm: Vec<u8> = buf.drain(..rem).collect();
                                     emit_pcm_subclip(
-                                        &pcm, sr, req.a2f_apply, &req.a2f_cfg, &preview, &tx_ready,
+                                        &pcm, sr, req.a2f_apply, &req.a2f_cfg,
+                                        &req.emotion_hints, &preview, &tx_ready,
                                         &traffic,
                                     )
                                     .await;
@@ -405,7 +411,12 @@ fn spawn_tts_thread(mut commands: Commands, traffic: Option<Res<TrafficLogSink>>
                                         match wav_bytes_to_pcm16_mono(&wav_bytes) {
                                             Ok((pcm, rate)) => {
                                                 match A2fClient::new(req.a2f_cfg.clone())
-                                                    .process_audio_pcm16(pcm, rate, None)
+                                                    .process_audio_pcm16(
+                                                        pcm,
+                                                        rate,
+                                                        (!req.emotion_hints.is_empty())
+                                                            .then(|| req.emotion_hints.clone()),
+                                                    )
                                                     .await
                                                 {
                                                     Ok(result) => {
@@ -520,6 +531,7 @@ fn a2f_config_from_settings(s: &Settings) -> A2fConfig {
 fn dispatch_tts_requests(
     settings: Res<Settings>,
     bridge: Option<Res<TtsBridge>>,
+    emotion_hint: Option<Res<crate::plugins::expressions::CurrentEmotionHint>>,
     mut reader: MessageReader<TtsSpeakMessage>,
     mut pipeline: ResMut<ChatPipelineStatus>,
 ) {
@@ -569,6 +581,10 @@ fn dispatch_tts_requests(
                 },
             ),
         );
+        let emotion_hints = emotion_hint
+            .as_ref()
+            .map(|h| h.0.read().clone())
+            .unwrap_or_default();
         for chunk in chunks {
             let req = TtsRequest {
                 text: chunk,
@@ -579,6 +595,7 @@ fn dispatch_tts_requests(
                 pcm_sample_rate: settings.tts.pcm_sample_rate,
                 a2f_apply,
                 a2f_cfg: a2f_cfg.clone(),
+                emotion_hints: emotion_hints.clone(),
                 stream_playback,
                 stream_chunk_secs: settings.tts.stream_chunk_secs,
             };

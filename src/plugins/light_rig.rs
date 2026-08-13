@@ -16,7 +16,7 @@ use bevy::gizmos::prelude::GizmoConfigStore;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::Vrm;
 
-use jarvis_avatar::config::{LightSpec, Settings};
+use crate::config::{LightSpec, Settings};
 
 use crate::plugins::environment::SunLight;
 
@@ -63,7 +63,7 @@ fn spawn_light_rig(mut commands: Commands, settings: Res<Settings>) {
     spawn_all_rig_lights(&mut commands, &settings.light_rig);
 }
 
-fn spawn_all_rig_lights(commands: &mut Commands, rig: &jarvis_avatar::config::LightRigSettings) {
+fn spawn_all_rig_lights(commands: &mut Commands, rig: &crate::config::LightRigSettings) {
     spawn_one(commands, LightRigRole::Key, &rig.key);
     spawn_one(commands, LightRigRole::Fill, &rig.fill);
     spawn_one(commands, LightRigRole::Rim, &rig.rim);

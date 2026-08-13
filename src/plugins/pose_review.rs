@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
-use jarvis_avatar::{icons, theme};
+use crate::{icons, theme};
 
 /// A review the operator has not yet answered.
 #[derive(Debug, Clone)]

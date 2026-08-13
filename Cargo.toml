@@ -16,7 +16,6 @@ bevy_egui = { version = "0.41.1", features = ["serde"] }
 bevy_panorbit_camera = { path = "vendor/bevy_panorbit_camera", features = ["bevy_egui"] }
 egui_commonmark = { version = "0.24.0", default-features = false, features = ["pulldown_cmark"] }
 egui_json_tree = "0.16.0"
-rfd = "0.17.2"
 egui-phosphor = { version = "0.13.0", default-features = false, features = ["regular"] }
 
 # Channel-server hub (axum WS + HTTP) / async
@@ -34,7 +33,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 reqwest-eventsource = "0.6"
 base64 = "0.23.0"
 urlencoding = "2"
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 hound = "3.5"
 
@@ -74,6 +72,15 @@ half = "2.4"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.17.2"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+# `aws_lc_rs` needs cmake + a C toolchain against the NDK; `ring` cross-compiles
+# clean. Provider is installed in `main` (desktop) / `android_boot` (Android).
+[target.'cfg(target_os = "android")'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+bevy = { version = "0.19", features = ["android-native-activity"] }
 
 [dev-dependencies]
 tempfile = "3"

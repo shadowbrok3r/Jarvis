@@ -31,9 +31,9 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_vrm1::prelude::Vrma;
 
-use jarvis_avatar::act::Emotion;
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::icons;
+use crate::act::Emotion;
+use crate::config::Settings;
+use crate::icons;
 
 use crate::plugins::chat_pipeline_status::ChatPipelineStatus;
 use crate::plugins::jarvis_ios_hub::write_vrm_graphics_override;
@@ -165,7 +165,7 @@ fn spacebar_global_pause_toggle(
 }
 
 /// Transient debug-UI state that does NOT round-trip through `config/user.toml`.
-/// Persistent flags (which windows are open) live on [`jarvis_avatar::config::UiSettings`].
+/// Persistent flags (which windows are open) live on [`crate::config::UiSettings`].
 #[derive(Resource)]
 pub struct DebugUiState {
     pub save_status: Option<String>,
@@ -289,9 +289,9 @@ fn draw_menu_bar(
     if state.first_run {
         state.first_run = false;
         let mut fonts = egui::FontDefinitions::default();
-        jarvis_avatar::icons::install_fonts(&mut fonts);
+        crate::icons::install_fonts(&mut fonts);
         ctx.set_fonts(fonts);
-        match serde_json::from_str::<egui::Style>(jarvis_avatar::egui_theme::STYLE) {
+        match serde_json::from_str::<egui::Style>(crate::egui_theme::STYLE) {
             Ok(theme) => {
                 let style = std::sync::Arc::new(theme);
                 ctx.set_global_style(style);
@@ -351,9 +351,9 @@ fn draw_menu_bar(
             // appear right-to-left, so the **first** widget is rightmost.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(msg) = &state.save_status {
-                    ui.colored_label(jarvis_avatar::theme::success(ui), msg);
+                    ui.colored_label(crate::theme::success(ui), msg);
                 }
-                let info = jarvis_avatar::theme::info(ui);
+                let info = crate::theme::info(ui);
                 ui.label(
                     egui::RichText::new(pipeline.menu_line())
                         .small()

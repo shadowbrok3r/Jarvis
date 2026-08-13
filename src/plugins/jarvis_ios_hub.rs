@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use jarvis_avatar::config::{AvatarSettings, CameraSettings, LightRigSettings, Settings};
+use crate::config::{AvatarSettings, CameraSettings, LightRigSettings, Settings};
 
 use super::mtoon_overrides::{
     vrm_model_graphics_override_path, vrm_model_material_visibility_path,

@@ -23,8 +23,8 @@ use bevy_vrm1::prelude::{
     ColliderShape, RestGlobalTransform, SpringJointProps, SpringNodeRegistry, Vrm, VrmPath,
 };
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::icons;
+use crate::config::Settings;
+use crate::icons;
 
 use crate::plugins::mirror::{MirrorChain, MirrorState, chain_bones, mirror_quat, resolve_pair};
 use crate::plugins::pose_driver::{
@@ -1521,7 +1521,7 @@ pub(crate) fn rig_editor_viewport_pick(
     let r = rig.pick_radius_m.max(0.02);
     let mut best: Option<(f32, String)> = None;
     for (name, entity) in &indexed.entities {
-        // Mesh-pick is humanoid-only by user request — extras stay list-only.
+        // Mesh-pick is humanoid-only; extras stay list-only.
         if !is_vrm_humanoid_bone(name) {
             continue;
         }

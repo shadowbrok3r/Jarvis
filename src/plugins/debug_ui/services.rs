@@ -2,8 +2,8 @@
 
 use bevy_egui::egui;
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::theme;
+use crate::config::Settings;
+use crate::theme;
 
 use crate::plugins::debug_ui::workspaces::{ServiceHubTab, ServiceHubUiState};
 use crate::plugins::service_status::{ServiceId, ServiceState, ServiceStatus};

@@ -1,7 +1,11 @@
-//! Bevy plugins (binary crate).
+//! Bevy plugins shared by the desktop binary and the Android app.
+//!
+//! Modules gated `not(target_os = "android")` bind listening sockets, drive the
+//! hover-based debug UI, or write authoring output into the repo tree.
 
 pub mod avatar;
 pub mod avatar_defaults;
+#[cfg(not(target_os = "android"))]
 pub mod debug_ui;
 pub mod environment;
 pub mod expressions;
@@ -12,6 +16,8 @@ pub use vrm_eye_debug::VrmEyeLookatDebug;
 pub mod alive_director;
 pub mod anim_layer_sets;
 pub mod anim_layers;
+// Compiled on Android for its hub message types; `ChannelHubPlugin` (the axum
+// listener) is simply never registered there.
 pub mod channel_server;
 pub mod chat_pipeline_status;
 pub mod emotion_map;
@@ -21,6 +27,8 @@ pub mod home_assistant;
 pub mod home_assistant_events;
 pub mod home_assistant_routing;
 pub mod hub_pose_apply;
+// Drives the MCP tool surface, which Android does not host.
+#[cfg(not(target_os = "android"))]
 pub mod intent_calibration;
 pub mod idle_tick;
 pub mod ironclaw_chat;
@@ -44,6 +52,7 @@ pub use spring_preset::vrm_preset_key;
 pub mod traffic_log;
 pub mod tts;
 pub mod vrma_clip_import;
+#[cfg(not(target_os = "android"))]
 pub mod undo_history;
 pub mod zeroclaw_attachments;
 pub mod zeroclaw_chat;

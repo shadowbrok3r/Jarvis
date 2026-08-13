@@ -3,10 +3,10 @@
 use bevy::prelude::*;
 use bevy_egui::egui;
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::home_assistant::{self, HaCameraEntity, HaDetectionSensorEntity, HaMediaEntity};
-use jarvis_avatar::icons;
-use jarvis_avatar::theme;
+use crate::config::Settings;
+use crate::home_assistant::{self, HaCameraEntity, HaDetectionSensorEntity, HaMediaEntity};
+use crate::icons;
+use crate::theme;
 
 use crate::plugins::VrmEyeLookatDebug;
 use crate::plugins::ha_vision_gaze::HaVisionGazeRuntime;

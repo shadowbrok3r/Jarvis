@@ -31,11 +31,11 @@ use serde_json::{Value, json};
 use tokio::runtime::Builder;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use jarvis_avatar::act::{should_skip_tts_for_error_like_response, strip_act_delay_for_tts};
-use jarvis_avatar::config::{ChatBackend, Settings, ZeroClawSettings};
-use jarvis_avatar::ironclaw::types::{ImageData, ThreadInfo};
-use jarvis_avatar::zeroclaw::client::{ClientIdentity, ZeroClawClient, is_auth_failure};
-use jarvis_avatar::zeroclaw::types::{
+use crate::act::{should_skip_tts_for_error_like_response, strip_act_delay_for_tts};
+use crate::config::{ChatBackend, Settings, ZeroClawSettings};
+use crate::ironclaw::types::{ImageData, ThreadInfo};
+use crate::zeroclaw::client::{ClientIdentity, ZeroClawClient, is_auth_failure};
+use crate::zeroclaw::types::{
     SystemEvent, WsClientMessage, WsServerMessage, parse_system_event,
 };
 
@@ -345,7 +345,7 @@ fn short_session(id: &str) -> String {
 /// Persist `active_session_id` back to `config/user.toml` so the next launch
 /// resumes the same gateway session.
 fn persist_active_session(session_id: &str) -> Result<(), String> {
-    let mut settings = jarvis_avatar::config::Settings::load().map_err(|e| e.to_string())?;
+    let mut settings = crate::config::Settings::load().map_err(|e| e.to_string())?;
     if settings.zeroclaw.active_session_id == session_id {
         return Ok(());
     }
@@ -384,7 +384,7 @@ async fn refresh_session_list(
     // ones from older runs), sorted by `last_activity` desc so the most
     // recent shows up first. Inject the active session even if the server
     // hasn't persisted it yet (first send of a new chat).
-    let mut sessions: Vec<&jarvis_avatar::zeroclaw::types::SessionInfo> = list
+    let mut sessions: Vec<&crate::zeroclaw::types::SessionInfo> = list
         .sessions
         .iter()
         .filter(|s| match s.agent_alias.as_deref() {
@@ -809,7 +809,7 @@ async fn run_event_stream(
                         warn!("zeroclaw sse auth rejected; stopping reconnect loop");
                         // Map through the auth-failure helper so callers can
                         // distinguish if we ever switch to a typed error.
-                        let _ = is_auth_failure(&jarvis_avatar::zeroclaw::client::ZeroClawError::Status {
+                        let _ = is_auth_failure(&crate::zeroclaw::client::ZeroClawError::Status {
                             code: reqwest::StatusCode::UNAUTHORIZED,
                             body: String::new(),
                         });

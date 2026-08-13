@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use rand::RngExt;
 use rand::seq::IndexedRandom;
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 use crate::plugins::native_anim_player::ActiveNativeAnimation;
 use crate::plugins::pose_driver::{PoseCommand, PoseCommandSender};

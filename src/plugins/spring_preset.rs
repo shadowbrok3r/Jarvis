@@ -16,7 +16,7 @@ use bevy_vrm1::prelude::{
 };
 use serde::{Deserialize, Serialize};
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 /// Subdirectory (under cwd at launch) for preset files: `config/spring_presets/<vrm_key>.toml`.
 pub const SPRING_PRESETS_DIR: &str = "config/spring_presets";

@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 use super::network_trace::network_trace_panel;
 use super::sections::{channel_hub_panel, gateway_panel, mcp_panel, tts_panel};

@@ -25,11 +25,11 @@ use reqwest_eventsource::Event as SseEvent;
 use serde_json::{Value, json};
 use tokio::runtime::Builder;
 
-use jarvis_avatar::act::{should_skip_tts_for_error_like_response, strip_act_delay_for_tts};
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::ironclaw::chat_media;
-use jarvis_avatar::ironclaw::client::{GatewayClient, GatewayError};
-use jarvis_avatar::ironclaw::types::{
+use crate::act::{should_skip_tts_for_error_like_response, strip_act_delay_for_tts};
+use crate::config::Settings;
+use crate::ironclaw::chat_media;
+use crate::ironclaw::client::{GatewayClient, GatewayError};
+use crate::ironclaw::types::{
     AppEvent, ImageData, SendMessageRequest, ThreadInfo, TurnInfo, parse_app_event,
 };
 
@@ -425,8 +425,8 @@ fn spawn_gateway_thread(
     // The `ChatState` / `GatewayClientHandle` resources will then be inserted
     // by `zeroclaw_chat` instead, and the chat UI keeps working unchanged.
     if !matches!(
-        jarvis_avatar::config::ChatBackend::parse(&settings.gateway.backend),
-        jarvis_avatar::config::ChatBackend::Ironclaw,
+        crate::config::ChatBackend::parse(&settings.gateway.backend),
+        crate::config::ChatBackend::Ironclaw,
     ) {
         info!(
             "ironclaw_chat: gateway.backend = {:?}; not starting IronClaw gateway thread",
@@ -477,7 +477,7 @@ fn spawn_gateway_thread(
 }
 
 async fn run_gateway(
-    cfg: jarvis_avatar::config::GatewaySettings,
+    cfg: crate::config::GatewaySettings,
     module_name: String,
     cmd_rx: Receiver<ChatCommand>,
     in_tx: Sender<GatewayInboundEvent>,

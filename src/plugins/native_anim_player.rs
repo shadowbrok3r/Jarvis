@@ -18,7 +18,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use parking_lot::RwLock;
 
-use jarvis_avatar::pose_library::{AnimationFile, AnimationFrame};
+use crate::pose_library::{AnimationFile, AnimationFrame};
 
 use crate::plugins::anim_layers::smoothstep;
 use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommand, PoseCommandSender};
@@ -36,14 +36,89 @@ const LOOP_FADE_SECS: f32 = 0.35;
 /// back to standing in one frame (the 9000°/s leg spikes in the glitch log).
 const ENTRY_BLEND_SECS: f32 = 0.22;
 
+/// Seconds to ease from the rig's current pose into a Kimodo stream's first
+/// frames, so a live generation never teleports the skeleton.
+const STREAM_EASE_SECS: f32 = 0.25;
+
+/// Seconds the layer stack blends from the native handoff pose back to its own
+/// composition after native playback ends.
+pub const RETURN_BLEND_SECS: f32 = 0.3;
+
+/// Which engine owns body-bone emission. The layer stack composes in every
+/// state (procedural state keeps advancing, expressions still emit) but only
+/// writes body bones when it owns them; native playback and Kimodo streaming
+/// take the body exclusively and hand it back through a timed blend.
+#[derive(Resource, Default)]
+pub enum BodyOwner {
+    #[default]
+    Stack,
+    Native,
+    ReturningToStack {
+        t: f32,
+        handoff: HashMap<String, [f32; 4]>,
+    },
+}
+
+/// Tracks native/stream activity and drives the ownership state machine.
+fn sync_body_owner(
+    time: Res<Time>,
+    active: Res<ActiveNativeAnimation>,
+    streaming: Res<StreamingAnimation>,
+    snapshot: Option<Res<BoneSnapshotHandle>>,
+    mut owner: ResMut<BodyOwner>,
+) {
+    let native_active = active.is_playing()
+        || streaming.pending_frames() > 0
+        || streaming.active_request_id().is_some();
+    match &mut *owner {
+        BodyOwner::Stack => {
+            if native_active {
+                *owner = BodyOwner::Native;
+            }
+        }
+        BodyOwner::Native => {
+            if !native_active {
+                let handoff = snapshot
+                    .as_ref()
+                    .map(|h| {
+                        h.0.read()
+                            .bones
+                            .iter()
+                            .map(|(name, e)| (name.clone(), e.rotation))
+                            .collect::<HashMap<String, [f32; 4]>>()
+                    })
+                    .unwrap_or_default();
+                *owner = BodyOwner::ReturningToStack { t: 0.0, handoff };
+            }
+        }
+        BodyOwner::ReturningToStack { t, .. } => {
+            if native_active {
+                *owner = BodyOwner::Native;
+            } else {
+                *t += time.delta_secs();
+                if *t >= RETURN_BLEND_SECS {
+                    *owner = BodyOwner::Stack;
+                }
+            }
+        }
+    }
+}
+
 pub struct NativeAnimPlayerPlugin;
 
 impl Plugin for NativeAnimPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActiveNativeAnimation>()
+            .init_resource::<BodyOwner>()
             .insert_resource(StreamingAnimation::default())
             .add_systems(Update, tick_active_animation)
-            .add_systems(Update, tick_streaming_animation);
+            .add_systems(Update, tick_streaming_animation)
+            .add_systems(
+                Update,
+                sync_body_owner
+                    .after(tick_active_animation)
+                    .after(tick_streaming_animation),
+            );
     }
 }
 
@@ -198,7 +273,8 @@ fn tick_active_animation(
     };
 
     let loop_fade = if clip.looping { LOOP_FADE_SECS } else { 0.0 };
-    let (mut bones, expressions) = sampled_clip_pose(&clip.animation, t, fps, loop_period, loop_fade);
+    let (mut bones, expressions) =
+        sampled_clip_pose(&clip.animation, t, fps, loop_period, loop_fade, clip.looping);
     if in_entry_window {
         if let Some(from) = clip.entry_from.as_ref() {
             let w = smoothstep((clip.elapsed / ENTRY_BLEND_SECS).clamp(0.0, 1.0));
@@ -218,7 +294,9 @@ fn tick_active_animation(
     // drop) emit a hips translation delta. The anti-slide lock runs *before*
     // `apply_pose_commands`, so this deliberate delta survives; rotation-only
     // clips emit nothing and stay locked to bind.
-    if let Some(root) = crate::plugins::anim_layers::sample_clip_root_position(&clip.animation, t) {
+    if let Some(root) =
+        crate::plugins::anim_layers::sample_clip_root_position(&clip.animation, t, clip.looping)
+    {
         push_root_translation(sender.as_ref(), root);
     }
 
@@ -244,16 +322,21 @@ fn sampled_clip_pose(
     fps: f32,
     loop_period: f32,
     loop_fade: f32,
+    wrap: bool,
 ) -> (HashMap<String, [f32; 4]>, HashMap<String, f32>) {
     let total = animation.frames.len();
-    let frame_f = (t * fps).clamp(0.0, (total.saturating_sub(1)) as f32);
-    let (mut bones, mut expr) = lerp_frames(animation, frame_f);
+    let frame_f = if wrap && total > 1 {
+        (t * fps).rem_euclid(total as f32)
+    } else {
+        (t * fps).clamp(0.0, (total.saturating_sub(1)) as f32)
+    };
+    let (mut bones, mut expr) = lerp_frames(animation, frame_f, wrap);
 
     if loop_fade > 1e-4 && loop_period > loop_fade {
         let fade_start = loop_period - loop_fade;
         if t >= fade_start {
             let w = smoothstep(((t - fade_start) / loop_fade).clamp(0.0, 1.0));
-            let (start_bones, start_expr) = lerp_frames(animation, 0.0);
+            let (start_bones, start_expr) = lerp_frames(animation, 0.0, false);
             for (name, target) in start_bones {
                 let blended = bones
                     .get(&name)
@@ -276,17 +359,23 @@ fn sampled_clip_pose(
 }
 
 /// Linearly (slerp for bones) interpolate between the two frames bracketing a
-/// fractional frame index. Index is clamped — wrap blending is the caller's job
-/// (via the loop crossfade).
+/// fractional frame index. `wrap` interpolates the final interval last→first;
+/// otherwise the index clamps to the end frame.
 fn lerp_frames(
     animation: &AnimationFile,
     frame_f: f32,
+    wrap: bool,
 ) -> (HashMap<String, Quat>, HashMap<String, f32>) {
     let total = animation.frames.len();
-    let frame_f = frame_f.clamp(0.0, (total - 1) as f32);
-    let idx0 = frame_f.floor() as usize;
-    let idx1 = (idx0 + 1).min(total - 1);
-    let frac = frame_f.fract();
+    let (idx0, idx1, frac) = if wrap && total > 1 {
+        let frame_f = frame_f.rem_euclid(total as f32);
+        let idx0 = (frame_f.floor() as usize).min(total - 1);
+        (idx0, (idx0 + 1) % total, frame_f.fract())
+    } else {
+        let frame_f = frame_f.clamp(0.0, (total - 1) as f32);
+        let idx0 = frame_f.floor() as usize;
+        (idx0, (idx0 + 1).min(total - 1), frame_f.fract())
+    };
     let a = &animation.frames[idx0];
     let b = &animation.frames[idx1];
 
@@ -297,11 +386,11 @@ fn lerp_frames(
         let qa = a
             .bones
             .get(name)
-            .map(|r| Quat::from_xyzw(r.rotation[0], r.rotation[1], r.rotation[2], r.rotation[3]));
+            .map(|r| crate::plugins::anim_layers::stored_quat(r.rotation));
         let qb = b
             .bones
             .get(name)
-            .map(|r| Quat::from_xyzw(r.rotation[0], r.rotation[1], r.rotation[2], r.rotation[3]));
+            .map(|r| crate::plugins::anim_layers::stored_quat(r.rotation));
         let q = match (qa, qb) {
             (Some(qa), Some(qb)) if frac > 0.0 => qa.slerp(qb, frac),
             (Some(qa), _) => qa,
@@ -387,6 +476,11 @@ struct StreamingState {
     fps: f32,
     last_emit: f32,
     active_request_id: Option<String>,
+    /// Rig pose captured when the first frame drains; eased toward the stream
+    /// over [`STREAM_EASE_SECS`].
+    ease_from: Option<HashMap<String, [f32; 4]>>,
+    /// Seconds of stream emitted so far (drives the entry ease window).
+    emitted_time: f32,
 }
 
 impl StreamingAnimation {
@@ -396,6 +490,8 @@ impl StreamingAnimation {
         s.fps = fps.max(1.0);
         s.last_emit = 0.0;
         s.active_request_id = Some(request_id.into());
+        s.ease_from = None;
+        s.emitted_time = 0.0;
     }
 
     pub fn push_frame(&self, frame: AnimationFrame) {
@@ -420,6 +516,7 @@ fn tick_streaming_animation(
     time: Res<Time>,
     streaming: Res<StreamingAnimation>,
     sender: Option<Res<PoseCommandSender>>,
+    snapshot: Option<Res<BoneSnapshotHandle>>,
 ) {
     let Some(sender) = sender else {
         return;
@@ -427,14 +524,49 @@ fn tick_streaming_animation(
     let mut s = streaming.inner.write();
     if s.queue.is_empty() {
         s.last_emit = 0.0;
+        if s.active_request_id.is_none() {
+            s.ease_from = None;
+            s.emitted_time = 0.0;
+        }
         return;
+    }
+    // Capture the live rig pose before the first frame lands so the stream
+    // eases in from wherever the skeleton currently is.
+    if s.ease_from.is_none() && s.emitted_time == 0.0 {
+        let captured = snapshot
+            .as_ref()
+            .map(|h| {
+                h.0.read()
+                    .bones
+                    .iter()
+                    .map(|(name, e)| (name.clone(), e.rotation))
+                    .collect::<HashMap<String, [f32; 4]>>()
+            })
+            .unwrap_or_default();
+        s.ease_from = Some(captured);
     }
     let frame_dt = 1.0 / s.fps.max(1.0);
     s.last_emit += time.delta_secs();
     while s.last_emit >= frame_dt {
-        let Some(frame) = s.queue.pop_front() else {
+        let Some(mut frame) = s.queue.pop_front() else {
             break;
         };
+        s.emitted_time += frame_dt;
+        if s.emitted_time < STREAM_EASE_SECS {
+            if let Some(from) = s.ease_from.as_ref() {
+                let w = smoothstep(s.emitted_time / STREAM_EASE_SECS);
+                for (name, r) in frame.bones.iter_mut() {
+                    if let Some(f) = from.get(name) {
+                        let a = Quat::from_xyzw(f[0], f[1], f[2], f[3]);
+                        let b = crate::plugins::anim_layers::stored_quat(r.rotation);
+                        let q = a.slerp(b, w);
+                        r.rotation = [q.x, q.y, q.z, q.w];
+                    }
+                }
+            }
+        } else {
+            s.ease_from = None;
+        }
         push_frame(sender.as_ref(), &frame);
         s.last_emit -= frame_dt;
     }

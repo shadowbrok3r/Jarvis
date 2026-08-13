@@ -19,18 +19,19 @@
 //! as before.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use bevy::prelude::*;
+use parking_lot::RwLock;
 
-use jarvis_avatar::act::{Emotion, emotion_from_act_json, emotion_labels};
-use jarvis_avatar::emotions::EmotionBinding;
-use jarvis_avatar::pose_library::AnimationFile;
+use crate::act::{emotion_from_act_json, emotion_labels};
+use crate::emotions::{a2f_emotion_hints, EmotionBinding};
+use crate::pose_library::AnimationFile;
 
+use super::anim_layers::LayerStackHandle;
 use super::channel_server::ChatCompleteMessage;
 use super::chat_pipeline_status::{ChatPipelineStage, ChatPipelineStatus};
 use super::emotion_map::EmotionMapRes;
-use super::native_anim_player::ActiveNativeAnimation;
 use super::pose_driver::{PoseCommand, PoseCommandSender};
 use super::pose_library_assets::PoseLibraryAssets;
 
@@ -38,35 +39,23 @@ pub struct ExpressionsPlugin;
 
 impl Plugin for ExpressionsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ExpressionState>().add_systems(
-            Update,
-            (apply_chat_expressions, decay_expression_to_neutral),
-        );
+        app.init_resource::<CurrentEmotionHint>()
+            .add_systems(Update, apply_chat_expressions);
     }
 }
 
-#[derive(Resource)]
-struct ExpressionState {
-    active_until: Option<Instant>,
-    default_hold: Duration,
-}
-
-impl Default for ExpressionState {
-    fn default() -> Self {
-        Self {
-            active_until: None,
-            default_hold: Duration::from_secs_f32(2.5),
-        }
-    }
-}
+/// Latest ACT emotion mapped to A2F emotion keys — snapshotted by the TTS
+/// dispatcher so speech carries the current mood instead of a fixed bias.
+#[derive(Resource, Clone, Default)]
+pub struct CurrentEmotionHint(pub Arc<RwLock<HashMap<String, f32>>>);
 
 fn apply_chat_expressions(
     mut chat: MessageReader<ChatCompleteMessage>,
     pose_tx: Option<Res<PoseCommandSender>>,
-    mut state: ResMut<ExpressionState>,
+    emotion_hint: Res<CurrentEmotionHint>,
     emotion_map: Option<Res<EmotionMapRes>>,
     pose_lib: Option<Res<PoseLibraryAssets>>,
-    mut active_anim: Option<ResMut<ActiveNativeAnimation>>,
+    layer_stack: Option<Res<LayerStackHandle>>,
     mut pipeline: ResMut<ChatPipelineStatus>,
 ) {
     for msg in chat.read() {
@@ -92,23 +81,24 @@ fn apply_chat_expressions(
                     .into_iter()
                     .map(|(k, w)| (k, w.clamp(0.0, 1.0)))
                     .collect();
-                tx.send(PoseCommand::SetExpression {
-                    weights: weights.clone(),
-                });
+                // A2F hint tracks the current mood for subsequent speech.
+                *emotion_hint.0.write() = a2f_emotion_hints(&weights);
                 let hold = if binding.hold_seconds > 0.0 {
-                    Duration::from_secs_f32(binding.hold_seconds)
+                    binding.hold_seconds
                 } else {
-                    state.default_hold
+                    2.5
                 };
-                state.active_until = Some(Instant::now() + hold);
+                tx.send(PoseCommand::EmotionEnvelope {
+                    weights: weights.clone(),
+                    hold_seconds: Some(hold),
+                });
                 let preview: Vec<String> = weights
                     .iter()
                     .map(|(k, w)| format!("{k}@{w:.2}"))
                     .collect();
                 info!(
-                    "emotion '{label}' → VRM expressions [{}] for {:.1}s",
+                    "emotion '{label}' → VRM expressions [{}] for {hold:.1}s (enveloped)",
                     preview.join(", "),
-                    hold.as_secs_f32()
                 );
             } else {
                 warn!("emotion '{label}': PoseCommandSender missing — face not driven");
@@ -116,10 +106,10 @@ fn apply_chat_expressions(
         }
 
         // -------- Animation --------------------------------------------------
-        let (Some(filename), Some(lib), Some(active)) = (
+        let (Some(filename), Some(lib), Some(layers)) = (
             binding.animation.as_deref(),
             pose_lib.as_deref(),
-            active_anim.as_deref_mut(),
+            layer_stack.as_deref(),
         ) else {
             continue;
         };
@@ -131,7 +121,7 @@ fn apply_chat_expressions(
                     animation.name,
                     animation.frames.len()
                 );
-                active.start(animation, looping, hold);
+                layers.with_write(|s| s.play_episode_clip(animation, looping, hold));
             }
             Err(e) => {
                 warn!("emotion '{label}' animation '{filename}' failed to load: {e}");
@@ -168,20 +158,3 @@ fn resolve_binding(label: &str, map: Option<&EmotionMapRes>) -> EmotionBinding {
     EmotionBinding::default()
 }
 
-fn decay_expression_to_neutral(
-    pose_tx: Option<Res<PoseCommandSender>>,
-    mut state: ResMut<ExpressionState>,
-) {
-    let Some(until) = state.active_until else {
-        return;
-    };
-    if Instant::now() < until {
-        return;
-    }
-    if let Some(tx) = pose_tx.as_ref() {
-        let mut weights = HashMap::new();
-        weights.insert(Emotion::Neutral.vrm_expression_name().to_string(), 1.0);
-        tx.send(PoseCommand::SetExpression { weights });
-    }
-    state.active_until = None;
-}

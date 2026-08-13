@@ -35,10 +35,10 @@ use serde_json::{json, Value};
 
 use crossbeam_channel::RecvTimeoutError;
 
-use jarvis_avatar::a2f::{A2fClient, A2fConfig};
-use jarvis_avatar::model_catalog::{list_vrm_models, resolve_vrm_load_argument};
-use jarvis_avatar::paths::expand_home;
-use jarvis_avatar::pose_library::{slugify, BoneRotation, PoseFile, PoseGraph, PoseLibrary};
+use crate::a2f::{A2fClient, A2fConfig};
+use crate::model_catalog::{list_vrm_models, resolve_vrm_load_argument};
+use crate::paths::expand_home;
+use crate::pose_library::{slugify, BoneRotation, PoseFile, PoseGraph, PoseLibrary};
 
 use crate::kimodo::{GenerateRequest, KimodoClient};
 use crate::plugins::channel_server::HubBroadcast;
@@ -94,6 +94,8 @@ pub struct JarvisMcpServer {
     pub intent_calibration_wizard: Arc<RwLock<IntentCalibrationWizardSession>>,
     /// Human-in-the-loop pose approval gate (shared with the egui window).
     pub pose_review: crate::plugins::pose_review::PoseReviewHandle,
+    /// Shared mirror of the layer glitch monitor (spike log + settings).
+    pub glitch_log: crate::plugins::anim_layers::GlitchLogHandle,
     tool_router: ToolRouter<Self>,
 }
 
@@ -123,6 +125,7 @@ impl JarvisMcpServer {
         semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
         intent_calibration_wizard: Arc<RwLock<IntentCalibrationWizardSession>>,
         pose_review: crate::plugins::pose_review::PoseReviewHandle,
+        glitch_log: crate::plugins::anim_layers::GlitchLogHandle,
     ) -> Self {
         Self::with_kimodo(
             pose_tx,
@@ -142,6 +145,7 @@ impl JarvisMcpServer {
             semantic_calibration,
             intent_calibration_wizard,
             pose_review,
+            glitch_log,
         )
     }
 
@@ -167,6 +171,7 @@ impl JarvisMcpServer {
         semantic_calibration: Arc<RwLock<SemanticIntentCalibrationStore>>,
         intent_calibration_wizard: Arc<RwLock<IntentCalibrationWizardSession>>,
         pose_review: crate::plugins::pose_review::PoseReviewHandle,
+        glitch_log: crate::plugins::anim_layers::GlitchLogHandle,
     ) -> Self {
         Self {
             pose_tx,
@@ -186,6 +191,7 @@ impl JarvisMcpServer {
             semantic_calibration,
             intent_calibration_wizard,
             pose_review,
+            glitch_log,
             tool_router: Self::tool_router(),
         }
     }
@@ -489,8 +495,8 @@ pub struct ReviewPoseArgs {
     /// concrete body terms so the operator can sculpt the rig to match if it's
     /// off. Cover the whole body: legs/knees, hips, torso lean, arms/hands,
     /// head/gaze (e.g. "Kneeling upright: shins flat on the floor, knees folded
-    /// under her hips, thighs vertical, torso hinged ~45° forward, arms hanging
-    /// down resting near her thighs, head up looking forward."). Rendered
+    /// under the hips, thighs vertical, torso hinged ~45° forward, arms hanging
+    /// down resting near the thighs, head up looking forward."). Rendered
     /// prominently in its own panel — DON'T put operational notes here.
     #[serde(default)]
     pub intent: String,
@@ -609,6 +615,13 @@ pub struct ListModelsArgs {
     /// Optional case-insensitive substring filter on the `.vrm` basename.
     #[serde(default)]
     pub filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetGlitchLogArgs {
+    /// Max recent spike events to return (default 50, cap 400).
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -758,8 +771,8 @@ fn err_text(body: impl Into<String>) -> CallToolResult {
 }
 
 /// MCP pose tools accept VRM humanoid keys plus any bone currently in the live snapshot
-/// (extra skin joints indexed by glTF [`Name`]) and, before the first snapshot, `DEF-toe*`
-/// / `DEF-ero*` prefixes (ASCII case-insensitive).
+/// (extra skin joints indexed by glTF [`Name`]) and, before the first snapshot, `DEF-*`
+/// prefixes (ASCII case-insensitive).
 fn mcp_allows_pose_bone_key(name: &str, snap: &BoneSnapshot) -> bool {
     if VRM_BONE_NAMES.contains(&name) {
         return true;
@@ -768,7 +781,7 @@ fn mcp_allows_pose_bone_key(name: &str, snap: &BoneSnapshot) -> bool {
         return true;
     }
     let n = name.to_ascii_lowercase();
-    n.starts_with("def-toe") || n.starts_with("def-ero")
+    n.starts_with("def-")
 }
 
 /// When the live VRM has reported expression names, MCP must not invent keys.
@@ -952,7 +965,7 @@ impl JarvisMcpServer {
     ) -> CallToolResult {
         match list_vrm_models(args.filter.as_deref()) {
             Ok(entries) => ok_json(&json!({
-                "modelsDir": jarvis_avatar::model_catalog::models_dir().display().to_string(),
+                "modelsDir": crate::model_catalog::models_dir().display().to_string(),
                 "count": entries.len(),
                 "models": entries,
             })),
@@ -1104,7 +1117,7 @@ impl JarvisMcpServer {
         }))
     }
 
-    #[tool(description = "List VRM expression preset names available on the **currently loaded** avatar (VRMC_vrm `preset` + `custom`: happy, kitagawa, …). Small JSON for agents — pair with `set_expression` (partial) or `set_expressions_full` (whole face). Same names as `get_bone_reference` → `expressionPresets`.")]
+    #[tool(description = "List VRM expression preset names available on the **currently loaded** avatar (VRMC_vrm `preset` + `custom`: happy, blink, …). Small JSON for agents — pair with `set_expression` (partial) or `set_expressions_full` (whole face). Same names as `get_bone_reference` → `expressionPresets`.")]
     async fn list_expressions(&self) -> CallToolResult {
         let snap = self.snapshot.0.read();
         let names = snap.expression_presets.clone();
@@ -1579,7 +1592,7 @@ impl JarvisMcpServer {
         ))
     }
 
-    #[tool(description = "Get the full list of VRM humanoid bone names, expression presets discovered from the loaded VRM (VRMC_vrm preset + custom; e.g. kitagawa), and extra skin joint names from the live rig. For expression-only discovery in a small payload, prefer `list_expressions`.")]
+    #[tool(description = "Get the full list of VRM humanoid bone names, expression presets discovered from the loaded VRM (VRMC_vrm preset + custom), and extra skin joint names from the live rig. For expression-only discovery in a small payload, prefer `list_expressions`.")]
     async fn get_bone_reference(&self) -> CallToolResult {
         let snap = self.snapshot.0.read();
         let mut extra: Vec<String> = snap
@@ -1595,7 +1608,7 @@ impl JarvisMcpServer {
             "extraBones": extra,
             "expressionPresets": expression_presets.clone(),
             "expressions": expression_presets,
-            "note": "Rotations are quaternions [x, y, z, w] in normalized pose space (identity = bind). Expression values are 0..=1. Keep x/y/z in [-0.3, 0.3]. `expressionPresets` / `expressions` list preset names baked into the current VRM (empty until the rig initializes). Drive them via `list_expressions`, `set_expression` (partial), `set_expressions_full` (whole face), `animate_expressions`, or `pose_bones.expressions`. `extraBones` lists Rigify-style joints (e.g. DEF-toe*) present on the loaded avatar; `pose_bones` also accepts DEF-toe* / DEF-ero* by prefix before the first snapshot.",
+            "note": "Rotations are quaternions [x, y, z, w] in normalized pose space (identity = bind). Expression values are 0..=1. Keep x/y/z in [-0.3, 0.3]. `expressionPresets` / `expressions` list preset names baked into the current VRM (empty until the rig initializes). Drive them via `list_expressions`, `set_expression` (partial), `set_expressions_full` (whole face), `animate_expressions`, or `pose_bones.expressions`. `extraBones` lists Rigify-style joints (e.g. DEF-*) present on the loaded avatar; `pose_bones` also accepts DEF-* by prefix before the first snapshot.",
         }))
     }
 
@@ -1832,7 +1845,7 @@ impl JarvisMcpServer {
         }
     }
 
-    #[tool(description = "AUTONOMY METADATA. Record a pose's tags, hip height (root_y), autonomous-use flag, and natural transition targets in the central pose graph (config/pose_graph.json). The transition-graph baker and the heartbeat pose-director read this. `root_y` (>0 sets it; 0 leaves unchanged) means callers/baker stop guessing hip height (stand≈0.9, kneel≈0.5, lying≈0.2). `tags`/`next_poses` (non-empty replaces; empty leaves). `autonomous` is applied every call (defaults true — pass false to un-bless). Tag every clean, reviewed pose you want her to move through autonomously.")]
+    #[tool(description = "AUTONOMY METADATA. Record a pose's tags, hip height (root_y), autonomous-use flag, and natural transition targets in the central pose graph (config/pose_graph.json). The transition-graph baker and the heartbeat pose-director read this. `root_y` (>0 sets it; 0 leaves unchanged) means callers/baker stop guessing hip height (stand≈0.9, kneel≈0.5, lying≈0.2). `tags`/`next_poses` (non-empty replaces; empty leaves). `autonomous` is applied every call (defaults true — pass false to un-bless). Tag reviewed poses that should be eligible for autonomous idle.")]
     async fn tag_pose(&self, Parameters(args): Parameters<TagPoseArgs>) -> CallToolResult {
         let path = PathBuf::from("config/pose_graph.json");
         let mut graph = PoseGraph::load(&path).unwrap_or_default();
@@ -2107,6 +2120,30 @@ impl JarvisMcpServer {
         ok_json(&v)
     }
 
+    #[tool(description = "Read the layer glitch monitor: settings, totalSpikes (monotonic since app start — diff it across a soak to count pops), and recent spike events (peak deg/s, bone, layer, playhead time). Newest first.")]
+    async fn get_glitch_log(
+        &self,
+        Parameters(args): Parameters<GetGlitchLogArgs>,
+    ) -> CallToolResult {
+        let limit = args.limit.unwrap_or(50).clamp(1, 400) as usize;
+        let g = self.glitch_log.inner.read();
+        ok_json(&json!({
+            "enabled": g.enabled,
+            "sensitivity": g.sensitivity,
+            "floorDps": g.floor_dps,
+            "totalSpikes": g.total_spikes,
+            "recent": g.log.iter().rev().take(limit).map(|e| json!({
+                "at": e.at,
+                "layer": e.layer_label,
+                "layerId": e.layer_id,
+                "layerTime": e.layer_time,
+                "peakDps": e.peak_dps,
+                "bone": e.bone,
+                "ratio": e.ratio,
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
     #[tool(description = "List saved layer-set names from `config/anim_layer_sets.json` (see save_layer_set / load_layer_set / delete_layer_set).")]
     async fn list_layer_sets(&self) -> CallToolResult {
         let names = anim_layer_mcp::list_layer_set_names(&self.layer_sets);
@@ -2174,7 +2211,7 @@ impl JarvisMcpServer {
         let label = args.id_or_slug.clone();
         let res: Result<(), String> = self.layer_stack.with_write(|stack| {
             let id = anim_layer_mcp::resolve_layer_id(stack, &args.id_or_slug)?;
-            if stack.remove_layer(id) {
+            if stack.retire_layer(id) {
                 Ok(())
             } else {
                 Err(format!("remove_layer failed for id {id}"))

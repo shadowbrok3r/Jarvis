@@ -7,8 +7,8 @@
 
 use bevy::prelude::*;
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::emotions::{EmotionMap, resolve_emotions_path};
+use crate::config::Settings;
+use crate::emotions::{EmotionMap, resolve_emotions_path};
 
 pub struct EmotionMapPlugin;
 

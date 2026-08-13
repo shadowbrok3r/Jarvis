@@ -35,8 +35,8 @@ use once_cell::sync::OnceCell;
 use tokio::net::TcpListener;
 use tokio::runtime::Builder;
 
-use jarvis_avatar::config::{ChatBackend, Settings, ZeroClawSettings};
-use jarvis_avatar::ironclaw::types::ImageData;
+use crate::config::{ChatBackend, Settings, ZeroClawSettings};
+use crate::ironclaw::types::ImageData;
 
 /// Process-global handle to the attachments registry so the chat plugin can
 /// reach it from inside a tokio worker without funneling through Bevy.

@@ -28,8 +28,8 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
-use jarvis_avatar::ironclaw::protocol::EnvelopeBody;
-use jarvis_avatar::pose_library::{AnimationFrame, BoneRotation};
+use crate::ironclaw::protocol::EnvelopeBody;
+use crate::pose_library::{AnimationFrame, BoneRotation};
 
 use crate::plugins::channel_server::HubBroadcast;
 use crate::plugins::native_anim_player::StreamingAnimation;

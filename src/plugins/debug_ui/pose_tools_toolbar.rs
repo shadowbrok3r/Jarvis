@@ -22,8 +22,8 @@
 use bevy::prelude::Color;
 use bevy_egui::egui;
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::icons;
+use crate::config::Settings;
+use crate::icons;
 
 use crate::plugins::mirror::{MirrorChain, MirrorState};
 use crate::plugins::pose_driver::{BoneSnapshotHandle, PoseCommandSender};

@@ -93,7 +93,7 @@ pub fn normalized_from_local(rest_local: Quat, rest_world: Quat, raw_local: Quat
     rest_world * rest_local.inverse() * raw_local * rest_world.inverse()
 }
 
-/// Helen / Rigify per-digit skin toes `DEF-toe_{big,index,middle,ring,little}.{L,R}`:
+/// Rigify per-digit skin toes `DEF-toe_{big,index,middle,ring,little}.{L,R}`:
 /// intrinsic XYZ Euler from normalized `pose_q` often lands on **±180° yaw** (or equivalent
 /// aliases) at bind while the pad reads neutral in the viewport. The Bones tab stores **display**
 /// yaw near 0 at bind; this offset is added to **display** yaw (degrees) before
@@ -118,7 +118,7 @@ pub fn def_toe_big_yaw_slider_extra_deg(bone: &str) -> f32 {
     }
 }
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 use crate::plugins::avatar::{AvatarVrmRoot, spawn_avatar_vrm};
 
@@ -137,6 +137,7 @@ impl Plugin for PoseDriverPlugin {
             .init_resource::<PoseBoneApplyTelemetry>()
             .init_resource::<ActiveTransitions>()
             .init_resource::<ExpressionAnimationPlayback>()
+            .init_resource::<FacialComposer>()
             // Order: right after `AnimationSystems` (so VRMA sampling doesn't
             // overwrite us), but *before* `VrmSystemSets::Constraints` (aim /
             // roll / rotation constraints run `.after(AnimationSystems)` and
@@ -171,11 +172,22 @@ impl Plugin for PoseDriverPlugin {
                     .before(VrmSystemSets::Constraints)
                     .before(TransformSystems::Propagate),
             )
+            // Before `tick_expression_animation` so A2F's viseme writes land
+            // last and win on their keys.
+            .add_systems(
+                PostUpdate,
+                tick_facial_composer
+                    .after(AnimationSystems)
+                    .after(apply_pose_commands)
+                    .before(VrmSystemSets::Constraints)
+                    .before(TransformSystems::Propagate),
+            )
             .add_systems(
                 PostUpdate,
                 tick_expression_animation
                     .after(AnimationSystems)
                     .after(tick_active_transitions)
+                    .after(tick_facial_composer)
                     .before(VrmSystemSets::Constraints)
                     .before(TransformSystems::Propagate),
             )
@@ -232,6 +244,13 @@ pub enum PoseCommand {
     },
     /// Full-face replace via [`SetExpressions`] — used by `a2f:expression-keyframes`.
     SetExpression { weights: HashMap<String, f32> },
+    /// Chat-emotion weights driven through the [`FacialComposer`]'s
+    /// attack/hold/release envelope instead of an instant full-face set.
+    /// `hold_seconds: None` holds until the next envelope replaces it.
+    EmotionEnvelope {
+        weights: HashMap<String, f32>,
+        hold_seconds: Option<f32>,
+    },
     /// Reset every bone to its rest pose and clear expression overrides.
     ResetPose,
     /// Reset a specific subset of bones to their rest-pose local rotation.
@@ -849,6 +868,7 @@ fn is_manual_pose_cmd(cmd: &PoseCommand) -> bool {
         PoseCommand::ApplyBones { .. }
             | PoseCommand::ApplyExpression { .. }
             | PoseCommand::SetExpression { .. }
+            | PoseCommand::EmotionEnvelope { .. }
             | PoseCommand::ResetPose
             | PoseCommand::ResetBones(..)
             | PoseCommand::AnimateExpressions { .. },
@@ -1010,8 +1030,8 @@ fn dump_diagnostics(world: &mut World) {
         );
     }
 
-    // Cross-check: for each humanoid bone, is it in ANY skin? This is the
-    // money shot. Fingers/toes that "work" are in at least one skin; arms
+    // Cross-check: for each humanoid bone, is it in ANY skin?
+    // Fingers/toes that "work" are in at least one skin; arms
     // that don't move might be absent or shadowed by a helper.
     let mut missing: Vec<&str> = Vec::new();
     for (bone_name, entity) in &bones {
@@ -1084,6 +1104,147 @@ fn clear_expression_animation_playback(world: &mut World, resume_idle_if_stopped
     if should_resume {
         resume_idle_vrma_if_configured(world);
     }
+}
+
+/// Envelope phases for [`FacialComposer`]'s base emotion channel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EnvelopePhase {
+    Attack,
+    Hold,
+    Release,
+}
+
+/// Attack/hold/release envelope for one chat emotion. A new emotion snapshots
+/// the current output into `prev_out` and restarts the attack, so successive
+/// emotions crossfade automatically.
+struct EmotionEnvelopeState {
+    prev_out: HashMap<String, f32>,
+    target: HashMap<String, f32>,
+    attack: f32,
+    hold: Option<f32>,
+    release: f32,
+    t: f32,
+    phase: EnvelopePhase,
+}
+
+/// Base-emotion channel of the face. Blink and director overlays keep flowing
+/// through `ApplyExpression` merges; A2F visemes win on their own keys.
+#[derive(Resource, Default)]
+pub struct FacialComposer {
+    base: Option<EmotionEnvelopeState>,
+}
+
+/// Viseme keys A2F owns while a speech clip is active.
+const VISEME_KEYS: [&str; 5] = ["aa", "ih", "ou", "ee", "oh"];
+
+fn envelope_output(env: &EmotionEnvelopeState) -> HashMap<String, f32> {
+    let smooth = |t: f32| {
+        let t = t.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    match env.phase {
+        EnvelopePhase::Attack => {
+            let w = smooth(env.t / env.attack.max(1e-3));
+            let keys: HashSet<&String> = env.prev_out.keys().chain(env.target.keys()).collect();
+            keys.into_iter()
+                .map(|k| {
+                    let a = env.prev_out.get(k).copied().unwrap_or(0.0);
+                    let b = env.target.get(k).copied().unwrap_or(0.0);
+                    (k.clone(), a + (b - a) * w)
+                })
+                .collect()
+        }
+        EnvelopePhase::Hold => env.target.clone(),
+        EnvelopePhase::Release => {
+            let w = 1.0 - smooth(env.t / env.release.max(1e-3));
+            env.target.iter().map(|(k, v)| (k.clone(), v * w)).collect()
+        }
+    }
+}
+
+/// Advances the base-emotion envelope and writes its output every frame.
+/// Runs before [`tick_expression_animation`] so A2F's viseme writes land last
+/// and win on their keys; the envelope additionally scales its own viseme-key
+/// contribution by how loud the visemes currently are.
+pub(crate) fn tick_facial_composer(world: &mut World) {
+    let dt = world.resource::<Time>().delta_secs();
+    let viseme_activity = world
+        .get_resource::<ExpressionAnimationPlayback>()
+        .and_then(|p| p.active.as_ref())
+        .map(|clip| {
+            let t = if clip.looping {
+                clip.elapsed.rem_euclid(clip.duration.max(1e-4))
+            } else {
+                clip.elapsed.min(clip.duration)
+            };
+            let weights = sample_expression_keyframes(&clip.keyframes, t);
+            VISEME_KEYS
+                .iter()
+                .filter_map(|k| weights.get(*k).copied())
+                .fold(0.0f32, f32::max)
+        })
+        .unwrap_or(0.0);
+
+    let vrm_entity = world
+        .query_filtered::<Entity, With<Vrm>>()
+        .iter(world)
+        .next();
+
+    let Some(mut composer) = world.get_resource_mut::<FacialComposer>() else {
+        return;
+    };
+    let Some(env) = composer.base.as_mut() else {
+        return;
+    };
+    env.t += dt;
+    let mut finished = false;
+    match env.phase {
+        EnvelopePhase::Attack => {
+            if env.t >= env.attack {
+                env.phase = EnvelopePhase::Hold;
+                env.t = 0.0;
+            }
+        }
+        EnvelopePhase::Hold => {
+            if let Some(h) = env.hold {
+                if env.t >= h {
+                    env.phase = EnvelopePhase::Release;
+                    env.t = 0.0;
+                }
+            }
+        }
+        EnvelopePhase::Release => {
+            if env.t >= env.release {
+                finished = true;
+            }
+        }
+    }
+    let mut out = envelope_output(env);
+    if finished {
+        for v in out.values_mut() {
+            *v = 0.0;
+        }
+        composer.base = None;
+    }
+    if viseme_activity > 0.0 {
+        for k in VISEME_KEYS {
+            if let Some(v) = out.get_mut(k) {
+                *v *= 1.0 - viseme_activity;
+            }
+        }
+    }
+    let Some(e) = vrm_entity else { return };
+    if out.is_empty() {
+        return;
+    }
+    let pairs: Vec<(VrmExpression, f32)> = out
+        .into_iter()
+        .map(|(k, v)| (VrmExpression::from(k.as_str()), v.clamp(0.0, 1.0)))
+        .collect();
+    world
+        .commands()
+        .trigger(ModifyExpressions::from_iter(e, pairs));
+    world.flush();
 }
 
 fn sample_expression_keyframes(
@@ -1371,7 +1532,11 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
     if auto_stop_vrma && rest.iter().any(is_manual_pose_cmd) {
         let mut q = world.query::<&mut AnimationPlayer>();
         for mut player in q.iter_mut(world) {
-            player.stop_all();
+            // Only touch players that are actually animating — a blanket
+            // per-frame stop_all() also resets spring bones on VRMA resume.
+            if !player.all_finished() {
+                player.stop_all();
+            }
         }
     }
 
@@ -1499,6 +1664,13 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                             if let Some(mut tf) = world.get_mut::<Transform>(e) {
                                 tf.rotation = target;
                             }
+                            // An instant write cancels any stale in-flight slerp
+                            // so tick_active_transitions can't overwrite it.
+                            if let Some(mut active) =
+                                world.get_resource_mut::<ActiveTransitions>()
+                            {
+                                active.bones.remove(&name);
+                            }
                         } else {
                             new_transitions.push((
                                 name,
@@ -1578,6 +1750,10 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
             }
             PoseCommand::SetExpression { weights } => {
                 clear_expression_animation_playback(world, true);
+                // An explicit full-face set overrides the emotion envelope.
+                if let Some(mut composer) = world.get_resource_mut::<FacialComposer>() {
+                    composer.base = None;
+                }
                 let Some(e) = vrm_entity else {
                     continue;
                 };
@@ -1588,6 +1764,29 @@ pub(crate) fn apply_pose_commands(world: &mut World) {
                 world
                     .commands()
                     .trigger(SetExpressions::from_iter(e, pairs));
+            }
+            PoseCommand::EmotionEnvelope {
+                weights,
+                hold_seconds,
+            } => {
+                if let Some(mut composer) = world.get_resource_mut::<FacialComposer>() {
+                    // Crossfade: the new attack starts from whatever the old
+                    // envelope was outputting this frame.
+                    let prev_out = composer
+                        .base
+                        .as_ref()
+                        .map(envelope_output)
+                        .unwrap_or_default();
+                    composer.base = Some(EmotionEnvelopeState {
+                        prev_out,
+                        target: weights,
+                        attack: 0.22,
+                        hold: hold_seconds,
+                        release: 0.6,
+                        t: 0.0,
+                        phase: EnvelopePhase::Attack,
+                    });
+                }
             }
             PoseCommand::DumpDiagnostics => {
                 dump_diagnostics(world);

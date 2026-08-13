@@ -21,7 +21,7 @@ use bevy::asset::{AssetLoadFailedEvent, LoadState};
 use bevy::prelude::*;
 use bevy::render::render_resource::{TextureDimension, TextureFormat, TextureViewDimension};
 
-use jarvis_avatar::config::{GraphicsAdvancedSettings, Settings, msaa_allows_ssao};
+use crate::config::{GraphicsAdvancedSettings, Settings, msaa_allows_ssao};
 
 /// Live status for the Graphics Advanced environment-map row.
 #[derive(Resource, Clone, Default)]

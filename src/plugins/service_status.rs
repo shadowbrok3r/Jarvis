@@ -17,8 +17,8 @@ use reqwest::Client;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::ironclaw::protocol::EnvelopeBody;
+use crate::config::Settings;
+use crate::ironclaw::protocol::EnvelopeBody;
 
 use super::channel_server::{HubBroadcast, HubState, WsIncomingMessage};
 use super::ironclaw_chat::{ChatState, ChatStatusMessage};
@@ -312,8 +312,8 @@ fn seed_initial_states(mut status: ResMut<ServiceStatus>, settings: Res<Settings
     // routed the chat backend there. Otherwise they sit Disabled and the
     // panel keeps the row visible for discoverability without churning.
     let zc_active = matches!(
-        jarvis_avatar::config::ChatBackend::parse(&s.gateway.backend),
-        jarvis_avatar::config::ChatBackend::Zeroclaw,
+        crate::config::ChatBackend::parse(&s.gateway.backend),
+        crate::config::ChatBackend::Zeroclaw,
     );
     if zc_active {
         status.set(
@@ -467,10 +467,7 @@ fn apply_gateway_state(
     // describes ZeroClaw — not IronClaw. Re-target the gateway / events rows
     // accordingly so users don't see "IronClaw Gateway: online" while their
     // chat is actually going through ZeroClaw.
-    let zeroclaw_active = chat
-        .base_url
-        .contains(":42617")
-        || chat.base_url.contains("claw.shadowbroker")
+    let zeroclaw_active = chat.base_url.contains(":42617")
         || detail.starts_with("ws:")
         || detail.starts_with("webhook:");
     if zeroclaw_active {
@@ -541,8 +538,8 @@ fn run_http_probes(
     let gateway_token = settings.gateway.auth_token.clone();
 
     let zc_active = matches!(
-        jarvis_avatar::config::ChatBackend::parse(&settings.gateway.backend),
-        jarvis_avatar::config::ChatBackend::Zeroclaw,
+        crate::config::ChatBackend::parse(&settings.gateway.backend),
+        crate::config::ChatBackend::Zeroclaw,
     );
     let zc_url = settings.zeroclaw.normalized_base_url();
 

@@ -506,6 +506,11 @@ pub struct IronclawSettings {
     pub auth_token: String,
     /// Identity used for envelopes the avatar itself publishes.
     pub module_name: String,
+    /// Hub to CONNECT to instead of hosting, e.g. `http://192.168.4.5:6121`.
+    /// Empty on desktop, which hosts at `bind_address`; set on Android, which is
+    /// a hub client. WS and the `/jarvis-ios/v1` asset routes are derived from it.
+    #[serde(default)]
+    pub client_url: String,
 }
 
 /// IronClaw gateway (port 3000 by default) — the rich chat surface used by the avatar.
@@ -564,11 +569,11 @@ impl ChatBackend {
 /// network traffic is initiated.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ZeroClawSettings {
-    /// e.g. `http://192.168.4.8:42617` or `https://claw.shadowbroker.app` —
+    /// e.g. `http://192.168.4.8:42617` or `https://claw.example.com` —
     /// no trailing slash.
     #[serde(default = "default_zeroclaw_base_url")]
     pub base_url: String,
-    /// Optional WS base override (e.g. `wss://claw.shadowbroker.app`). Empty
+    /// Optional WS base override (e.g. `wss://claw.example.com`). Empty
     /// = derive from [`Self::base_url`] (`http` → `ws`, `https` → `wss`).
     #[serde(default)]
     pub ws_url: String,
@@ -836,7 +841,7 @@ pub struct AvatarSettings {
     /// World translation for the VRM root entity (pulls the rig toward the orbit focus).
     pub world_position: [f32; 3],
     /// Uniform scale on the VRM root (1.0 = natural meters). Increase if the rig looks
-    /// tiny vs the ground plane; decrease if she is huge.
+    /// tiny vs the ground plane; decrease if it is large.
     #[serde(default = "default_one")]
     pub uniform_scale: f32,
     /// If true, after each VRMA tick snap hips **local** X/Z translation to the bone’s
@@ -1245,6 +1250,24 @@ pub struct PoseControllerSettings {
     /// preset names from the loaded VRM at runtime and applies matches.
     #[serde(default = "default_expressive_preset_match")]
     pub director_expressive_preset_match: Vec<String>,
+    /// Ambient probability of an "expressive" episode per director pick.
+    #[serde(default = "default_director_expressive_prob")]
+    pub director_expressive_prob: f32,
+    /// Ambient probability of a "gaze" episode per director pick.
+    #[serde(default = "default_director_gaze_prob")]
+    pub director_gaze_prob: f32,
+    /// Seconds the expressive fidget boost ramps in/out over.
+    #[serde(default = "default_director_boost_ramp_secs")]
+    pub director_boost_ramp_secs: f32,
+    /// Finger fidget amplitude multiplier at full boost.
+    #[serde(default = "default_director_finger_boost_mul")]
+    pub director_finger_boost_mul: f32,
+    /// Toe fidget amplitude multiplier at full boost.
+    #[serde(default = "default_director_toe_boost_mul")]
+    pub director_toe_boost_mul: f32,
+    /// Allow faint auto-retiring micro-expression layers on expressive beats.
+    #[serde(default = "default_director_micro_expressions")]
+    pub director_micro_expressions: bool,
 }
 
 impl Default for PoseControllerSettings {
@@ -1256,12 +1279,37 @@ impl Default for PoseControllerSettings {
             idle_category: String::new(),
             default_transition_seconds: default_transition_seconds(),
             default_blend_weight: default_blend_weight(),
-            blend_transitions_enabled: false,
+            blend_transitions_enabled: true,
             auto_stop_idle_vrma: default_auto_stop_idle_vrma(),
             director_enabled: default_director_enabled(),
             director_expressive_preset_match: default_expressive_preset_match(),
+            director_expressive_prob: default_director_expressive_prob(),
+            director_gaze_prob: default_director_gaze_prob(),
+            director_boost_ramp_secs: default_director_boost_ramp_secs(),
+            director_finger_boost_mul: default_director_finger_boost_mul(),
+            director_toe_boost_mul: default_director_toe_boost_mul(),
+            director_micro_expressions: default_director_micro_expressions(),
         }
     }
+}
+
+fn default_director_expressive_prob() -> f32 {
+    0.35
+}
+fn default_director_gaze_prob() -> f32 {
+    0.25
+}
+fn default_director_boost_ramp_secs() -> f32 {
+    1.0
+}
+fn default_director_finger_boost_mul() -> f32 {
+    1.9
+}
+fn default_director_toe_boost_mul() -> f32 {
+    1.0
+}
+fn default_director_micro_expressions() -> bool {
+    true
 }
 
 fn default_director_enabled() -> bool {
@@ -1269,12 +1317,7 @@ fn default_director_enabled() -> bool {
 }
 
 fn default_expressive_preset_match() -> Vec<String> {
-    vec![
-        "toe".to_string(),
-        "curl".to_string(),
-        "foot".to_string(),
-        "feet".to_string(),
-    ]
+    Vec::new()
 }
 
 fn default_idle_interval_min() -> f32 {
@@ -1464,6 +1507,39 @@ impl Settings {
         Config::builder()
             .add_source(File::with_name(DEFAULT_CONFIG_STEM))
             .add_source(File::with_name(USER_CONFIG_STEM).required(false))
+            .add_source(
+                Environment::with_prefix("JARVIS")
+                    .try_parsing(true)
+                    .separator("__"),
+            )
+            .build()?
+            .try_deserialize()
+    }
+
+    /// Load from in-memory TOML, then apply `JARVIS__*` env vars on top. Android has no
+    /// repo-relative `config/` directory: `default.toml` is compiled into the APK and the
+    /// device overlay is read from app-internal storage.
+    pub fn load_from_str(
+        default_toml: &str,
+        user_toml: Option<&str>,
+    ) -> Result<Self, config::ConfigError> {
+        Self::load_layered(default_toml, user_toml.as_slice())
+    }
+
+    /// [`Self::load_from_str`] with several overlays, each overriding the last.
+    ///
+    /// Android uses two: the overlay bundled in the APK (tuning, credentials
+    /// blanked) and one pushed to external storage (credentials only).
+    pub fn load_layered(
+        default_toml: &str,
+        overlays: &[&str],
+    ) -> Result<Self, config::ConfigError> {
+        let mut builder =
+            Config::builder().add_source(File::from_str(default_toml, config::FileFormat::Toml));
+        for overlay in overlays {
+            builder = builder.add_source(File::from_str(overlay, config::FileFormat::Toml));
+        }
+        builder
             .add_source(
                 Environment::with_prefix("JARVIS")
                     .try_parsing(true)

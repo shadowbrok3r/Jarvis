@@ -12,9 +12,9 @@ use std::time::Duration;
 use bevy::prelude::*;
 use parking_lot::RwLock;
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::paths::expand_home;
-use jarvis_avatar::pose_library::{AnimationMeta, PoseFile, PoseLibrary};
+use crate::config::Settings;
+use crate::paths::expand_home;
+use crate::pose_library::{AnimationMeta, PoseFile, PoseLibrary};
 
 pub struct PoseLibraryAssetsPlugin;
 

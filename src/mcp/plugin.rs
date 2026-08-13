@@ -28,15 +28,15 @@ use rmcp::transport::streamable_http_server::{
 use tokio::net::TcpListener;
 use tokio::runtime::Builder;
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::paths::expand_home;
-use jarvis_avatar::pose_library::PoseLibrary;
+use crate::config::Settings;
+use crate::paths::expand_home;
+use crate::pose_library::PoseLibrary;
 
 use super::intent_calibration_wizard::IntentCalibrationWizardSession;
 use super::{build_a2f_client, JarvisMcpServer, KimodoDefaults};
 use super::semantic_intent_calibration::SemanticIntentCalibrationStore;
 use crate::plugins::anim_layer_sets::LayerSetsStore;
-use crate::plugins::anim_layers::LayerStackHandle;
+use crate::plugins::anim_layers::{GlitchLogHandle, LayerStackHandle};
 use crate::plugins::channel_server::HubBroadcast;
 use crate::plugins::intent_calibration::{
     IntentCalibrationWizardHandle, SemanticIntentCalibrationHandle, SemanticIntentModelPath,
@@ -72,6 +72,7 @@ fn start_mcp_server(
     layer_stack: Option<Res<LayerStackHandle>>,
     layer_sets: Option<Res<LayerSetsStore>>,
     pose_review: Option<Res<PoseReviewHandle>>,
+    glitch_log: Option<Res<GlitchLogHandle>>,
 ) {
     if !settings.mcp.enabled {
         info!("mcp: disabled in config, not starting");
@@ -137,6 +138,7 @@ fn start_mcp_server(
     let pose_review_val = pose_review
         .map(|r| (*r).clone())
         .unwrap_or_default();
+    let glitch_log_val = glitch_log.map(|g| (*g).clone()).unwrap_or_default();
 
     let semantic_model_path = intent_model_path
         .map(|r| r.0.clone())
@@ -185,6 +187,7 @@ fn start_mcp_server(
                 semantic_calibration,
                 intent_calibration_wizard,
                 pose_review_val,
+                glitch_log_val,
             );
             rt.block_on(async move {
                 let mut tasks = Vec::new();

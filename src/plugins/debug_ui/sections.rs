@@ -8,12 +8,12 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::egui;
 
-use jarvis_avatar::act::Emotion;
-use jarvis_avatar::avatar_defaults::{avatar_defaults_path, load_avatar_defaults};
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::icons;
-use jarvis_avatar::model_catalog::{list_vrm_models, models_dir, resolve_vrm_load_argument};
-use jarvis_avatar::theme;
+use crate::act::Emotion;
+use crate::avatar_defaults::{avatar_defaults_path, load_avatar_defaults};
+use crate::config::Settings;
+use crate::icons;
+use crate::model_catalog::{list_vrm_models, models_dir, resolve_vrm_load_argument};
+use crate::theme;
 
 use super::widgets::{rgb_row, rgba_row, vec3_row};
 use super::{AvatarVrmPickerState, DebugUiState};

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+  <!-- Adaptive-icon foreground: art stays inside the central 72dp safe zone (18..90). -->
+  <defs>
+    <linearGradient id="stroke" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#00E5FF"/>
+      <stop offset="55%" stop-color="#5FC8FF"/>
+      <stop offset="100%" stop-color="#B366FF"/>
+    </linearGradient>
+    <linearGradient id="halo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00E5FF"/>
+      <stop offset="100%" stop-color="#FF40C8"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Orbit halo: open arc, gap at lower right. -->
+  <circle cx="54" cy="54" r="30" fill="none" stroke="url(#halo)" stroke-width="3.5"
+          stroke-linecap="round" opacity="0.55"
+          stroke-dasharray="132 56" transform="rotate(128 54 54)"/>
+
+  <!-- J monogram. -->
+  <g filter="url(#glow)" fill="none" stroke="url(#stroke)" stroke-width="9"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 44 34 L 66 34"/>
+    <path d="M 60 34 L 60 60 C 60 71 51 76 43 71"/>
+  </g>
+</svg>

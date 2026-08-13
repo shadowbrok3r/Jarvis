@@ -25,10 +25,10 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use crossbeam_channel::{Sender, unbounded};
 
-use jarvis_avatar::act::emotion_labels;
-use jarvis_avatar::config::{ChatBackend, Settings};
-use jarvis_avatar::zeroclaw::client::{ClientIdentity, ZeroClawClient};
-use jarvis_avatar::zeroclaw::types::MemoryWriteRequest;
+use crate::act::emotion_labels;
+use crate::config::{ChatBackend, Settings};
+use crate::zeroclaw::client::{ClientIdentity, ZeroClawClient};
+use crate::zeroclaw::types::MemoryWriteRequest;
 
 use super::channel_server::{ChatCompleteMessage, LookAtRequestMessage};
 use super::pose_capture::{
@@ -348,7 +348,7 @@ fn process_pose_capture_replies(
         let Ok(bytes) = std::fs::read(&image.path) else {
             continue;
         };
-        let img = jarvis_avatar::ironclaw::types::ImageData {
+        let img = crate::ironclaw::types::ImageData {
             media_type: "image/png".to_string(),
             data: base64_encode(&bytes),
         };

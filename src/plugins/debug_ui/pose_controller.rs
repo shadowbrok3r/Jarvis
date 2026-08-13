@@ -14,7 +14,7 @@
 //!     [`PoseCommand::SetExpression`].
 //!
 //! Everything reads / writes [`PoseLibraryAssets`] (the cached wrapper around
-//! [`jarvis_avatar::pose_library::PoseLibrary`]); disk mutations bubble the
+//! [`crate::pose_library::PoseLibrary`]); disk mutations bubble the
 //! refresh cache automatically.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -27,10 +27,10 @@ use bevy_egui::egui::Layout;
 use bevy_egui::{EguiContexts, egui};
 use bevy_vrm1::prelude::*;
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::icons;
-use jarvis_avatar::pose_library::{AnimationMeta, PoseFile};
-use jarvis_avatar::theme;
+use crate::config::Settings;
+use crate::icons;
+use crate::pose_library::{AnimationMeta, PoseFile};
+use crate::theme;
 
 use crate::mcp::pose_authoring::{bone_map_from_euler_deg, sanitize_bone_map, BoneEulerDeg};
 use crate::mcp::pose_intents::{
@@ -81,6 +81,8 @@ pub struct BonesPanelData<'w> {
     pub indexed: Option<Res<'w, IndexedBones>>,
     pub influence: Option<Res<'w, BoneInfluence>>,
     pub material_vis: Option<Res<'w, MaterialVisibilityStore>>,
+    pub director_state: Option<ResMut<'w, crate::plugins::alive_director::DirectorState>>,
+    pub director_status: Option<Res<'w, crate::plugins::alive_director::DirectorStatus>>,
 }
 
 /// Visual groupings for the manual Bones tab. Order matters — the UI renders
@@ -176,9 +178,8 @@ fn def_bone_category_key(name: &str) -> Option<String> {
     (!cat.is_empty()).then(|| cat.to_string())
 }
 
-/// Semantic group for a non-humanoid, non-DEF extra bone (Implacable names its
-/// extras `hair_*`, `skirt_*`, `waistBelt_*`, `toe_*`, …). First substring match
-/// wins; order puts specific names ahead of generic ones.
+/// Semantic group for a non-humanoid, non-DEF extra bone (`hair_*`, `skirt_*`,
+/// `waistBelt_*`, `toe_*`, …). First substring match wins.
 fn extra_bone_category(name: &str) -> &'static str {
     let l = name.to_ascii_lowercase();
     const TABLE: &[(&str, &str)] = &[
@@ -348,7 +349,7 @@ pub struct PoseControllerUiState {
     /// tips). Off by default — those are hidden to declutter the extra-bone list.
     pub bones_show_non_deforming: bool,
     /// Bones tab: hide bones whose influenced meshes are all currently hidden
-    /// (e.g. `waistBelt_front_03` once its material is hidden). On by default.
+    /// (e.g. a belt bone once its material is hidden). On by default.
     pub bones_hide_hidden_mesh: bool,
     /// Last `expression_presets` list from the live VRM; when it changes, [`Self::expression_sliders`]
     /// is rebuilt (weights preserved for names that still exist).
@@ -538,7 +539,7 @@ pub fn draw_pose_controller_window(
     kimodo_client: Option<Res<KimodoClientRes>>,
     tokio_rt: Option<Res<SharedTokio>>,
     snapshot: Option<Res<crate::plugins::pose_driver::BoneSnapshotHandle>>,
-    bones_data: BonesPanelData,
+    mut bones_data: BonesPanelData,
     intent_cal: Option<Res<SemanticIntentCalibrationHandle>>,
     intent_wizard: Option<Res<IntentCalibrationWizardHandle>>,
     undo: Res<UndoHistory>,
@@ -679,6 +680,10 @@ pub fn draw_pose_controller_window(
                     Some(&*undo),
                     &mut pending_side_changes,
                     &layer_ctx,
+                    (
+                        bones_data.director_state.as_mut().map(|r| &mut **r),
+                        bones_data.director_status.as_deref(),
+                    ),
                 );
             });
         pending_panel_height = Some(resp.response.rect.height());
@@ -712,6 +717,10 @@ pub fn draw_pose_controller_window(
                     Some(&*undo),
                     &mut pending_side_changes,
                     &layer_ctx,
+                    (
+                        bones_data.director_state.as_mut().map(|r| &mut **r),
+                        bones_data.director_status.as_deref(),
+                    ),
                 );
             });
         pending_panel_width = Some(resp.response.rect.width());
@@ -745,6 +754,10 @@ pub fn draw_pose_controller_window(
                     Some(&*undo),
                     &mut pending_side_changes,
                     &layer_ctx,
+                    (
+                        bones_data.director_state.as_mut().map(|r| &mut **r),
+                        bones_data.director_status.as_deref(),
+                    ),
                 );
             });
         // `pending_panel_width` only tracks the most recently rendered side
@@ -787,6 +800,10 @@ pub fn draw_pose_controller_window(
                         intent_wizard.as_deref(),
                         Some(&*undo),
                         &layer_ctx,
+                        (
+                            bones_data.director_state.as_mut().map(|r| &mut **r),
+                            bones_data.director_status.as_deref(),
+                        ),
                     );
                 });
             if !keep_open {
@@ -863,6 +880,10 @@ fn render_side_panel(
     undo: Option<&UndoHistory>,
     pending_side_changes: &mut Vec<(PoseControllerTab, &'static str)>,
     layer_ctx: &AnimationTabLayerContext<'_>,
+    director: (
+        Option<&mut crate::plugins::alive_director::DirectorState>,
+        Option<&crate::plugins::alive_director::DirectorStatus>,
+    ),
 ) {
     if tabs.is_empty() {
         ui.label(egui::RichText::new("(no tabs assigned to this panel)").italics());
@@ -914,6 +935,7 @@ fn render_side_panel(
         intent_wizard,
         undo,
         layer_ctx,
+        director,
     );
 
     egui::Panel::bottom(format!("pose_controller_{side}_status_strip")).show(
@@ -1044,6 +1066,10 @@ fn render_tab_body(
     intent_wizard: Option<&IntentCalibrationWizardHandle>,
     undo: Option<&UndoHistory>,
     layer_ctx: &AnimationTabLayerContext<'_>,
+    director: (
+        Option<&mut crate::plugins::alive_director::DirectorState>,
+        Option<&crate::plugins::alive_director::DirectorStatus>,
+    ),
 ) {
     match tab {
         PoseControllerTab::Library => library_tab(ui, pc, library, sender, snapshot, undo),
@@ -1058,6 +1084,7 @@ fn render_tab_body(
             &mut settings.pose_controller,
             &mut settings.ui.show_anim_layers,
             layer_ctx,
+            director,
         ),
         PoseControllerTab::Bones => bones_with_expressions_tab(
             ui,
@@ -1194,7 +1221,7 @@ pub(super) fn transport_toolbar(
     commands: &mut Commands,
     vrma_entities: &[Entity],
     players_q: &mut Query<&mut AnimationPlayer>,
-    pose_settings: &mut jarvis_avatar::config::PoseControllerSettings,
+    pose_settings: &mut crate::config::PoseControllerSettings,
     snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
     undo: Option<&UndoHistory>,
 ) {
@@ -1341,7 +1368,7 @@ fn library_tab(
                     .map(|(k, v)| {
                         (
                             k.clone(),
-                            jarvis_avatar::pose_library::BoneRotation {
+                            crate::pose_library::BoneRotation {
                                 rotation: v.rotation,
                             },
                         )
@@ -1673,9 +1700,13 @@ fn animation_tab(
     active_anim: &mut ResMut<ActiveNativeAnimation>,
     kimodo: Option<&KimodoClientRes>,
     tokio_rt: Option<&SharedTokio>,
-    pose_settings: &mut jarvis_avatar::config::PoseControllerSettings,
+    pose_settings: &mut crate::config::PoseControllerSettings,
     show_anim_layers: &mut bool,
     layer_ctx: &AnimationTabLayerContext<'_>,
+    director: (
+        Option<&mut crate::plugins::alive_director::DirectorState>,
+        Option<&crate::plugins::alive_director::DirectorStatus>,
+    ),
 ) {
     let cats = collect_animation_categories(library);
 
@@ -1709,6 +1740,9 @@ fn animation_tab(
         });
         egui::CollapsingHeader::new("Idle").show(ui, |ui| {
             idle_panel(ui, pose_settings);
+        });
+        egui::CollapsingHeader::new("Director").show(ui, |ui| {
+            director_panel(ui, pose_settings, director);
         });
     });
 
@@ -2183,7 +2217,7 @@ fn ai_gen_panel(
 
 fn idle_panel(
     ui: &mut egui::Ui,
-    settings: &mut jarvis_avatar::config::PoseControllerSettings,
+    settings: &mut crate::config::PoseControllerSettings,
 ) {
     ui.label(egui::RichText::new("Idle loop").strong());
     ui.checkbox(&mut settings.idle_enabled, "Enable local idle loop");
@@ -2224,6 +2258,63 @@ fn idle_panel(
     });
 }
 
+fn director_panel(
+    ui: &mut egui::Ui,
+    settings: &mut crate::config::PoseControllerSettings,
+    director: (
+        Option<&mut crate::plugins::alive_director::DirectorState>,
+        Option<&crate::plugins::alive_director::DirectorStatus>,
+    ),
+) {
+    let (state, status) = director;
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut settings.director_enabled, "Enabled")
+            .on_hover_text("Presence-aware autonomous idle episodes (poses, gestures, gaze).");
+        if let Some(st) = status {
+            let flags = format!(
+                "{}{}",
+                if st.attentive { " · attentive" } else { "" },
+                if st.speaking { " · speaking" } else { "" },
+            );
+            ui.label(
+                egui::RichText::new(format!(
+                    "next {:.0}s · {}{}",
+                    st.next_pick_in, st.last_episode, flags
+                ))
+                .small()
+                .color(theme::weak_text(ui)),
+            );
+        }
+        if let Some(state) = state {
+            if ui
+                .small_button("Fire now")
+                .on_hover_text("Trigger the next episode immediately")
+                .clicked()
+            {
+                state.next_pick_in = Some(std::time::Duration::ZERO);
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("expressive p");
+        ui.add(egui::Slider::new(&mut settings.director_expressive_prob, 0.0..=0.9).step_by(0.05));
+        ui.label("gaze p");
+        ui.add(egui::Slider::new(&mut settings.director_gaze_prob, 0.0..=0.9).step_by(0.05));
+    });
+    ui.horizontal(|ui| {
+        ui.label("boost ramp (s)");
+        ui.add(egui::Slider::new(&mut settings.director_boost_ramp_secs, 0.1..=3.0).step_by(0.1));
+        ui.checkbox(&mut settings.director_micro_expressions, "micro-expr")
+            .on_hover_text("Faint auto-retiring face flickers on expressive beats.");
+    });
+    ui.horizontal(|ui| {
+        ui.label("finger boost ×");
+        ui.add(egui::Slider::new(&mut settings.director_finger_boost_mul, 1.0..=4.0).step_by(0.1));
+        ui.label("toe ×");
+        ui.add(egui::Slider::new(&mut settings.director_toe_boost_mul, 1.0..=4.0).step_by(0.1));
+    });
+}
+
 // ---------- Expressions panel (right side of Bones workspace) -----------------
 
 fn send_expression_set(
@@ -2249,7 +2340,7 @@ fn expressions_panel(
     state: &mut PoseControllerUiState,
     sender: Option<&PoseCommandSender>,
     snapshot: Option<&crate::plugins::pose_driver::BoneSnapshotHandle>,
-    pose_settings: &jarvis_avatar::config::PoseControllerSettings,
+    pose_settings: &crate::config::PoseControllerSettings,
 ) {
     ui.label(egui::RichText::new("VRM expression presets").strong())
         .on_hover_text(format!(

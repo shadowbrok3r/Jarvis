@@ -1,0 +1,21 @@
+--- vendor/bevy_vrm1/src/vrm/mtoon/outline_pass.rs
++++ vendor/bevy_vrm1/src/vrm/mtoon/outline_pass.rs
+@@ -192,14 +192,10 @@
+                 .material_key
+                 .to_key::<MToonMaterialKey>();
+ 
+-            // Skip outline for double-sided meshes (cull_mode: None).
+-            // The inverted-hull outline technique assumes back-faces are invisible
+-            // in the main pass; on double-sided meshes the inflated back-faces
+-            // overwrite correctly-rendered pixels with the outline color.
+-            if !mtoon_key.intersects(MToonMaterialKey::CULL_FRONT | MToonMaterialKey::CULL_BACK) {
+-                continue;
+-            }
+-
++            // LOCAL PATCH (see patches/bevy_vrm1-0.9.0-outline-doublesided.patch):
++            // upstream skips cull_mode:None materials here. The hull stays back-faces
++            // only regardless, because outline_pass/pipeline.rs sets cull_mode Front
++            // after specialize. Per-material opt-in still gates on outline.mode.
+             let outline_key = OutlinePipelineKey {
+                 mesh_key,
+                 bind_group_data: mtoon_key,

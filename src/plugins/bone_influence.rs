@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use serde::Deserialize;
 
-use jarvis_avatar::avatar_defaults::vrm_model_overrides_dir;
-use jarvis_avatar::config::Settings;
+use crate::avatar_defaults::vrm_model_overrides_dir;
+use crate::config::Settings;
 
 pub struct BoneInfluencePlugin;
 

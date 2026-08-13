@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::Initialized;
 
-use jarvis_avatar::avatar_defaults::{
+use crate::avatar_defaults::{
     AvatarDefaultsFile, avatar_defaults_path, load_avatar_defaults, save_avatar_defaults,
 };
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::pose_library::PoseFile;
+use crate::config::Settings;
+use crate::pose_library::PoseFile;
 
 use super::anim_layer_sets::LayerSetsStore;
 use super::anim_layers::LayerStackHandle;
@@ -121,7 +121,7 @@ pub fn apply_avatar_defaults_now(
     }
 
     if let Some(ref set_name) = defaults.layer_set {
-        let n = stack.with_write(|s| layer_sets.load_into(set_name, s, &library.library))?;
+        let n = stack.with_write(|s| layer_sets.load_into(set_name, s, &library.library, true))?;
         parts.push(format!("layer set '{set_name}' ({n} layers)"));
     } else if defaults.idle_use_layer_stack {
         if let Some(ref clip) = defaults.idle_clip {
@@ -161,7 +161,7 @@ fn apply_pose_file(pose_tx: &PoseCommandSender, pose: &PoseFile) {
 
 pub fn install_idle_clip_layer(
     stack: &LayerStackHandle,
-    library: &jarvis_avatar::pose_library::PoseLibrary,
+    library: &crate::pose_library::PoseLibrary,
     filename: &str,
     looping: bool,
 ) -> Result<(), String> {

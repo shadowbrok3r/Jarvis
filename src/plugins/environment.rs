@@ -3,7 +3,7 @@
 use bevy::light::GlobalAmbientLight;
 use bevy::prelude::*;
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 pub struct EnvironmentPlugin;
 

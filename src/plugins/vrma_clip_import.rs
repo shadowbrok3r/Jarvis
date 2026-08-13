@@ -11,9 +11,9 @@ use bevy_vrm1::prelude::{
     ChildSearcher, Initialized, PlayVrma, Vrm, Vrma, VrmaDuration, VrmaPath,
 };
 
-use jarvis_avatar::avatar_defaults::{AvatarDefaultsFile, save_avatar_defaults};
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::pose_library::{AnimationFile, AnimationFrame, BoneRotation, slugify};
+use crate::avatar_defaults::{AvatarDefaultsFile, save_avatar_defaults};
+use crate::config::Settings;
+use crate::pose_library::{AnimationFile, AnimationFrame, BoneRotation, slugify};
 
 use super::anim_layers::{install_animation_per_bone_layers, LayerStackHandle};
 use super::avatar_defaults::{install_idle_clip_layer, snapshot_expressions, AvatarDefaultsStatus};

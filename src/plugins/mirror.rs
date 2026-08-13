@@ -326,7 +326,7 @@ impl MirrorChain {
     }
 
     pub fn menu_label(self) -> String {
-        let arrow = jarvis_avatar::icons::ARROW_RIGHT;
+        let arrow = crate::icons::ARROW_RIGHT;
         match self {
             MirrorChain::LeftArm => format!("Left arm {arrow} Right"),
             MirrorChain::RightArm => format!("Right arm {arrow} Left"),

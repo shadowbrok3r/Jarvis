@@ -22,7 +22,7 @@ where
     }
 }
 
-use jarvis_avatar::pose_library::PoseLibrary;
+use crate::pose_library::PoseLibrary;
 
 use crate::plugins::anim_layer_sets::LayerSetsStore;
 use crate::plugins::anim_layers::{BlendMode, DriverKind, Layer, LayerStack};
@@ -47,6 +47,10 @@ pub enum LayerDriverSpec {
         pitch_deg: Option<f32>,
         #[serde(default)]
         roll_deg: Option<f32>,
+        #[serde(default)]
+        shoulder_deg: Option<f32>,
+        #[serde(default)]
+        rate_jitter: Option<f32>,
     },
     Blink {
         #[serde(default)]
@@ -61,6 +65,10 @@ pub enum LayerDriverSpec {
         hip_roll_deg: Option<f32>,
         #[serde(default)]
         spine_counter_deg: Option<f32>,
+        #[serde(default)]
+        dwell_min: Option<f32>,
+        #[serde(default)]
+        dwell_max: Option<f32>,
     },
     FingerFidget {
         #[serde(default)]
@@ -236,6 +244,14 @@ pub struct DriverParamsPatch {
     pub hip_sway_deg: Option<f32>,
     #[serde(default)]
     pub ankle_deg: Option<f32>,
+    #[serde(default)]
+    pub shoulder_deg: Option<f32>,
+    #[serde(default)]
+    pub rate_jitter: Option<f32>,
+    #[serde(default)]
+    pub dwell_min: Option<f32>,
+    #[serde(default)]
+    pub dwell_max: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -354,14 +370,25 @@ fn driver_from_spec(library: &PoseLibrary, spec: &LayerDriverSpec) -> Result<Dri
             rate_hz,
             pitch_deg,
             roll_deg,
+            shoulder_deg,
+            rate_jitter,
         } => {
             let mut d = DriverKind::breathing_default();
             if let DriverKind::Breathing {
                 rate_hz: r,
                 pitch_deg: p,
                 roll_deg: rr,
+                shoulder_deg: sh,
+                rate_jitter: rj,
+                ..
             } = &mut d
             {
+                if let Some(x) = shoulder_deg {
+                    *sh = *x;
+                }
+                if let Some(x) = rate_jitter {
+                    *rj = x.clamp(0.0, 0.5);
+                }
                 if let Some(x) = rate_hz {
                     *r = *x;
                 }
@@ -398,14 +425,25 @@ fn driver_from_spec(library: &PoseLibrary, spec: &LayerDriverSpec) -> Result<Dri
             rate_hz,
             hip_roll_deg,
             spine_counter_deg,
+            dwell_min,
+            dwell_max,
         } => {
             let mut d = DriverKind::weight_shift_default();
             if let DriverKind::WeightShift {
                 rate_hz: r,
                 hip_roll_deg: h,
                 spine_counter_deg: s,
+                dwell_min: dmin,
+                dwell_max: dmax,
+                ..
             } = &mut d
             {
+                if let Some(x) = dwell_min {
+                    *dmin = x.max(1.0);
+                }
+                if let Some(x) = dwell_max {
+                    *dmax = x.max(2.0);
+                }
                 if let Some(x) = rate_hz {
                     *r = *x;
                 }
@@ -501,13 +539,13 @@ fn driver_from_spec(library: &PoseLibrary, spec: &LayerDriverSpec) -> Result<Dri
 fn load_animation_loose(
     library: &PoseLibrary,
     needle: &str,
-) -> Result<jarvis_avatar::pose_library::AnimationFile, jarvis_avatar::pose_library::LibraryError>
+) -> Result<crate::pose_library::AnimationFile, crate::pose_library::LibraryError>
 {
     let metas = library.list_animations()?;
     let hit = metas
         .iter()
         .find(|m| m.name == needle || m.filename == needle)
-        .ok_or_else(|| jarvis_avatar::pose_library::LibraryError::NotFound(needle.to_string()))?;
+        .ok_or_else(|| crate::pose_library::LibraryError::NotFound(needle.to_string()))?;
     library.load_animation(&hit.filename)
 }
 
@@ -606,7 +644,11 @@ pub fn apply_driver_patch(d: &mut DriverKind, p: &DriverParamsPatch) -> Result<(
         || p.shift_deg.is_some()
         || p.knee_bend_deg.is_some()
         || p.hip_sway_deg.is_some()
-        || p.ankle_deg.is_some();
+        || p.ankle_deg.is_some()
+        || p.shoulder_deg.is_some()
+        || p.rate_jitter.is_some()
+        || p.dwell_min.is_some()
+        || p.dwell_max.is_some();
     if !any {
         return Ok(());
     }
@@ -621,6 +663,9 @@ pub fn apply_driver_patch(d: &mut DriverKind, p: &DriverParamsPatch) -> Result<(
             rate_hz,
             pitch_deg,
             roll_deg,
+            shoulder_deg,
+            rate_jitter,
+            ..
         } => {
             if let Some(x) = p.rate_hz {
                 *rate_hz = x;
@@ -630,6 +675,12 @@ pub fn apply_driver_patch(d: &mut DriverKind, p: &DriverParamsPatch) -> Result<(
             }
             if let Some(x) = p.roll_deg {
                 *roll_deg = x;
+            }
+            if let Some(x) = p.shoulder_deg {
+                *shoulder_deg = x;
+            }
+            if let Some(x) = p.rate_jitter {
+                *rate_jitter = x.clamp(0.0, 0.5);
             }
             Ok(())
         }
@@ -650,6 +701,9 @@ pub fn apply_driver_patch(d: &mut DriverKind, p: &DriverParamsPatch) -> Result<(
             rate_hz,
             hip_roll_deg,
             spine_counter_deg,
+            dwell_min,
+            dwell_max,
+            ..
         } => {
             if let Some(x) = p.rate_hz {
                 *rate_hz = x;
@@ -659,6 +713,12 @@ pub fn apply_driver_patch(d: &mut DriverKind, p: &DriverParamsPatch) -> Result<(
             }
             if let Some(x) = p.spine_counter_deg {
                 *spine_counter_deg = x;
+            }
+            if let Some(x) = p.dwell_min {
+                *dwell_min = x.max(1.0);
+            }
+            if let Some(x) = p.dwell_max {
+                *dwell_max = x.max(2.0);
             }
             Ok(())
         }
@@ -831,11 +891,16 @@ fn driver_to_json(d: &DriverKind) -> Value {
             rate_hz,
             pitch_deg,
             roll_deg,
+            shoulder_deg,
+            rate_jitter,
+            ..
         } => json!({
             "kind": "breathing",
             "rateHz": rate_hz,
             "pitchDeg": pitch_deg,
             "rollDeg": roll_deg,
+            "shoulderDeg": shoulder_deg,
+            "rateJitter": rate_jitter,
         }),
         DriverKind::Blink {
             mean_interval,
@@ -850,11 +915,16 @@ fn driver_to_json(d: &DriverKind) -> Value {
             rate_hz,
             hip_roll_deg,
             spine_counter_deg,
+            dwell_min,
+            dwell_max,
+            ..
         } => json!({
             "kind": "weight_shift",
             "rateHz": rate_hz,
             "hipRollDeg": hip_roll_deg,
             "spineCounterDeg": spine_counter_deg,
+            "dwellMin": dwell_min,
+            "dwellMax": dwell_max,
         }),
         DriverKind::FingerFidget {
             amplitude_deg,
@@ -996,7 +1066,7 @@ pub fn load_layer_set_named(
     library: &PoseLibrary,
     name: &str,
 ) -> Result<usize, String> {
-    store.load_into(name, stack, library)
+    store.load_into(name, stack, library, true)
 }
 
 pub fn delete_layer_set_named(store: &LayerSetsStore, name: &str, persist: bool) {

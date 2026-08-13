@@ -17,7 +17,7 @@ use bevy_vrm1::prelude::{MToonMaterial, MToonOutline, OutlineWidthMode, RimLight
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 // ── Per-VRM ModelOverrides directory helpers ────────────────────────────────────────────────────
 

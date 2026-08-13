@@ -1,5 +1,5 @@
 [ironclaw]
-# We HOST the IronClaw-style channel hub. server.mjs, ironclaw-proxy, etc. connect to
+# This process hosts the IronClaw-style channel hub. server.mjs, ironclaw-proxy, etc. connect to
 # ws://<this-host>:6121/ws. HTTP POST to http://<this-host>:6121/broadcast to fan-out
 # envelopes from out-of-band publishers (e.g. the ironclaw-proxy pushing chat completions).
 bind_address = "0.0.0.0:6121"
@@ -103,7 +103,7 @@ lock_vrm_root_y = true
 # Default off — export tuning from the Rig editor first, then enable for hands-free reloads.
 auto_load_spring_preset = false
 # When true, idle motion uses the layer-stack clip from avatar_defaults instead of VRMA autoplay.
-idle_use_layer_stack = false
+idle_use_layer_stack = true
 # Apply config/ModelOverrides/{stem}/avatar_defaults.json after the rig is ready.
 auto_apply_avatar_defaults = true
 background_color = [0.05, 0.05, 0.08, 1.0]
@@ -237,14 +237,24 @@ composite_mode = "energy_conserving"
 idle_enabled = false
 idle_interval_min_sec = 8.0
 idle_interval_max_sec = 18.0
-idle_category = ""
+# Restrict autonomous idle picks to this clip/pose category ("" = all).
+idle_category = "idle"
 default_transition_seconds = 0.35
 default_blend_weight = 1.0
-# Off by default so existing scripts that rely on instant-set behaviour don't change.
-blend_transitions_enabled = false
+# Honour per-command transition_seconds / blend_weight (eased pose applies).
+blend_transitions_enabled = true
 # Stop every VRMA animation player whenever a manual pose / expression command
 # lands, so the idle animation doesn't overwrite our writes.
 auto_stop_idle_vrma = true
+# Alive director: presence-aware autonomous idle episodes.
+director_enabled = true
+director_expressive_preset_match = []
+director_expressive_prob = 0.35
+director_gaze_prob = 0.25
+director_boost_ramp_secs = 1.0
+director_finger_boost_mul = 1.9
+director_toe_boost_mul = 1.0
+director_micro_expressions = true
 
 [light_rig]
 enabled = true

@@ -26,9 +26,9 @@ use bevy::prelude::*;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::paths::expand_home;
-use jarvis_avatar::pose_library::{AnimationMeta, PoseLibrary, slugify};
+use crate::config::Settings;
+use crate::paths::expand_home;
+use crate::pose_library::{AnimationMeta, PoseLibrary, slugify};
 
 use super::anim_layers::{BlendMode, BoneMask, DriverKind, Layer, LayerStack};
 
@@ -75,6 +75,7 @@ impl LayerSetsStore {
         name: &str,
         stack: &mut LayerStack,
         library: &PoseLibrary,
+        crossfade: bool,
     ) -> Result<usize, String> {
         let set = {
             let guard = self.inner.read();
@@ -84,7 +85,7 @@ impl LayerSetsStore {
                 .cloned()
                 .ok_or_else(|| format!("set '{name}' not found"))?
         };
-        let rehydrated = set.hydrate_into_stack(stack, library);
+        let rehydrated = set.hydrate_into_stack(stack, library, crossfade);
         Ok(rehydrated)
     }
 
@@ -203,10 +204,25 @@ impl LayerSet {
         }
     }
 
-    /// Clear the target stack and rebuild it from this set. Returns the
-    /// number of layers successfully rehydrated.
-    pub fn hydrate_into_stack(&self, stack: &mut LayerStack, library: &PoseLibrary) -> usize {
-        stack.layers.clear();
+    /// Rebuild the target stack from this set. With `crossfade`, existing
+    /// layers retire (fade out and sweep) while the new set fades in — a
+    /// runtime set swap morphs instead of cutting. Without it (boot), the
+    /// stack is cleared and layers install at full gain. Returns the number
+    /// of layers successfully rehydrated.
+    pub fn hydrate_into_stack(
+        &self,
+        stack: &mut LayerStack,
+        library: &PoseLibrary,
+        crossfade: bool,
+    ) -> usize {
+        if crossfade {
+            let ids: Vec<u64> = stack.layers.iter().map(|l| l.id).collect();
+            for id in ids {
+                stack.retire_layer(id);
+            }
+        } else {
+            stack.layers.clear();
+        }
         stack.master_enabled = self.master_enabled;
         // Scan the animations dir ONCE up front. Clip layers that don't resolve
         // by filename fall back to a name lookup; doing that per-layer used to
@@ -218,7 +234,11 @@ impl LayerSet {
         for bp in &self.layers {
             match bp.to_layer(library, &anims) {
                 Ok(layer) => {
-                    stack.add_layer(layer);
+                    if crossfade {
+                        stack.add_layer_faded(layer);
+                    } else {
+                        stack.add_layer(layer);
+                    }
                     count += 1;
                 }
                 Err(e) => warn!("skipping layer '{}': {e}", bp.label),
@@ -272,6 +292,18 @@ fn default_loop_fade() -> f32 {
 }
 fn default_thumb_bias() -> f32 {
     8.0
+}
+fn default_shoulder_deg() -> f32 {
+    0.35
+}
+fn default_rate_jitter() -> f32 {
+    0.15
+}
+fn default_dwell_min() -> f32 {
+    6.0
+}
+fn default_dwell_max() -> f32 {
+    14.0
 }
 fn default_leg_shift_seed() -> u64 {
     0xD1B5_4A32_D192_ED03
@@ -331,6 +363,10 @@ impl LayerBlueprint {
             loop_fade: self.loop_fade,
             ping_pong: self.ping_pong,
             gain: if self.enabled { 1.0 } else { 0.0 },
+            removing: false,
+            fade_in_secs: 0.35,
+            fade_out_secs: 0.45,
+            auto_retire_after: None,
         })
     }
 }
@@ -358,6 +394,10 @@ pub enum DriverBlueprint {
         rate_hz: f32,
         pitch_deg: f32,
         roll_deg: f32,
+        #[serde(default = "default_shoulder_deg")]
+        shoulder_deg: f32,
+        #[serde(default = "default_rate_jitter")]
+        rate_jitter: f32,
     },
     Blink {
         mean_interval: f32,
@@ -367,6 +407,10 @@ pub enum DriverBlueprint {
         rate_hz: f32,
         hip_roll_deg: f32,
         spine_counter_deg: f32,
+        #[serde(default = "default_dwell_min")]
+        dwell_min: f32,
+        #[serde(default = "default_dwell_max")]
+        dwell_max: f32,
     },
     FingerFidget {
         amplitude_deg: f32,
@@ -430,10 +474,15 @@ impl DriverBlueprint {
                 rate_hz,
                 pitch_deg,
                 roll_deg,
+                shoulder_deg,
+                rate_jitter,
+                ..
             } => Self::Breathing {
                 rate_hz: *rate_hz,
                 pitch_deg: *pitch_deg,
                 roll_deg: *roll_deg,
+                shoulder_deg: *shoulder_deg,
+                rate_jitter: *rate_jitter,
             },
             DriverKind::Blink {
                 mean_interval,
@@ -447,10 +496,15 @@ impl DriverBlueprint {
                 rate_hz,
                 hip_roll_deg,
                 spine_counter_deg,
+                dwell_min,
+                dwell_max,
+                ..
             } => Self::WeightShift {
                 rate_hz: *rate_hz,
                 hip_roll_deg: *hip_roll_deg,
                 spine_counter_deg: *spine_counter_deg,
+                dwell_min: *dwell_min,
+                dwell_max: *dwell_max,
             },
             DriverKind::FingerFidget {
                 amplitude_deg,
@@ -548,11 +602,27 @@ impl DriverBlueprint {
                 rate_hz,
                 pitch_deg,
                 roll_deg,
-            } => DriverKind::Breathing {
-                rate_hz: *rate_hz,
-                pitch_deg: *pitch_deg,
-                roll_deg: *roll_deg,
-            },
+                shoulder_deg,
+                rate_jitter,
+            } => {
+                let mut d = DriverKind::breathing_default();
+                if let DriverKind::Breathing {
+                    rate_hz: r,
+                    pitch_deg: pd,
+                    roll_deg: rd,
+                    shoulder_deg: sh,
+                    rate_jitter: rj,
+                    ..
+                } = &mut d
+                {
+                    *r = *rate_hz;
+                    *pd = *pitch_deg;
+                    *rd = *roll_deg;
+                    *sh = *shoulder_deg;
+                    *rj = *rate_jitter;
+                }
+                d
+            }
             Self::Blink {
                 mean_interval,
                 double_blink_chance,
@@ -561,6 +631,8 @@ impl DriverBlueprint {
                     next_in,
                     phase,
                     phase_t,
+                    peak,
+                    hold_secs,
                     ..
                 } = DriverKind::blink_default()
                 else {
@@ -570,6 +642,8 @@ impl DriverBlueprint {
                     next_in,
                     phase,
                     phase_t,
+                    peak,
+                    hold_secs,
                     mean_interval: *mean_interval,
                     double_blink_chance: *double_blink_chance,
                 }
@@ -578,11 +652,27 @@ impl DriverBlueprint {
                 rate_hz,
                 hip_roll_deg,
                 spine_counter_deg,
-            } => DriverKind::WeightShift {
-                rate_hz: *rate_hz,
-                hip_roll_deg: *hip_roll_deg,
-                spine_counter_deg: *spine_counter_deg,
-            },
+                dwell_min,
+                dwell_max,
+            } => {
+                let mut d = DriverKind::weight_shift_default();
+                if let DriverKind::WeightShift {
+                    rate_hz: r,
+                    hip_roll_deg: h,
+                    spine_counter_deg: sc,
+                    dwell_min: dmin,
+                    dwell_max: dmax,
+                    ..
+                } = &mut d
+                {
+                    *r = *rate_hz;
+                    *h = *hip_roll_deg;
+                    *sc = *spine_counter_deg;
+                    *dmin = *dwell_min;
+                    *dmax = *dwell_max;
+                }
+                d
+            }
             Self::FingerFidget {
                 amplitude_deg,
                 frequency_hz,
@@ -619,6 +709,10 @@ impl DriverBlueprint {
                     target_yaw,
                     target_pitch,
                     damp,
+                    ext_yaw,
+                    ext_pitch,
+                    ext_target_yaw,
+                    ext_target_pitch,
                     ..
                 } = DriverKind::look_around_default()
                 else {
@@ -634,6 +728,10 @@ impl DriverBlueprint {
                     target_yaw,
                     target_pitch,
                     damp,
+                    ext_yaw,
+                    ext_pitch,
+                    ext_target_yaw,
+                    ext_target_pitch,
                 }
             }
             Self::Sway {
@@ -673,11 +771,11 @@ fn find_animation_by_name(
     library: &PoseLibrary,
     anims: &[AnimationMeta],
     needle: &str,
-) -> Result<jarvis_avatar::pose_library::AnimationFile, jarvis_avatar::pose_library::LibraryError> {
+) -> Result<crate::pose_library::AnimationFile, crate::pose_library::LibraryError> {
     let hit = anims
         .iter()
         .find(|m| m.name == needle || m.filename == needle)
-        .ok_or_else(|| jarvis_avatar::pose_library::LibraryError::NotFound(needle.to_string()))?;
+        .ok_or_else(|| crate::pose_library::LibraryError::NotFound(needle.to_string()))?;
     library.load_animation(&hit.filename)
 }
 
@@ -732,6 +830,8 @@ fn breathing_bp() -> DriverBlueprint {
         rate_hz: 0.25,
         pitch_deg: 0.6,
         roll_deg: 0.3,
+        shoulder_deg: default_shoulder_deg(),
+        rate_jitter: default_rate_jitter(),
     }
 }
 fn blink_bp() -> DriverBlueprint {
@@ -745,6 +845,8 @@ fn weight_shift_bp() -> DriverBlueprint {
         rate_hz: 0.07,
         hip_roll_deg: 1.5,
         spine_counter_deg: 0.8,
+        dwell_min: default_dwell_min(),
+        dwell_max: default_dwell_max(),
     }
 }
 fn finger_fidget_bp() -> DriverBlueprint {

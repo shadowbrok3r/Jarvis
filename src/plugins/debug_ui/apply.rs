@@ -10,7 +10,7 @@ use bevy::window::PrimaryWindow;
 use bevy_panorbit_camera::PanOrbitCamera;
 use bevy_vrm1::prelude::Vrm;
 
-use jarvis_avatar::config::{Settings, msaa_from_settings, parse_present_mode};
+use crate::config::{Settings, msaa_from_settings, parse_present_mode};
 
 use super::DebugUiState;
 use crate::plugins::environment::{GroundPlane, SunLight};

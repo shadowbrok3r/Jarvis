@@ -3,7 +3,7 @@
 //!
 //! Rendering uses `egui_commonmark` for CommonMark + GFM subset (tables,
 //! tasklists, strikethrough). Attachments piggyback on
-//! [`jarvis_avatar::ironclaw::client::GatewayClient::attach_file`] so they
+//! [`crate::ironclaw::client::GatewayClient::attach_file`] so they
 //! always hit the gateway as canonical `ImageData` regardless of how the user
 //! added them (dialog vs drag-and-drop).
 
@@ -14,11 +14,11 @@ use bevy_egui::egui::{Button, Layout, Panel, Vec2, Widget};
 use bevy_egui::{EguiContexts, egui};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
-use jarvis_avatar::act::strip_act_delay;
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::icons;
-use jarvis_avatar::ironclaw::client::GatewayClient;
-use jarvis_avatar::ironclaw::types::{ImageData, ThreadInfo};
+use crate::act::strip_act_delay;
+use crate::config::Settings;
+use crate::icons;
+use crate::ironclaw::client::GatewayClient;
+use crate::ironclaw::types::{ImageData, ThreadInfo};
 
 use super::DebugUiState;
 use crate::plugins::home_assistant_events::AiriHaEventQueue;
@@ -222,7 +222,7 @@ fn render_thread_row(
 /// change to `user.toml` and surfaces a "restart required" hint so they know
 /// the in-flight worker stays on the previous backend until next launch.
 fn backend_chip(ui: &mut egui::Ui, settings: &mut Settings) {
-    use jarvis_avatar::config::ChatBackend;
+    use crate::config::ChatBackend;
     let current = ChatBackend::parse(&settings.gateway.backend);
     let label = match current {
         ChatBackend::Ironclaw => "Backend: IronClaw",
@@ -724,12 +724,12 @@ fn ingest_dropped_files(ctx: &egui::Context, state: &mut DebugUiState) {
 fn attach_inline_bytes(
     name: &str,
     bytes: &[u8],
-) -> Result<ImageData, jarvis_avatar::ironclaw::client::GatewayError> {
+) -> Result<ImageData, crate::ironclaw::client::GatewayError> {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
 
     let mime = mime_from_name(name).ok_or_else(|| {
-        jarvis_avatar::ironclaw::client::GatewayError::MissingMime(name.to_string())
+        crate::ironclaw::client::GatewayError::MissingMime(name.to_string())
     })?;
     Ok(ImageData {
         media_type: mime.into(),

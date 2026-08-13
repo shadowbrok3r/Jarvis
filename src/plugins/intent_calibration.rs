@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use bevy::prelude::*;
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 use crate::mcp::intent_calibration_wizard::IntentCalibrationWizardSession;
 use crate::mcp::semantic_intent_calibration::SemanticIntentCalibrationStore;

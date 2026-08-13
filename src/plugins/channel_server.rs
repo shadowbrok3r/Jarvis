@@ -48,15 +48,20 @@ use tokio::runtime::Builder;
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
-use jarvis_avatar::act::{should_skip_tts_for_error_like_response, strip_act_delay_for_tts};
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::ironclaw::protocol::EnvelopeBody;
+use crate::act::{should_skip_tts_for_error_like_response, strip_act_delay_for_tts};
+use crate::config::Settings;
+use crate::ironclaw::protocol::EnvelopeBody;
 
 use super::traffic_log::{TrafficChannel, TrafficDirection, TrafficLogSink};
 
 pub struct ChannelHubPlugin;
 
-impl Plugin for ChannelHubPlugin {
+/// The hub's Bevy-facing message types and state, without the axum listener.
+/// `expressions`, `look_at`, and `alive_director` read and write these, so a
+/// platform that is only a hub *client* (Android) still has to register them.
+pub struct HubMessagesPlugin;
+
+impl Plugin for HubMessagesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HubState>()
             .init_resource::<super::chat_pipeline_status::ChatPipelineStatus>()
@@ -64,7 +69,13 @@ impl Plugin for ChannelHubPlugin {
             .add_message::<LookAtRequestMessage>()
             .add_message::<TtsSpeakMessage>()
             .add_message::<HubInputTextMessage>()
-            .add_message::<WsIncomingMessage>()
+            .add_message::<WsIncomingMessage>();
+    }
+}
+
+impl Plugin for ChannelHubPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(HubMessagesPlugin)
             .add_systems(Startup, spawn_hub_thread)
             .add_systems(Update, pump_hub_into_bevy);
     }
@@ -123,7 +134,51 @@ pub struct HubBroadcast {
     inbound: tokio::sync::broadcast::Sender<EnvelopeBody>,
 }
 
+/// Drains frames published through a detached [`HubBroadcast`], already encoded
+/// as hub wire JSON.
+///
+/// Only used where the process is a hub *peer* rather than the host (Android):
+/// its WebSocket client forwards these. On desktop `spawn_hub_thread` owns the
+/// queue and this type is never constructed.
+#[derive(Resource)]
+pub struct HubOutbox {
+    rx: Receiver<OutboundFrame>,
+    module_name: String,
+}
+
+impl HubOutbox {
+    /// Next queued frame as a wire-ready JSON string, or `None` when empty.
+    pub fn try_recv_json(&self) -> Option<String> {
+        match self.rx.try_recv() {
+            Ok(OutboundFrame::Typed {
+                kind,
+                data,
+                event_id,
+            }) => Some(encode_frame_with_id(&kind, data, &self.module_name, event_id)),
+            Err(_) => None,
+        }
+    }
+}
+
 impl HubBroadcast {
+    /// A [`HubBroadcast`] with no hub server behind it: published frames queue in
+    /// the returned [`HubOutbox`] for a client transport to forward.
+    ///
+    /// `ironclaw_chat` and `zeroclaw_chat` take `Res<HubBroadcast>` un-optioned,
+    /// so a peer-only build must supply one or those systems panic on parameter
+    /// validation.
+    pub fn detached(module_name: impl Into<String>) -> (Self, HubOutbox) {
+        let (tx, rx) = unbounded();
+        let (inbound, _) = tokio::sync::broadcast::channel(64);
+        (
+            Self { tx, inbound },
+            HubOutbox {
+                rx,
+                module_name: module_name.into(),
+            },
+        )
+    }
+
     /// Fan out an arbitrary `{type,data}` envelope to every connected peer.
     pub fn send(&self, kind: impl Into<String>, data: Value) {
         let _ = self.tx.send(OutboundFrame::Typed {

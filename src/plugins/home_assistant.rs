@@ -3,8 +3,8 @@
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, unbounded};
 
-use jarvis_avatar::config::Settings;
-use jarvis_avatar::home_assistant::{self, DiscoverySnapshot};
+use crate::config::Settings;
+use crate::home_assistant::{self, DiscoverySnapshot};
 
 use super::home_assistant_events::HomeAssistantEventsPlugin;
 use super::home_assistant_routing::HomeAssistantRoutingPlugin;
@@ -97,7 +97,7 @@ fn pump_ha_discover_results(
                         cache.last = Some(snap);
                         cache.last_error = None;
                         cache.last_refresh_at_ms =
-                            Some(jarvis_avatar::home_assistant::discovery_timestamp_ms());
+                            Some(crate::home_assistant::discovery_timestamp_ms());
                     }
                     Err(e) => {
                         cache.last_error = Some(e);

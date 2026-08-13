@@ -237,6 +237,24 @@ pub fn resolve_emotions_path(raw: impl AsRef<Path>) -> PathBuf {
     crate::paths::expand_home(raw)
 }
 
+/// Map VRM expression weights to Audio2Face emotion-hint keys.
+pub fn a2f_emotion_hints(weights: &HashMap<String, f32>) -> HashMap<String, f32> {
+    let mut out: HashMap<String, f32> = HashMap::new();
+    for (k, w) in weights {
+        let (key, scale) = match k.as_str() {
+            "happy" => ("joy", 1.0),
+            "angry" => ("anger", 1.0),
+            "sad" => ("sadness", 1.0),
+            "surprised" => ("amazement", 1.0),
+            "relaxed" => ("joy", 0.3),
+            _ => continue,
+        };
+        let entry = out.entry(key.to_string()).or_insert(0.0);
+        *entry = entry.max((w * scale).clamp(0.0, 1.0));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

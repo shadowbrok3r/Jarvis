@@ -2,7 +2,7 @@
 //!
 //! Strategy: spawn a single invisible `LookAtTarget` entity. When the VRM finishes loading we
 //! attach `LookAt::Target(target_entity)`. Incoming [`LookAtRequestMessage`]s move the target
-//! in *local* space (parent = VRM root), so it tracks her regardless of `world_position`.
+//! in *local* space (parent = VRM root), so the target follows the rig regardless of `world_position`.
 //! A `None` target reverts to the mouse cursor.
 //!
 //! `bevy_vrm1` only implements **bone** look-at. VRMs with `lookAt.type: "expression"` hit an
@@ -10,8 +10,12 @@
 
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
+use rand::RngExt;
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
+use crate::plugins::anim_layers::{
+    request_blink, set_look_around_external, smooth_alpha, LayerStackHandle,
+};
 
 use super::vrm_eye_debug::update_vrm_eye_lookat_debug;
 
@@ -29,7 +33,7 @@ impl Plugin for LookAtPlugin {
                 (
                     attach_lookat_to_vrm,
                     handle_look_at_requests,
-                    decay_look_at_to_idle,
+                    drive_gaze_target.after(handle_look_at_requests),
                 ),
             )
             // After VRM look-at, expressions, and the expression propagate step — then sample eye bones.
@@ -45,6 +49,12 @@ impl Plugin for LookAtPlugin {
 #[derive(Component)]
 pub struct LookAtTarget;
 
+/// Approximate head pivot in rig-local space (saccade angles are measured
+/// from here).
+const HEAD_PIVOT: Vec3 = Vec3::new(0.0, 1.45, 0.0);
+/// Resting gaze point when nothing is being tracked.
+const IDLE_GAZE: Vec3 = Vec3::new(0.0, 1.4, 1.0);
+
 #[derive(Resource)]
 pub struct LookAtRuntime {
     target: Option<Entity>,
@@ -52,6 +62,15 @@ pub struct LookAtRuntime {
     target_parented: bool,
     bevy_look_at_enabled: bool,
     active_until: Option<std::time::Instant>,
+    /// Requested gaze goal (rig-local); the saccade model chases it.
+    goal: Vec3,
+    /// Smoothed position written to the `LookAtTarget` entity each frame.
+    current: Vec3,
+    /// Center the micro-saccade jitter orbits during fixation.
+    fixation_center: Vec3,
+    next_microsaccade_in: f32,
+    /// Pending head-follow event: (fires_in_secs, yaw_rad, pitch_rad).
+    head_follow: Option<(f32, f32, f32)>,
 }
 
 impl LookAtRuntime {
@@ -71,6 +90,11 @@ impl Default for LookAtRuntime {
             target_parented: false,
             bevy_look_at_enabled: true,
             active_until: None,
+            goal: IDLE_GAZE,
+            current: IDLE_GAZE,
+            fixation_center: IDLE_GAZE,
+            next_microsaccade_in: 0.6,
+            head_follow: None,
         }
     }
 }
@@ -155,19 +179,36 @@ fn handle_look_at_requests(
     mut runtime: ResMut<LookAtRuntime>,
     mut commands: Commands,
     vrm_q: Query<Entity, With<Vrm>>,
-    mut tf_q: Query<&mut Transform, With<LookAtTarget>>,
 ) {
     for msg in reader.read() {
-        let Some(target_entity) = runtime.target else {
+        if runtime.target.is_none() {
             continue;
-        };
+        }
         match msg.local_target {
             Some(pos) => {
-                if let Ok(mut tf) = tf_q.get_mut(target_entity) {
-                    tf.translation = pos;
+                // Only the goal moves here — the saccade controller in
+                // `drive_gaze_target` chases it. A large shift schedules a
+                // delayed head-follow (eyes lead, head lags).
+                let prev = runtime.goal - HEAD_PIVOT;
+                let next = pos - HEAD_PIVOT;
+                let shift = if prev.length_squared() > 1e-6 && next.length_squared() > 1e-6 {
+                    prev.angle_between(next).to_degrees()
+                } else {
+                    0.0
+                };
+                runtime.goal = pos;
+                if shift > 8.0 {
+                    let mut rng = rand::rng();
+                    let yaw = next.x.atan2(next.z);
+                    let pitch = -next.y.atan2((next.x * next.x + next.z * next.z).sqrt());
+                    runtime.head_follow = Some((
+                        rng.random_range(0.10_f32..0.25),
+                        yaw * 0.6,
+                        pitch * 0.6,
+                    ));
                 }
                 if runtime.bevy_look_at_enabled {
-                    if let Ok(vrm) = vrm_q.single() {
+                    if let (Ok(vrm), Some(target_entity)) = (vrm_q.single(), runtime.target) {
                         commands.entity(vrm).insert(LookAt::Target(target_entity));
                     }
                 }
@@ -186,31 +227,82 @@ fn handle_look_at_requests(
     }
 }
 
-fn decay_look_at_to_idle(
-    mut runtime: ResMut<LookAtRuntime>,
-    settings: Res<Settings>,
+/// Saccade-model gaze mover. Large goal shifts flick with a ~60 ms time
+/// constant (and force a reflex blink past 20°); during fixation the gaze
+/// micro-saccades around the fixation center and slowly drifts back to it.
+/// When tracking expires the whole model eases home to [`IDLE_GAZE`].
+fn drive_gaze_target(
     time: Res<Time>,
+    settings: Res<Settings>,
+    mut runtime: ResMut<LookAtRuntime>,
+    layers: Option<Res<LayerStackHandle>>,
     mut tf_q: Query<&mut Transform, With<LookAtTarget>>,
 ) {
-    let Some(until) = runtime.active_until else {
-        return;
-    };
-    if std::time::Instant::now() < until {
-        return;
-    }
+    let dt = time.delta_secs();
     let Some(target) = runtime.target else {
-        runtime.active_until = None;
         return;
     };
     let Ok(mut tf) = tf_q.get_mut(target) else {
         return;
     };
-    // Ease back to the idle pose (just in front of the rig, at eye height).
-    let idle = Vec3::new(0.0, 1.4, 1.0);
-    let speed = settings.look_at.idle_return_speed.max(0.0);
-    let t = (time.delta_secs() * speed).clamp(0.0, 1.0);
-    tf.translation = tf.translation.lerp(idle, t);
-    if tf.translation.distance(idle) < 0.005 {
-        runtime.active_until = None;
+
+    // Head-follow fires after its reaction lag.
+    if let Some((mut t, yaw, pitch)) = runtime.head_follow.take() {
+        t -= dt;
+        if t <= 0.0 {
+            if let Some(layers) = layers.as_ref() {
+                layers.with_write(|s| set_look_around_external(s, yaw, pitch));
+            }
+        } else {
+            runtime.head_follow = Some((t, yaw, pitch));
+        }
     }
+
+    // Tracking expired: drift home at the configured return speed.
+    if !runtime.gaze_active() {
+        let speed = settings.look_at.idle_return_speed.max(0.1);
+        let a = smooth_alpha(dt, 1.0 / speed);
+        runtime.goal = runtime.goal.lerp(IDLE_GAZE, a);
+        runtime.fixation_center = runtime.fixation_center.lerp(IDLE_GAZE, a);
+    }
+
+    let from = runtime.current - HEAD_PIVOT;
+    let to = runtime.goal - HEAD_PIVOT;
+    let angle = if from.length_squared() > 1e-6 && to.length_squared() > 1e-6 {
+        from.angle_between(to).to_degrees()
+    } else {
+        0.0
+    };
+
+    if angle > 3.0 {
+        // Saccade: fast flick toward the goal; big shifts blink reflexively.
+        if angle > 20.0 {
+            if let Some(layers) = layers.as_ref() {
+                layers.with_write(|s| request_blink(s));
+            }
+        }
+        runtime.fixation_center = runtime.goal;
+        let a = smooth_alpha(dt, 0.06);
+        runtime.current = runtime.current.lerp(runtime.goal, a);
+        let mut rng = rand::rng();
+        runtime.next_microsaccade_in = rng.random_range(0.3_f32..1.2);
+    } else {
+        // Fixation: micro-saccade jitter around the center, slow drift back.
+        runtime.next_microsaccade_in -= dt;
+        if runtime.next_microsaccade_in <= 0.0 {
+            let mut rng = rand::rng();
+            let off = Vec3::new(
+                rng.random_range(-1.0_f32..1.0),
+                rng.random_range(-1.0_f32..1.0),
+                0.0,
+            ) * rng.random_range(0.006_f32..0.02);
+            runtime.goal = runtime.fixation_center + off;
+            runtime.next_microsaccade_in = rng.random_range(0.3_f32..1.2);
+        }
+        let a = smooth_alpha(dt, 0.05);
+        runtime.current = runtime.current.lerp(runtime.goal, a);
+        let drift = smooth_alpha(dt, 1.5);
+        runtime.goal = runtime.goal.lerp(runtime.fixation_center, drift);
+    }
+    tf.translation = runtime.current;
 }

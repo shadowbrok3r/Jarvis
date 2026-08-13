@@ -7,13 +7,10 @@
 //!    panorbit plugin integrates input) the focus is re-pinned so the camera
 //!    doesn't drift if the rig moves a few cm per frame during an animation.
 //!
-//! 2. **Recenter on orbit/zoom** — panning is allowed to drag the focus off
-//!    the VRM so the user can push her into the left/right/top/bottom of the
-//!    viewport for framing, but the instant they start a new orbit (LMB) or
-//!    zoom (scroll) input we snap focus *back* onto the VRM so rotation and
-//!    zoom always pivot around her. This preserves panned framing between
-//!    interactions without losing the "she's always the center of attention"
-//!    invariant the rest of the UX assumes.
+//! 2. **Recenter on orbit/zoom** — panning may drag the focus off the VRM
+//!    for framing; a new orbit (LMB) or zoom (scroll) snaps focus back onto
+//!    the VRM so rotation and zoom pivot around the rig. Panned framing is
+//!    kept between interactions.
 //!
 //! All of this is gated on `Settings::camera.focus_follow_vrm` /
 //! `recenter_on_orbit_zoom`; turning them off restores stock PanOrbitCamera
@@ -28,7 +25,7 @@ use bevy_egui::{EguiContexts, egui};
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
 use bevy_vrm1::prelude::Vrm;
 
-use jarvis_avatar::config::{Settings, msaa_from_settings};
+use crate::config::{Settings, msaa_from_settings};
 
 use crate::plugins::pose_driver::IndexedBones;
 use crate::plugins::rig_editor::RigEditorState;
@@ -74,18 +71,20 @@ impl Plugin for OrbitCameraPlugin {
             .add_systems(
                 PostUpdate,
                 sync_dynamic_camera_clip.after(PanOrbitCameraSystemSet),
-            )
-            // List-click in the Bones tab (in edit mode) is the only producer
-            // of `pending_focus_camera_to_bone` — viewport mesh picks
-            // deliberately don't snap the camera per user request. The
-            // explicit `.after` keeps the viewport-pick system as a stable
-            // ordering anchor inside `Update` even though the pick itself no
-            // longer writes the focus request.
-            .add_systems(
-                Update,
-                focus_camera_on_selected_bone
-                    .after(crate::plugins::debug_ui::rig_editor::rig_editor_viewport_pick),
             );
+
+        // List-click in the Bones tab (edit mode) is the only producer of
+        // `pending_focus_camera_to_bone`. Viewport mesh picks do not snap
+        // the camera. The `.after` keeps the viewport-pick system as a
+        // stable ordering anchor inside `Update`. Android has no rig editor.
+        #[cfg(not(target_os = "android"))]
+        app.add_systems(
+            Update,
+            focus_camera_on_selected_bone
+                .after(crate::plugins::debug_ui::rig_editor::rig_editor_viewport_pick),
+        );
+        #[cfg(target_os = "android")]
+        app.add_systems(Update, focus_camera_on_selected_bone);
     }
 }
 

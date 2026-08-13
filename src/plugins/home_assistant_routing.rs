@@ -5,8 +5,8 @@
 
 use bevy::prelude::*;
 
-use jarvis_avatar::config::HomeAssistantSettings;
-use jarvis_avatar::home_assistant::{
+use crate::config::HomeAssistantSettings;
+use crate::home_assistant::{
     DiscoverySnapshot, HaCameraEntity, HaDetectionSensorEntity, HaMediaEntity,
 };
 

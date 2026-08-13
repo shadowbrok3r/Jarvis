@@ -1,8 +1,6 @@
 pub use jarvis_avatar::egui_theme::STYLE;
 
-mod kimodo;
-mod mcp;
-mod plugins;
+use jarvis_avatar::{kimodo, mcp, plugins};
 
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;

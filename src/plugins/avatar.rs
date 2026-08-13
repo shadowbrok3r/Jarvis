@@ -13,7 +13,7 @@ use bevy::app::AnimationSystems;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 pub struct AvatarPlugin;
 

@@ -16,7 +16,7 @@ use bevy_vrm1::prelude::{MToonMaterial, Vrm};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use jarvis_avatar::config::Settings;
+use crate::config::Settings;
 
 use super::mtoon_overrides::{
     mtoon_mesh_override_key, vrm_model_material_visibility_path,

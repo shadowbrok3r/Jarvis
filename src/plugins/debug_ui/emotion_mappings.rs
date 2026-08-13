@@ -20,9 +20,9 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::egui;
 
-use jarvis_avatar::emotions::EmotionBinding;
-use jarvis_avatar::icons;
-use jarvis_avatar::theme;
+use crate::emotions::EmotionBinding;
+use crate::icons;
+use crate::theme;
 
 use crate::plugins::emotion_map::EmotionMapRes;
 use crate::plugins::pose_library_assets::PoseLibraryAssets;
@@ -266,7 +266,7 @@ fn expression_blend_panel(
 fn mappings_table(
     ui: &mut egui::Ui,
     map: &mut EmotionMapRes,
-    animations: &[jarvis_avatar::pose_library::AnimationMeta],
+    animations: &[crate::pose_library::AnimationMeta],
 ) {
     egui::ScrollArea::vertical()
         .id_salt("emotion_mappings_scroll")
@@ -374,7 +374,7 @@ fn animation_combo(
     ui: &mut egui::Ui,
     label: &str,
     binding: &mut EmotionBinding,
-    animations: &[jarvis_avatar::pose_library::AnimationMeta],
+    animations: &[crate::pose_library::AnimationMeta],
 ) {
     ui.horizontal(|ui| {
         let selected = binding.animation.clone().unwrap_or_default();
